@@ -1,0 +1,701 @@
+; ============================================================================
+; init.asm — Initialization
+; ============================================================================
+;
+; Startup sequence:
+;   1. Load BIOS binary from disk to bank 5 ($50000)
+;   2. Extract 20 decode tables from BIOS to bank 1 ($12000)
+;   3. Clear guest RAM (bank 4)
+;   4. Set up IVT with default handlers
+;   5. Set up BDA (BIOS Data Area)
+;   6. Load floppy image to attic RAM
+;   7. Copy boot sector to $07C00
+;   8. Initialize 8086 registers to power-on state
+;
+; BIOS binary format (8086tiny compatible):
+;   Offset $0000–$00FF: Register file (F000:0000–F000:00FF)
+;   Offset $0100+:      BIOS code (F000:0100+)
+;   Table pointers at register_file + $0102 (word pairs: offset, count)
+;   Actual table data at register_file + pointer_value
+
+; ============================================================================
+; init_tables — Load BIOS and extract decode tables
+; ============================================================================
+init_tables:
+        ; --- TEST MODE (disabled): ---
+        ; jsr test_bios
+        ; rts
+        ; --- Real BIOS load ---
+        ; Close all file channels from autoload
+        ;jsr $FFE7               ; CLALL
+
+        ; Set bank for LOAD (A=data bank, X=filename bank)
+        lda #$05
+        ldx #$00
+        jsr SETBNK
+
+        ; Set file parameters: logical #0, device 8, secondary 0
+        lda #$00
+        ldx #$08
+        ldy #$00
+        jsr SETLFS
+
+        ; Set filename
+        lda #_bios_fname_end-_bios_fname                  ; Filename length
+        ldx #<_bios_fname
+        ldy #>_bios_fname
+        jsr SETNAM
+
+        ; Load BIOS to bank 5 at $0000 (linear $50000 = F000:0000)
+        ; A=$40 = MEGA65 KERNAL: force load to X/Y address, ignore file header
+        lda #$40
+        ldx #$00                ; Load address low
+        ldy #$01                ; Load address high ($0000 in bank 5)
+        jsr LOAD
+
+        pha
+        php
+        lda #$47
+        sta $D02F
+        lda #$53
+        sta $D02F
+        lda #$70
+        tsb $D054
+        plp
+        pla
+
+        bcs _init_load_err
+
+        ; Re-unlock VIC-IV (KERNAL LOAD resets it!)
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031               ; Re-enable 40MHz
+        lda #$80
+        tsb VIC_HOTREGS         ; Re-disable hot registers
+
+        ; --- Extract decode tables ---
+        ; BIOS register file base is at $50000 (F000:0000)
+        ; Table pointers start at $50000 + $102 = $50102
+        ; Each table pointer is a 16-bit offset from register file base
+        ; We have 20 tables, each 256 bytes
+        ;
+        ; Read pointer for table 0:
+        ;   ptr = word at $50102
+        ;   table_data = $50000 + ptr
+        ;   DMA copy 256 bytes to TBL_BASE + (0 * 256)
+
+        ldx #0                  ; Table index (0–19)
+_et_loop:
+        ; Calculate pointer address: $50102 + (X * 2)
+        txa
+        asl                     ; × 2
+        clc
+        adc #$02                ; + $02
+        sta temp_ptr            ; Low byte
+        lda #$01                ; $50102 base → $01xx high byte
+        adc #0
+        sta temp_ptr+1
+        lda #$05                ; Bank 5
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ; Read 16-bit pointer value
+        phx
+        ldz #0
+        lda [temp_ptr],z
+        sta scratch_a           ; ptr_lo
+        ldz #1
+        lda [temp_ptr],z
+        sta scratch_b           ; ptr_hi
+
+        ; Source address = $50000 + ptr
+        ; DMA copy 256 bytes from bank 5 to TBL_BASE + (X * 256)
+        lda scratch_a
+        sta dma_src_lo
+        lda scratch_b
+        sta dma_src_hi
+        lda #$05
+        sta dma_src_bank        ; Source: bank 5
+
+        ; Dest: TBL_BASE + (table_index * 256)
+        ; TBL_BASE = $12000
+        ; Table X: $12000 + X*256 = $120XX where XX = X
+        plx
+        phx
+        lda #$00
+        sta dma_dst_lo          ; Low byte always 0 (256-byte aligned)
+        lda #>TBL_BASE
+        clc
+        txa                     ; Table index
+        adc #>TBL_BASE          ; $20 + X
+        sta dma_dst_hi
+        lda #$01                ; Bank 1
+        sta dma_dst_bank
+
+        ; Count = 256
+        lda #$00
+        sta dma_count_lo
+        lda #$01
+        sta dma_count_hi
+
+        jsr do_dma_chip_copy
+
+        plx
+        inx
+        cpx #20
+        bne _et_loop
+
+        ; Print table load confirmation
+        ldx #0
+-       lda _tbl_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        rts
+
+_init_load_err:
+        ; Re-unlock VIC-IV even on error
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031
+        lda #$80
+        tsb VIC_HOTREGS
+
+        cli                     ; Enable IRQs for CHROUT
+        ldx #0
+-       lda _err_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       jmp *                   ; Halt on error
+
+_bios_fname:
+        .text "bios.bin"
+_bios_fname_end:
+
+_tbl_msg:
+        .text "TABLES LOADED OK", 13, 0
+_err_msg:
+        .text "ERROR LOADING BIOS!", 13, 0
+
+; ============================================================================
+; init_guest_mem — Clear guest RAM and set up IVT/BDA
+; ============================================================================
+init_guest_mem:
+        ; --- Clear bank 4 (64KB guest RAM segment 0) ---
+        ; DMA fill $40000–$4FFFF with $00
+        lda #$00
+        sta dma_src_lo
+        sta dma_src_hi
+        lda #$04
+        sta dma_src_bank
+        lda #$00
+        sta dma_dst_lo
+        sta dma_dst_hi
+        lda #$04
+        sta dma_dst_bank
+        ; For a fill, we use DMA command $03 (fill)
+        jsr _do_fill_bank4
+
+        ; --- Clear attic guest RAM ($10000–$EFFFF mapped at attic) ---
+        ; Clear 14 banks (each 64KB) at attic $8010000–$80EFFFF
+        ldx #$01
+_cga_loop:
+        phx
+        jsr _clear_attic_bank
+        plx
+        inx
+        cpx #$0F
+        bcc _cga_loop
+
+        ; --- Set up IVT (Interrupt Vector Table) ---
+        ; 256 entries × 4 bytes at $40000
+        ; Default: all vectors point to a dummy IRET at F000:FF00
+        ; We'll put an IRET instruction at $5FF00 (F000:FF00)
+        lda #$CF                ; IRET opcode
+        sta temp_ptr
+        lda #$FF
+        sta temp_ptr+1
+        lda #$05                ; Bank 5
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$CF
+        ldz #0
+        sta [temp_ptr],z
+
+        ; --- Write reset vector at F000:FFF0 ($5FFF0) ---
+        ; JMP FAR F000:0100 = EA 00 01 00 F0
+        ; NOTE: [ptr],z only works reliably with Z=0 on MEGA65/XEMU
+        ; So we increment the pointer for each byte
+        lda #$F0
+        sta temp_ptr
+        lda #$FF
+        sta temp_ptr+1
+        lda #$05                ; Bank 5
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ldz #0
+        lda #$EA                ; JMP FAR opcode
+        sta [temp_ptr],z
+        inc temp_ptr            ; $5FFF1
+        lda #$00                ; Offset low = $00
+        sta [temp_ptr],z
+        inc temp_ptr            ; $5FFF2
+        lda #$01                ; Offset high = $01 (F000:0100)
+        sta [temp_ptr],z
+        inc temp_ptr            ; $5FFF3
+        lda #$00                ; Segment low = $00
+        sta [temp_ptr],z
+        inc temp_ptr            ; $5FFF4
+        lda #$F0                ; Segment high = $F0 (F000)
+        sta [temp_ptr],z
+
+        ; Fill IVT: each entry = $FF00 (IP), $F000 (CS)
+        lda #$00
+        sta temp_ptr
+        lda #$00
+        sta temp_ptr+1
+        lda #$04                ; Bank 4
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ldy #0                  ; Counter: 0–255
+_ivt_loop:
+        ; IP low
+        lda #$00
+        ldz #0
+        sta [temp_ptr],z
+        ; IP high
+        lda #$FF
+        ldz #1
+        sta [temp_ptr],z
+        ; CS low
+        lda #$00
+        ldz #2
+        sta [temp_ptr],z
+        ; CS high
+        lda #$F0
+        ldz #3
+        sta [temp_ptr],z
+
+        ; Advance pointer by 4
+        clc
+        lda temp_ptr
+        adc #4
+        sta temp_ptr
+        bcc +
+        inc temp_ptr+1
++
+        iny
+        bne _ivt_loop           ; 256 iterations
+
+        ; --- Set up BDA (BIOS Data Area) at $40400 ---
+        ; Equipment word at $40410: bit 0=floppy present
+        lda #$10
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$21                ; Floppy + 80-col CGA
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Conventional memory size at $40413: 640KB = $0280
+        lda #$13
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$80
+        ldz #0
+        sta [temp_ptr],z
+        lda #$02
+        ldz #1
+        sta [temp_ptr],z
+
+        ; Video mode at $40449: mode 3 (80×25 color text)
+        lda #$49
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$03
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Columns at $4044A: 80
+        lda #$4A
+        sta temp_ptr
+        lda #80
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Active display page at $40462: 0
+        lda #$62
+        sta temp_ptr
+        lda #$00
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Timer tick count at $4046C (NOT $4006C!)
+        ; Starts at 0 — will be incremented by INT 8 handler
+        ; (Address confirmed from debugging sessions)
+
+        ldx #0
+-       lda _mem_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        rts
+
+; --- Helper: Fill bank 4 with zeros ---
+_do_fill_bank4:
+        lda #$00
+        sta dma_dst_lo
+        sta dma_dst_hi
+        lda #$04
+        sta dma_dst_bank
+        lda #$00
+        sta dma_count_lo        ; $0000 = 65536
+        sta dma_count_hi
+        lda #$00                ; Fill with zero
+        jsr do_dma_fill
+        rts
+
+; --- Helper: Clear one 64KB attic bank ---
+; Input: X = bank number ($01–$0E)
+_clear_attic_bank:
+        lda #$00
+        sta dma_dst_lo
+        sta dma_dst_hi
+        sta dma_count_lo        ; $0000 = 65536
+        sta dma_count_hi
+        txa
+        sta dma_dst_bank        ; Bank number (do_dma_fill_attic adds $08)
+        lda #$00                ; Fill with zero
+        jsr do_dma_fill_attic
+        rts
+
+_mem_msg:
+        .text "GUEST MEM INITIALIZED", 13, 0
+
+; ============================================================================
+; init_regs — Set 8086 registers to power-on defaults
+; ============================================================================
+init_regs:
+        ; Clear all registers
+        ldx #27
+        lda #0
+-       sta regs,x
+        dex
+        bpl -
+
+        ; Clear all flags
+        ldx #8
+-       sta flags,x
+        dex
+        bpl -
+
+        ; Clear decoder state
+        ldx #$41
+-       sta $30,x
+        dex
+        bpl -
+
+        ; Power-on register values (8086 reset vector)
+        ; CS = $F000, IP = $FFF0 (reset vector at F000:FFF0)
+        lda #$00
+        sta reg_cs
+        lda #$F0
+        sta reg_cs+1
+        lda #$F0
+        sta reg_ip
+        lda #$FF
+        sta reg_ip+1
+
+        ; SS = $F000, SP = $F000 (BIOS convention)
+        lda #$00
+        sta reg_ss
+        lda #$F0
+        sta reg_ss+1
+        lda #$00
+        sta reg_sp86
+        lda #$F0
+        sta reg_sp86+1
+
+        ; DS = ES = $0000
+        lda #0
+        sta reg_ds
+        sta reg_ds+1
+        sta reg_es
+        sta reg_es+1
+
+        ; Mark all segment bases as dirty
+        lda #1
+        sta cs_dirty
+        sta ss_dirty
+        sta ds_dirty
+
+        ; Clear counters
+        lda #0
+        sta inst_counter
+        sta inst_counter+1
+        sta tick_counter
+        sta tick_counter+1
+        sta unimpl_count
+        sta unimpl_last
+        sta seg_override_en
+        sta rep_override_en
+        sta int8_asap
+        sta trap_flag_var
+
+        ldx #0
+-       lda _reg_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        rts
+
+_reg_msg:
+        .text "REGS SET TO POWER-ON STATE", 13, 0
+
+; ============================================================================
+; load_floppy — Load floppy disk image to attic RAM
+; ============================================================================
+; load_floppy — Load floppy disk image to attic RAM via Hyppo
+; ============================================================================
+; Uses Hyppo trap $2E (setname) and $3E (loadfile_attic).
+; Loads fd.img from SD card FAT32 to attic at FLOPPY_ATTIC ($8100000).
+;
+; Hyppo setname: Y = high byte of page-aligned filename, A=$2E, sta $D640, clv
+; Hyppo loadfile_attic: X=addr low, Y=addr mid, Z=addr high byte
+;   Address is 28-bit: $08ZZYYXX (the $08 prefix means attic)
+;   For FLOPPY_ATTIC=$8100000: ZZ=$10, YY=$00, XX=$00
+;
+; On success: floppy_loaded = 1
+; On failure: floppy_loaded = 0, prints error, emulation continues without floppy
+
+load_floppy:
+        lda #$00
+        sta floppy_loaded
+
+        ; Print loading message
+        ldx #0
+-       lda _msg_floppy,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+
+        ; Set Hyppo filename to "fd.img"
+        ; Filename must be on a page boundary, null-terminated
+        ldy #>floppy_fname_page
+        lda #$2E                ; hyppo_setname
+        sta $D640
+        clv
+        bcc _floppy_no_file
+
+        ; Load file to attic RAM at FLOPPY_ATTIC ($8100000)
+        ; Hyppo 28-bit address: $08ZZYYXX
+        ; $8100000 -> ZZ=$10, YY=$00, XX=$00
+        ldz #$10                ; High byte of attic address
+        ldy #$00                ; Mid byte
+        ldx #$00                ; Low byte
+        lda #$3E                ; hyppo_loadfile_attic
+        sta $D640
+        clv
+
+        ; Re-unlock VIC-IV (Hyppo trap may reset it)
+        pha
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031               ; Re-enable 40MHz
+        lda #$80
+        tsb VIC_HOTREGS         ; Re-disable hot registers
+        pla
+
+        bcc _floppy_load_fail
+
+        ; Success!
+        lda #$01
+        sta floppy_loaded
+
+        ldx #0
+-       lda _msg_floppy_ok,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       rts
+
+_floppy_no_file:
+        ldx #0
+-       lda _msg_floppy_nf,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       rts
+
+_floppy_load_fail:
+        ldx #0
+-       lda _msg_floppy_err,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       rts
+
+_msg_floppy:
+        .text "loading fd.img from sd card...", 0
+_msg_floppy_ok:
+        .text "ok", 13, 0
+_msg_floppy_nf:
+        .text "not found (place fd.img on sd card)", 13, 0
+_msg_floppy_err:
+        .text "load failed", 13, 0
+
+; ============================================================================
+; test_bios — Install a small test program in place of real BIOS
+; ============================================================================
+; Copies hand-assembled 8086 machine code to F000:0100 (bank 5 $50100)
+; and writes the reset vector JMP FAR at F000:FFF0 ($5FFF0).
+; Also initializes DS=ES=0000 in init_regs.
+;
+; Test results are written to 0000:7F00 ($47F00 in bank 4).
+; Expected results after successful run:
+;   $47F00 = $34  (MOV AX,imm — AL stored)
+;   $47F01 = $78  (MOV BX,imm — BL stored)
+;   $47F02 = $AA  (JMP SHORT success marker)
+;   $47F03 = $01  (XOR+INC result)
+;   $47F04 = $55  (PUSH/POP result)
+;   $47F05 = $CC  (CALL/RET success marker)
+;   $47F06 = $DD  (CMP+JZ success marker)
+;
+test_bios:
+        ; Set up pointer to F000:0100 = bank 5 $0100 = linear $50100
+        lda #$00
+        sta temp_ptr
+        lda #$01
+        sta temp_ptr+1
+        lda #$05
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ; Copy test program bytes
+        ldx #0
+        ldz #0
+_tb_copy:
+        lda _test_program,x
+        sta [temp_ptr],z
+        ; Increment pointer (can't use Z>0 reliably)
+        inc temp_ptr
+        bne +
+        inc temp_ptr+1
++       inx
+        cpx #_test_program_end - _test_program
+        bne _tb_copy
+
+        ; Write reset vector at F000:FFF0 ($5FFF0)
+        ; JMP FAR F000:0100 = EA 00 01 00 F0
+        lda #$F0
+        sta temp_ptr
+        lda #$FF
+        sta temp_ptr+1
+        lda #$05
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ldz #0
+        lda #$EA
+        sta [temp_ptr],z
+        inc temp_ptr
+        lda #$00                ; Offset low
+        sta [temp_ptr],z
+        inc temp_ptr
+        lda #$01                ; Offset high
+        sta [temp_ptr],z
+        inc temp_ptr
+        lda #$00                ; Segment low
+        sta [temp_ptr],z
+        inc temp_ptr
+        lda #$F0                ; Segment high
+        sta [temp_ptr],z
+
+        ; Print confirmation
+        ldx #0
+-       lda _tb_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        rts
+
+_tb_msg:
+        .text "TEST BIOS INSTALLED", 13, 0
+
+; 8086 machine code for the test program at F000:0100
+; Assumes DS=0000 (segment 0 = bank 4)
+; Assumes SS:SP = F000:F000
+_test_program:
+        ; Print '?' prompt
+        .byte $B4, $0E          ; MOV AH, $0E
+        .byte $B0, $3F          ; MOV AL, '?'
+        .byte $CD, $10          ; INT $10
+
+        ; Wait for keypress via INT 16h AH=00
+        .byte $B4, $00          ; MOV AH, $00
+        .byte $CD, $16          ; INT $16 → AL = key
+
+        ; Save key to [7F00]
+        .byte $A2, $00, $7F     ; MOV [7F00], AL
+
+        ; Echo the key
+        .byte $B4, $0E          ; MOV AH, $0E (AL still has key)
+        .byte $CD, $10          ; INT $10
+
+        ; Print CR
+        .byte $B0, $0D          ; MOV AL, $0D
+        .byte $CD, $10          ; INT $10
+
+        ; Success marker
+        .byte $B0, $EE          ; MOV AL, $EE
+        .byte $A2, $01, $7F     ; MOV [7F01], AL → $EE
+
+        ; Done
+        .byte $F4               ; HLT
+        .byte $EB, $FE          ; JMP $
+_test_program_end:
+
+; Page-aligned filename for Hyppo setname
+; Must be at a $xx00 address, null-terminated
+        .align 256
+floppy_fname_page:
+        .text "fd.img", 0
+        ; Pad rest of page is automatic from .align

@@ -1,0 +1,4 @@
+*.lbl
+*.lst
+.claude/*
+target/emu8086.d81
