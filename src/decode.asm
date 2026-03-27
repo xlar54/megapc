@@ -42,30 +42,49 @@ main_loop:
         jsr compute_ds_base
 
 ml_next:
-        ; --- Check for INT 8 (timer tick) ---
-        inc tick_counter
-        bne _ml_no_tick
-        inc tick_counter+1
-        lda tick_counter+1
-        and #$03                ; Fire every ~1024 instructions
-        bne _ml_no_tick
-        lda flag_if
-        beq _ml_no_tick         ; Only if interrupts enabled
-        lda #1
-        sta int8_asap
-_ml_no_tick:
+        ; --- Save previous raw_opcode to fixed RAM ---
+        lda raw_opcode
+        sta $8F00
 
-        ; --- Fire pending INT 8 ---
-        lda int8_asap
-        beq _ml_no_int8
-        lda flag_if
-        beq _ml_no_int8
-        lda #0
-        sta int8_asap
-        lda #8                  ; INT 8
-        jsr do_sw_interrupt
-        jsr compute_cs_base     ; CS may have changed
-_ml_no_int8:
+        ; Trap CS in CGA range ($B000-$BFFF)
+        lda reg_cs+1
+        cmp #$B0
+        bcc _ml_cs_ok
+        cmp #$C0
+        bcs _ml_cs_ok
+        ; Bad CS in CGA range! Save state and halt
+        lda reg_cs
+        sta $8FC0
+        lda reg_cs+1
+        sta $8FC1
+        lda reg_ip
+        sta $8FC2
+        lda reg_ip+1
+        sta $8FC3
+        lda $8F00               ; prev opcode
+        sta $8FC4
+        lda reg_sp86
+        sta $8FC5
+        lda reg_sp86+1
+        sta $8FC6
+        lda reg_ss
+        sta $8FC7
+        lda reg_ss+1
+        sta $8FC8
+        lda reg_ds
+        sta $8FC9
+        lda reg_ds+1
+        sta $8FCA
+        lda reg_es
+        sta $8FCB
+        lda reg_es+1
+        sta $8FCC
+        jmp *                   ; Halt silently
+_ml_cs_ok:
+
+        ; --- INT 8 timer tick DISABLED during boot ---
+        ; (The push/IRET cycle through attic-backed stack can corrupt flags)
+        ; TODO: re-enable after boot when stack is in chip RAM
 
         ; --- Code cache check (for attic-backed CS segments) ---
         lda cs_in_attic
@@ -86,7 +105,9 @@ _ml_no_int8:
         beq _ml_code_hit
 
 _ml_code_miss:
-        ; Flush data cache, then DMA the new code page from attic
+        ; Flush data cache before loading code from attic
+        ; (Required: data cache may have dirty pages for this attic region
+        ;  that haven't been written back yet, e.g. from REP MOVSW boot copy)
         jsr cache_flush_all
 
         ; Compute full linear address of current CS:IP
@@ -449,10 +470,10 @@ opcode_jump_tbl:
         .word op_lea           ; $33 — LEA (8D)
         .word op_int_ret       ; $34 — IRET (CF) — separate from RET
         ; Pad to 50 entries for safety
-        .word op_nop_unimpl    ; $35
-        .word op_nop_unimpl    ; $36
-        .word op_nop_unimpl    ; $37
-        .word op_nop_unimpl    ; $38
+        .word op_pusha          ; $35 — PUSHA (60)
+        .word op_popa           ; $36 — POPA (61)
+        .word op_push_imm16     ; $37 — PUSH imm16 (68)
+        .word op_push_imm8      ; $38 — PUSH imm8 (6A)
         .word op_nop_unimpl    ; $39
         .word op_nop_unimpl    ; $3A
 

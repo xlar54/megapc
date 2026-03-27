@@ -90,11 +90,11 @@ _dm_byte_reg:
 _dm_high_byte:
         ; High byte registers (4–7): AH, CH, DH, BH = regs+1, +3, +5, +7
         sec
-        sbc #4
-        asl
+        sbc #4                  ; 0..3
+        asl                     ; 0,2,4,6
         clc
-        adc #regs
-        inc a                   ; +1 for high byte
+        adc #regs               ; regs+0, +2, +4, +6
+        inc a                   ; regs+1, +3, +5, +7 = AH, CH, DH, BH
         sta rm_addr
 _dm_byte_done:
         lda #0
@@ -346,7 +346,17 @@ write_rm8:
         pla
         ldz #0
         sta [rm_addr],z
-        rts
+        ; Mark cache dirty if rm_addr is in cache buffer
+        lda rm_addr+2
+        bne +
+        ; Derive cache line from rm_addr+1: line = (rm_addr+1 - >CACHE_BUF)
+        lda rm_addr+1
+        sec
+        sbc #>CACHE_BUF
+        tax
+        lda #1
+        sta cache_dirty,x
++       rts
 _wrm8_reg:
         pla
         ldx rm_addr
@@ -364,7 +374,16 @@ write_rm16:
         lda op_result+1
         ldz #1
         sta [rm_addr],z
-        rts
+        ; Mark cache dirty if rm_addr is in cache buffer
+        lda rm_addr+2
+        bne +
+        lda rm_addr+1
+        sec
+        sbc #>CACHE_BUF
+        tax
+        lda #1
+        sta cache_dirty,x
++       rts
 _wrm16_reg:
         ldx rm_addr
         lda op_result

@@ -95,7 +95,13 @@ linear_to_chip:
         cmp #$0F
         bcs _ltc_f_seg
         cmp #$0B
-        beq _ltc_cga            ; $B8000 range → CGA buffer in bank 4
+        bne _ltc_not_b
+        ; Check if $B8000-$BFFFF (CGA) or $B0000-$B7FFF (MDA/other)
+        lda temp32+1
+        cmp #$80
+        bcs _ltc_cga            ; $B8xxx+ → CGA buffer
+        bra _ltc_attic          ; $B0xxx-$B7xxx → treat as attic
+_ltc_not_b:
         cmp #$01
         bcs _ltc_attic
 
@@ -173,7 +179,12 @@ mem_write8:
         lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        rts
+        ; Mark cache dirty if we wrote to cache buffer (bank 0, $92xx-$95xx)
+        lda temp_ptr+2
+        bne +                   ; Not bank 0 = not cache
+        lda #1
+        sta cache_dirty,x       ; X = cache line from cache_access
++       rts
 
 ; ============================================================================
 ; mem_read16 — Read 16-bit word from segment:offset
@@ -209,7 +220,12 @@ mem_write16:
         lda op_result+1
         ldz #1
         sta [temp_ptr],z
-        rts
+        ; Mark cache dirty if we wrote to cache buffer
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty,x       ; X = cache line from cache_access
++       rts
 
 ; ============================================================================
 ; Instruction Fetch Helpers

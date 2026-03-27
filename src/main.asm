@@ -98,7 +98,7 @@ ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
 FLOPPY_ATTIC    = $8100000      ; Floppy image in attic (1.44MB at +1MB)
 
 ; --- Cache constants ---
-CACHE_LINES     = 4             ; Number of cache lines
+CACHE_LINES     = 2             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line
 CACHE_BUF       = $9200         ; Cache buffer in bank 0 (4×256 = 1KB)
 CODE_CACHE_BUF  = $9000         ; 256-byte code cache buffer
@@ -157,6 +157,8 @@ entry:
         lda #$00
         sta $D020
         sta $D021
+        lda #5                  ; White text
+        jsr CHROUT
 
         ; Switch to lowercase character set
         lda #$0E
@@ -198,6 +200,17 @@ banner_msg:
 
 ready_msg:
         .text "READY. STARTING EMULATION...", 13, 0
+
+; ============================================================================
+; emulator_exit — Return to MEGA65 prompt
+; ============================================================================
+emulator_exit:
+        cli
+        lda #$0D
+        jsr CHROUT
+        lda #$00
+        sta $D610
+        rts                     ; Return to BASIC/monitor
 
 ; ============================================================================
 ; Include Modules

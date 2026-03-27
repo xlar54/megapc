@@ -86,7 +86,7 @@ _ca_hit:
         bcc +
         inc temp_ptr+1
 +
-        ; Mark dirty unconditionally (we don't know if caller will read or write)
+        ; Mark dirty (conservative)
         lda #1
         sta cache_dirty,x
         rts
@@ -223,6 +223,23 @@ cache_flush_all:
 +       inx
         cpx #CACHE_LINES
         bne -
+        rts
+
+; ============================================================================
+; cache_invalidate_all — Discard all cache lines WITHOUT flushing to attic
+; ============================================================================
+; Use when attic has been written directly (e.g. DMA) and cached data is stale.
+; This avoids the coherence bug where flushing would overwrite fresh attic data.
+;
+cache_invalidate_all:
+        ldx #CACHE_LINES-1
+-       lda #CACHE_INVALID
+        sta cache_page_hi,x
+        sta cache_page_lo,x
+        lda #0
+        sta cache_dirty,x
+        dex
+        bpl -
         rts
 
 ; ============================================================================

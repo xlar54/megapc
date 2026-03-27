@@ -123,8 +123,12 @@ int10_handler:
 
 _i10_teletype:
         ; AH=0E: Teletype output — write character AL to screen
-        ; Write to CGA buffer at current cursor position
-        ; For quick testing: also output via CHROUT
+        ; Count 'F' prints at $8FE0 (tracks how many times "FreeDOS" is printed)
+        lda reg_al
+        cmp #$46                ; 'F'
+        bne +
+        inc $8FE0
++
         lda reg_al
         cmp #$0D
         beq _i10t_cr
@@ -146,7 +150,11 @@ _i10t_cr:
         sei
         rts
 _i10t_lf:
-        ; LF — move down (no PETSCII equivalent needed after CR)
+        ; LF — output newline via CHROUT
+        lda #$11                ; PETSCII cursor down
+        cli
+        jsr CHROUT
+        sei
         rts
 
 _i10_set_mode:

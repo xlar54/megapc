@@ -8,6 +8,8 @@
 ; INT pushes FLAGS, CS, IP then jumps to IVT[n].
 ; IVT is at 8086 linear $00000 (bank 4 $40000), 256 entries × 4 bytes.
 
+STACK_TEMP      = $8FE8         ; 2 bytes: temp buffer for attic stack DMA
+
 ; ============================================================================
 ; push_word — Push 16-bit value onto 8086 stack
 ; ============================================================================
@@ -24,20 +26,17 @@ push_word:
         sbc #0
         sta reg_sp86+1
 
-        ; Write word to SS:SP
-        ; Address = ss_base + SP
-        clc
-        lda ss_base
-        adc reg_sp86
-        sta temp_ptr
-        lda ss_base+1
-        adc reg_sp86+1
-        sta temp_ptr+1
-        lda ss_base+2
-        adc #0
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        ; Write word to SS:SP using cache path
+        lda reg_sp86
+        sta temp32
+        lda reg_sp86+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        ldx #SEG_SS_OFS
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
 
         lda op_result
         ldz #0
@@ -45,7 +44,12 @@ push_word:
         lda op_result+1
         ldz #1
         sta [temp_ptr],z
-        rts
+        ; Mark cache dirty
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty,x
++       rts
 
 ; ============================================================================
 ; pop_word — Pop 16-bit value from 8086 stack
@@ -54,19 +58,17 @@ push_word:
 ; Modifies: SP
 ;
 pop_word:
-        ; Read word from SS:SP
-        clc
-        lda ss_base
-        adc reg_sp86
-        sta temp_ptr
-        lda ss_base+1
-        adc reg_sp86+1
-        sta temp_ptr+1
-        lda ss_base+2
-        adc #0
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        ; Read word from SS:SP using cache path
+        lda reg_sp86
+        sta temp32
+        lda reg_sp86+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        ldx #SEG_SS_OFS
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
 
         ldz #0
         lda [temp_ptr],z

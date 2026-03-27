@@ -664,35 +664,153 @@ _tb_msg:
 ; Assumes DS=0000 (segment 0 = bank 4)
 ; Assumes SS:SP = F000:F000
 _test_program:
-        ; Print '?' prompt
-        .byte $B4, $0E          ; MOV AH, $0E
-        .byte $B0, $3F          ; MOV AL, '?'
-        .byte $CD, $10          ; INT $10
+        ; === Test 8: Code and stack on SAME attic page ===
+        ; This mirrors the boot sector: CS=SS=$1FE0
+        ; Code at 1FE0:7Cxx (page $27C), stack at 1FE0:7Bxx (page $27B)
+        ; BPB data also at 1FE0:7Cxx (page $27C) — shared with code!
 
-        ; Wait for keypress via INT 16h AH=00
-        .byte $B4, $00          ; MOV AH, $00
-        .byte $CD, $16          ; INT $16 → AL = key
+        .byte $B4, $0E
+        .byte $B0, $54          ; 'T'
+        .byte $CD, $10
 
-        ; Save key to [7F00]
-        .byte $A2, $00, $7F     ; MOV [7F00], AL
+        ; --- Set up: Write code + data at segment $2000 ---
+        ; Code at 2000:0100 (page $201) 
+        ; Stack at 2000:0080 (page $200) — SAME as below
+        ; Data at 2000:0050 (page $200)
+        ; 
+        ; Actually, for overlap: put code AND data on the SAME page
+        ; Code at 2000:0000-003F  (page $200)
+        ; Data at 2000:0040-007F  (page $200, same page as code!)
+        ; Stack at 2000:00F0      (page $200, same page!)
 
-        ; Echo the key
-        .byte $B4, $0E          ; MOV AH, $0E (AL still has key)
-        .byte $CD, $10          ; INT $10
+        .byte $B8, $00, $20     ; MOV AX, $2000
+        .byte $8E, $D8          ; MOV DS, AX
 
-        ; Print CR
-        .byte $B0, $0D          ; MOV AL, $0D
-        .byte $CD, $10          ; INT $10
+        ; Write subroutine at 2000:0000
+        ; It reads data from [0050] (same page), then RETFs
+        ;   A1 50 00    MOV AX, [0050]  (read data from same page as code)
+        ;   A1 52 00    MOV AX, [0052]
+        ;   A1 54 00    MOV AX, [0054]
+        ;   CB          RETF
+        .byte $B0, $A1
+        .byte $A2, $00, $00
+        .byte $B0, $50
+        .byte $A2, $01, $00
+        .byte $B0, $00
+        .byte $A2, $02, $00
+        .byte $B0, $A1
+        .byte $A2, $03, $00
+        .byte $B0, $52
+        .byte $A2, $04, $00
+        .byte $B0, $00
+        .byte $A2, $05, $00
+        .byte $B0, $A1
+        .byte $A2, $06, $00
+        .byte $B0, $54
+        .byte $A2, $07, $00
+        .byte $B0, $00
+        .byte $A2, $08, $00
+        .byte $B0, $CB
+        .byte $A2, $09, $00
 
-        ; Success marker
-        .byte $B0, $EE          ; MOV AL, $EE
-        .byte $A2, $01, $7F     ; MOV [7F01], AL → $EE
+        ; Write some data at 2000:0050
+        .byte $C7, $06, $50, $00, $AA, $55  ; MOV WORD [0050], $55AA
+        .byte $C7, $06, $52, $00, $BB, $66  ; MOV WORD [0052], $66BB
+        .byte $C7, $06, $54, $00, $CC, $77  ; MOV WORD [0054], $77CC
 
-        ; Done
-        .byte $F4               ; HLT
-        .byte $EB, $FE          ; JMP $
+        ; Restore DS=0
+        .byte $B8, $00, $00
+        .byte $8E, $D8
+
+        ; Set SS:SP to 2000:00F0 (same page $200 as code and data!)
+        .byte $B8, $00, $20
+        .byte $8E, $D0          ; SS=$2000
+        .byte $BC, $F0, $00     ; SP=$00F0
+
+        ; Single CALL FAR
+        .byte $9A, $00, $00, $00, $20
+        ; Success
+        .byte $B0, $59          ; 'Y'
+        .byte $B4, $0E
+        .byte $B0, $38          ; '8'
+        .byte $CD, $10
+
+        ; Loop 50 times
+        .byte $B9, $32, $00     ; MOV CX, 50
+        ; CALL FAR 2000:0000
+        .byte $9A, $00, $00, $00, $20
+        .byte $E2, $F9          ; LOOP back 7 bytes
+
+        .byte $B4, $0E
+        .byte $B0, $39          ; '9'
+        .byte $CD, $10
+
+        ; === Test with code on page N, stack on page N ===
+        ; Even more extreme: put code at 2000:0080, stack at 2000:00F0
+        ; Both on page $200. RETF return address is ON the code page.
+        
+        ; Write RETF at 2000:0080
+        .byte $B8, $00, $20
+        .byte $8E, $D8
+        .byte $B0, $CB
+        .byte $A2, $80, $00     ; [2000:0080] = CB (RETF)
+        .byte $B8, $00, $00
+        .byte $8E, $D8
+
+        ; SP=$00F0 on page $200, code at $0080 also page $200
+        ; Return address pushed at SP-4=$00EC, also page $200
+        .byte $B9, $32, $00     ; MOV CX, 50
+        .byte $9A, $80, $00, $00, $20  ; CALL FAR 2000:0080
+        .byte $E2, $F9          ; LOOP
+
+        .byte $B4, $0E
+        .byte $B0, $41          ; 'A'
+        .byte $CD, $10
+
+        ; === Test with boot-sector-like layout ===
+        ; CS=SS=$1FE0, code at 7C00+, stack near 7B00+
+        ; Write RETF at 1FE0:7C00
+        .byte $B8, $E0, $1F     ; MOV AX, $1FE0
+        .byte $8E, $D8          ; DS=$1FE0
+        .byte $B0, $CB
+        .byte $A2, $00, $7C     ; [1FE0:7C00] = CB (RETF)
+        .byte $B8, $00, $00
+        .byte $8E, $D8
+
+        ; Set SS=$1FE0, SP=$7BA8 (matching boot sector)
+        .byte $B8, $E0, $1F
+        .byte $8E, $D0          ; SS=$1FE0
+        .byte $BC, $A8, $7B     ; SP=$7BA8
+
+        ; CALL FAR 1FE0:7C00
+        .byte $9A, $00, $7C, $E0, $1F
+        ; If we get here, success
+        .byte $B4, $0E
+        .byte $B0, $42          ; 'B'
+        .byte $CD, $10
+
+        ; Loop 50 times
+        .byte $B9, $32, $00
+        .byte $9A, $00, $7C, $E0, $1F
+        .byte $E2, $F9
+
+        .byte $B4, $0E
+        .byte $B0, $43          ; 'C'
+        .byte $CD, $10
+
+        ; Print OK
+        .byte $B4, $0E
+        .byte $B0, $0D
+        .byte $CD, $10
+        .byte $B0, $4F
+        .byte $CD, $10
+        .byte $B0, $4B
+        .byte $CD, $10
+
+        .byte $F4
+        .byte $EB, $FE
+
 _test_program_end:
-
 ; Page-aligned filename for Hyppo setname
 ; Must be at a $xx00 address, null-terminated
         .align 256

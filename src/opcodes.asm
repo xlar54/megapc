@@ -200,6 +200,12 @@ _mri_high:
 ; $02 — INC/DEC r16 (40–4F)
 ; ============================================================================
 op_inc_dec_r16:
+        ; Count DEC DI specifically ($4F)
+        lda raw_opcode
+        cmp #$4F
+        bne +
+        inc $8F16
++
         lda raw_opcode
         and #$07
         asl
@@ -516,10 +522,28 @@ _mrm_wb_hi:
 ; ============================================================================
 op_ret:
         ; extra_field determines type:
-        ; C3: near RET (extra_field from table)
+        ; C3: near RET
         ; C2: near RET imm16 (pop extra bytes)
         ; CB: far RETF
         ; CA: far RETF imm16
+
+        ; For C2 and CA: fetch the imm16 BEFORE popping (IP still valid)
+        lda raw_opcode
+        cmp #$C2
+        beq _ret_fetch_imm
+        cmp #$CA
+        beq _ret_fetch_imm
+        lda #$00
+        sta i_data0             ; No extra SP adjustment
+        sta i_data0+1
+        bra _ret_do_pop
+_ret_fetch_imm:
+        jsr fetch_word          ; A = low, scratch_a = high
+        sta i_data0
+        lda scratch_a
+        sta i_data0+1
+
+_ret_do_pop:
         jsr pop_word            ; Pop IP
         lda op_result
         sta reg_ip
@@ -533,18 +557,15 @@ op_ret:
         cmp #$CB
         beq _ret_far
 
-        ; Near return — check for imm16 (C2)
-        lda raw_opcode
-        cmp #$C2
-        bne _ret_done
-        ; Pop extra bytes: fetch imm16, add to SP
-        jsr fetch_word
+        ; Near return — apply imm16 SP adjustment (0 for C3)
         clc
-        adc reg_sp86
+        lda reg_sp86
+        adc i_data0
         sta reg_sp86
-        lda scratch_a
-        adc reg_sp86+1
+        lda reg_sp86+1
+        adc i_data0+1
         sta reg_sp86+1
+
 _ret_done:
         lda #1
         sta cs_dirty
@@ -562,15 +583,15 @@ _ret_far:
         lda #1
         sta cs_dirty
 
-        ; Check for imm16 (CA)
-        lda raw_opcode
-        cmp #$CA
-        bne _retf_done
-        ; This is tricky: the imm16 was BEFORE the RET in the instruction stream
-        ; Actually for RETF imm16, the immediate is part of the instruction
-        ; But we already popped IP... the immediate was fetched during decode
-        ; TODO: handle RETF imm16 properly
-_retf_done:
+        ; Apply imm16 SP adjustment (0 for CB)
+        clc
+        lda reg_sp86
+        adc i_data0
+        sta reg_sp86
+        lda reg_sp86+1
+        adc i_data0+1
+        sta reg_sp86+1
+
         jsr compute_cs_base
         jsr update_opcode_ptr
         jmp opcode_done
@@ -884,6 +905,145 @@ op_cmc:
 ; ============================================================================
 ; $31 — NOP / Unimplemented
 ; ============================================================================
+; ============================================================================
+; op_pusha — PUSHA (opcode $60): Push all general registers
+; ============================================================================
+; Push order: AX, CX, DX, BX, original SP, BP, SI, DI
+op_pusha:
+        ; Save original SP in dedicated location (push_word uses temp32!)
+        lda reg_sp86
+        sta pusha_saved_sp
+        lda reg_sp86+1
+        sta pusha_saved_sp+1
+
+        ; Push AX
+        lda reg_ax
+        sta op_result
+        lda reg_ax+1
+        sta op_result+1
+        jsr push_word
+        ; Push CX
+        lda reg_cx
+        sta op_result
+        lda reg_cx+1
+        sta op_result+1
+        jsr push_word
+        ; Push DX
+        lda reg_dx
+        sta op_result
+        lda reg_dx+1
+        sta op_result+1
+        jsr push_word
+        ; Push BX
+        lda reg_bx
+        sta op_result
+        lda reg_bx+1
+        sta op_result+1
+        jsr push_word
+        ; Push original SP (saved before pushes)
+        lda pusha_saved_sp
+        sta op_result
+        lda pusha_saved_sp+1
+        sta op_result+1
+        jsr push_word
+        ; Push BP
+        lda reg_bp86
+        sta op_result
+        lda reg_bp86+1
+        sta op_result+1
+        jsr push_word
+        ; Push SI
+        lda reg_si
+        sta op_result
+        lda reg_si+1
+        sta op_result+1
+        jsr push_word
+        ; Push DI
+        lda reg_di
+        sta op_result
+        lda reg_di+1
+        sta op_result+1
+        jsr push_word
+        jmp opcode_done
+
+; ============================================================================
+; op_popa — POPA (opcode $61): Pop all general registers
+; ============================================================================
+; Pop order: DI, SI, BP, (skip SP), BX, DX, CX, AX
+op_popa:
+        ; Pop DI
+        jsr pop_word
+        lda op_result
+        sta reg_di
+        lda op_result+1
+        sta reg_di+1
+        ; Pop SI
+        jsr pop_word
+        lda op_result
+        sta reg_si
+        lda op_result+1
+        sta reg_si+1
+        ; Pop BP
+        jsr pop_word
+        lda op_result
+        sta reg_bp86
+        lda op_result+1
+        sta reg_bp86+1
+        ; Skip SP (pop but discard)
+        jsr pop_word
+        ; Pop BX
+        jsr pop_word
+        lda op_result
+        sta reg_bx
+        lda op_result+1
+        sta reg_bx+1
+        ; Pop DX
+        jsr pop_word
+        lda op_result
+        sta reg_dx
+        lda op_result+1
+        sta reg_dx+1
+        ; Pop CX
+        jsr pop_word
+        lda op_result
+        sta reg_cx
+        lda op_result+1
+        sta reg_cx+1
+        ; Pop AX
+        jsr pop_word
+        lda op_result
+        sta reg_ax
+        lda op_result+1
+        sta reg_ax+1
+        jmp opcode_done
+
+; ============================================================================
+; op_push_imm16 — PUSH imm16 (opcode $68)
+; ============================================================================
+op_push_imm16:
+        jsr fetch_word          ; A = low, scratch_a = high
+        sta op_result
+        lda scratch_a
+        sta op_result+1
+        jsr push_word
+        jmp opcode_done
+
+; ============================================================================
+; op_push_imm8 — PUSH imm8 sign-extended (opcode $6A)
+; ============================================================================
+op_push_imm8:
+        jsr fetch_byte
+        sta op_result
+        ; Sign-extend
+        lda #$00
+        ldx op_result
+        cpx #$80
+        bcc +
+        lda #$FF
++       sta op_result+1
+        jsr push_word
+        jmp opcode_done
+
 op_nop_unimpl:
         inc unimpl_count
         lda raw_opcode
@@ -1138,12 +1298,18 @@ _mam_store:
         lda reg_ax+1
         ldz #1
         sta [temp_ptr],z
-        jmp opcode_done
+        bra _mam_mark_dirty
 _mam_store_byte:
         lda reg_al
         ldz #0
         sta [temp_ptr],z
-        jmp opcode_done
+_mam_mark_dirty:
+        ; Mark cache dirty if we wrote to cache buffer
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty,x       ; X = cache line from cache_access
++       jmp opcode_done
 
 ; ============================================================================
 ; $0C — Shift/Rotate (C0/C1/D0–D3)
@@ -2280,6 +2446,22 @@ op_int3:
 ; ============================================================================
 op_int_imm:
         jsr fetch_byte
+        ; === DEBUG: write INT number to $8F10 counter, $8F11 last INT ===
+        inc $8F10
+        sta $8F11
+        ; Count INT 13h calls specifically (all AH values)
+        cmp #$13
+        bne _ii_not13_count
+        inc $8F12               ; total INT 13h calls
+        lda reg_ah
+        sta $8F13               ; last AH for INT 13h
+_ii_not13_count:
+        lda $8F11               ; reload INT number
+        ; Count INT 0 (divide error)
+        cmp #$00
+        bne _ii_not0_count
+        inc $8F14
+_ii_not0_count:
         ; Check for emulator hooks
         cmp #$13
         beq _ii_int13
@@ -2287,6 +2469,8 @@ op_int_imm:
         beq _ii_int10
         cmp #$16
         beq _ii_int16
+        cmp #$19
+        beq _ii_int19
         ; Default: execute via IVT
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -2294,7 +2478,6 @@ op_int_imm:
 
 _ii_int13:
         ; INT 13h — disk services (intercepted)
-        inc $D020               ; Debug: flash border on INT 13h
         jsr int13_handler
         jmp opcode_done
 
@@ -2307,6 +2490,22 @@ _ii_int16:
         ; INT 16h — keyboard services
         jsr int16_handler
         jmp opcode_done
+
+_ii_int19:
+        ; INT 19h — reboot. Print message and halt.
+        cli
+        lda #$0D
+        jsr CHROUT
+        ldx #0
+-       lda _reboot_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bra -
++       sei
+        jmp *                   ; Halt
+_reboot_msg:
+        .text "INT 19H: REBOOT REQUESTED", $0D, 0
 
 ; ============================================================================
 ; $28 — INTO (CE)
@@ -2656,6 +2855,32 @@ _idr_jmp_far_ind:
         ldz #1
         lda [rm_addr],z
         sta reg_cs+1
+        ; DEBUG: trap if CS is not 0060 or 1FE0 or F000 or 0000
+        lda reg_cs+1
+        cmp #$00
+        beq _jfi_ok
+        cmp #$1F
+        beq _jfi_ok
+        cmp #$F0
+        beq _jfi_ok
+        ; Unexpected CS! Store for debugging
+        lda reg_cs
+        sta $8FC0
+        lda reg_cs+1
+        sta $8FC1
+        lda i_data0
+        sta $8FC2
+        lda i_data0+1
+        sta $8FC3
+        lda rm_addr
+        sta $8FC4
+        lda rm_addr+1
+        sta $8FC5
+        lda rm_addr+2
+        sta $8FC6
+        lda rm_addr+3
+        sta $8FC7
+_jfi_ok:
         lda i_data0
         sta reg_ip
         lda i_data0+1
@@ -2840,59 +3065,158 @@ _gf_div:
         lda op_source
         ora op_source+1
         beq _gfd_div0
-        ; DX:AX / r/m16 using hardware divider
+        ; DX:AX / r/m16 using software division
         lda reg_ax
-        sta $D768
+        sta div_dividend
         lda reg_ax+1
-        sta $D769
+        sta div_dividend+1
         lda reg_dx
-        sta $D76A
+        sta div_dividend+2
         lda reg_dx+1
-        sta $D76B
+        sta div_dividend+3
         lda op_source
-        sta $D774
+        sta div_divisor
         lda op_source+1
-        sta $D775
-        lda #0
-        sta $D776
-        sta $D777
-        ; Result: quotient at $D768, remainder at $D76C
-        lda $D768
+        sta div_divisor+1
+        jsr div_32by16
+        ; Check overflow: quotient must fit in 16 bits
+        lda div_quotient+2
+        ora div_quotient+3
+        bne _gfd_div0           ; Overflow → INT 0
+        lda div_quotient
         sta reg_ax
-        lda $D769
+        lda div_quotient+1
         sta reg_ax+1
-        lda $D76C
+        lda div_remainder
         sta reg_dx
-        lda $D76D
+        lda div_remainder+1
         sta reg_dx+1
         jmp opcode_done
 _gfd_byte:
+        inc $8F15               ; Count byte DIV operations
         jsr read_rm8
         beq _gfd_div0
-        sta $D774
+        sta div_divisor
         lda #0
-        sta $D775
-        sta $D776
-        sta $D777
+        sta div_divisor+1
         lda reg_al
-        sta $D768
+        sta div_dividend
         lda reg_ah
-        sta $D769
+        sta div_dividend+1
         lda #0
-        sta $D76A
-        sta $D76B
-        lda $D768
+        sta div_dividend+2
+        sta div_dividend+3
+        jsr div_16by8
+        ; Check overflow: quotient must fit in 8 bits
+        lda div_quotient+1
+        bne _gfd_div0
+        lda div_quotient
         sta reg_al              ; Quotient
-        lda $D76C
+        lda div_remainder
         sta reg_ah              ; Remainder
         jmp opcode_done
 _gfd_div0:
+        inc $8F14               ; Count divide-by-zero errors
         lda #0
         jsr do_sw_interrupt     ; INT 0
         jsr compute_cs_base
         jmp opcode_done
 
+; Also track: at _gf_div entry, count byte DIV operations
+_gf_div_count = $8F15           ; counter for DIV BYTE ops
+
 _gf_idiv:
         ; Signed divide — simplified: treat as unsigned for now
         ; TODO: proper sign handling
         jmp _gf_div
+
+; ============================================================================
+; Software Division Routines
+; ============================================================================
+
+; 16-bit / 8-bit unsigned division (shift-and-subtract)
+; Input:  div_dividend (16-bit in +0/+1), div_divisor (8-bit in +0)
+; Output: div_quotient (16-bit), div_remainder (8-bit)
+div_16by8:
+        lda #$00
+        sta div_quotient
+        sta div_quotient+1
+        sta div_remainder
+        sta div_remainder+1
+
+        ldx #16
+_d8_loop:
+        ; Shift dividend left, MSB into remainder
+        asl div_dividend
+        rol div_dividend+1
+        rol div_remainder
+
+        ; Shift quotient left
+        asl div_quotient
+        rol div_quotient+1
+
+        ; Try subtract divisor from remainder
+        lda div_remainder
+        sec
+        sbc div_divisor
+        bcc _d8_no_sub
+
+        ; Fits: store new remainder, set quotient bit
+        sta div_remainder
+        lda div_quotient
+        ora #$01
+        sta div_quotient
+
+_d8_no_sub:
+        dex
+        bne _d8_loop
+        rts
+
+; 32-bit / 16-bit unsigned division (shift-and-subtract)
+; Input:  div_dividend (32-bit), div_divisor (16-bit)
+; Output: div_quotient (32-bit), div_remainder (16-bit)
+div_32by16:
+        lda #$00
+        sta div_quotient
+        sta div_quotient+1
+        sta div_quotient+2
+        sta div_quotient+3
+        sta div_remainder
+        sta div_remainder+1
+
+        ldx #32
+_d16_loop:
+        ; Shift dividend left, MSB into remainder
+        asl div_dividend
+        rol div_dividend+1
+        rol div_dividend+2
+        rol div_dividend+3
+        rol div_remainder
+        rol div_remainder+1
+
+        ; Shift quotient left
+        asl div_quotient
+        rol div_quotient+1
+        rol div_quotient+2
+        rol div_quotient+3
+
+        ; Try subtract: remainder - divisor
+        sec
+        lda div_remainder
+        sbc div_divisor
+        tay                     ; Save tentative low byte
+        lda div_remainder+1
+        sbc div_divisor+1
+        bcc _d16_no_sub
+
+        ; Fits
+        sta div_remainder+1
+        sty div_remainder
+        lda div_quotient
+        ora #$01
+        sta div_quotient
+
+_d16_no_sub:
+        dex
+        bne _d16_loop
+        rts

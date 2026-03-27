@@ -70,9 +70,9 @@ opcode_dispatch:
         .byte   $03,  $03,  $03,  $03,  $03,  $03,  $03,  $03  ; PUSH AX–DI
         .byte   $04,  $04,  $04,  $04,  $04,  $04,  $04,  $04  ; POP AX–DI
 
-        ; 6x row: 80186 extensions — unimplemented
-        .byte   $31,  $31,  $31,  $31,  $31,  $31,  $31,  $31  ; PUSHA, POPA, BOUND, etc.
-        .byte   $31,  $31,  $31,  $31,  $31,  $31,  $31,  $31  ; PUSH imm, IMUL imm, etc.
+        ; 6x row: 80186 extensions
+        .byte   $35,  $36,  $31,  $31,  $31,  $31,  $31,  $31  ; PUSHA, POPA, rest unimpl
+        .byte   $37,  $31,  $38,  $31,  $31,  $31,  $31,  $31  ; PUSH imm16, ?, PUSH imm8, rest unimpl
 
         ; 7x row: Conditional jumps
         .byte   $00,  $00,  $00,  $00,  $00,  $00,  $00,  $00  ; JO–JA

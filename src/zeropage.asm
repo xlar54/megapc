@@ -143,4 +143,17 @@ cs_in_attic     = $B7           ; Non-zero = CS is in attic range, use code cach
 cs_base_linear  = $B8           ; 4 bytes: 20-bit unmapped CS linear base ($B8-$BB)
 code_cache_pg_lo = $BC          ; Cached code page identifier (bits 8-15 of linear addr)
 code_cache_pg_hi = $BD          ; Cached code page identifier (bits 16-19 of linear addr)
-; $B7–$BF available
+
+; Floppy byte offset for multi-sector disk reads (3 bytes)
+floppy_ofs      = $BE           ; 3 bytes: $BE-$C0
+
+; PUSHA saved SP (2 bytes) — in non-ZP RAM to avoid KERNAL conflicts
+pusha_saved_sp  = $8F00         ; 2 bytes
+
+; Division working variables — in non-ZP RAM to avoid KERNAL conflicts
+; (KERNAL uses $C1-$CE for screen/keyboard during CHROUT)
+div_dividend    = $8F02         ; 4 bytes
+div_divisor     = $8F06         ; 2 bytes
+div_quotient    = $8F08         ; 4 bytes
+div_remainder   = $8F0C         ; 2 bytes
+; $B7–$BF availableSTACK_TEMP      = $8FE8         ; 2 bytes: temp buffer for attic stack DMA

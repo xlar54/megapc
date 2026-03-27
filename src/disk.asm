@@ -94,6 +94,8 @@ _i13_no_drive:
 _i13_read:
         lda reg_dl
         bne _i13_no_drive       ; Only drive 0
+        ; Debug: count reads
+        inc $8F20
 
         ; Check if floppy image is loaded
         lda floppy_loaded
@@ -102,6 +104,7 @@ _i13_read:
         ; Save sector count
         lda reg_al
         sta disk_sect_left      ; sector count (safe from seg_ofs_to_linear)
+        sta $8FF0               ; save original count for return (safe location)
 
         ; Compute LBA from CHS
         ; LBA = (C × 2 + H) × 18 + (S - 1)
@@ -180,33 +183,26 @@ _i13_read:
         ; Source: FLOPPY_ATTIC + byte_offset
         ; Dest: ES:BX mapped to chip RAM
 
+        ; Save floppy byte offset to dedicated variable (temp32 gets clobbered)
+        lda temp32
+        sta floppy_ofs
+        lda temp32+1
+        sta floppy_ofs+1
+        lda temp32+2
+        sta floppy_ofs+2
+
         ; For each sector:
 _i13_read_loop:
         lda disk_sect_left      ; Sectors remaining
         beq _i13_read_done
 
         ; DMA 512 bytes from floppy attic to SECTOR_BUF
-        ; Then copy SECTOR_BUF to ES:BX
-        ; (Two-step because ES:BX might be in attic too)
-
-        ; Source: attic at FLOPPY_ATTIC + temp32
-        ; FLOPPY_ATTIC = $8100000. DMA enhanced MB = $81, offset within MB = temp32
-        ; do_dma_from_attic adds $08 to dma_src_bank for the MB option,
-        ; so we need dma_src_bank to contain the sub-MB offset byte
-        ; Full address: $8100000 + temp32
-        ;   MB byte for DMA option = ($8100000 >> 20) = $81
-        ;   But do_dma_from_attic does: MB = dma_src_bank | $08
-        ;   So we need: dma_src_bank bits represent offset within the $08xx MB range
-        ;   $8100000 = $08 MB base + $10 sub-MB + $0000 offset
-        ;   DMA src_bank = high nibble of the 20-bit address within attic
-        ;   Attic offset = $100000 + temp32
-        ;   src_bank (bits 16-19) = (($100000 + temp32) >> 16)
-        lda temp32+2
+        lda floppy_ofs+2
         ora #$10                ; Add $100000 offset (FLOPPY_ATTIC - $8000000 = $100000)
         sta dma_src_bank
-        lda temp32
+        lda floppy_ofs
         sta dma_src_lo
-        lda temp32+1
+        lda floppy_ofs+1
         sta dma_src_hi
 
         ; Dest: SECTOR_BUF in chip RAM
@@ -226,8 +222,7 @@ _i13_read_loop:
         jsr do_dma_from_attic
 
         ; Now copy SECTOR_BUF to ES:BX in guest memory
-        ; TODO: handle ES:BX in attic range
-        ; For now: compute ES:BX as linear address, map to chip
+        ; First compute the linear address of ES:BX
         lda reg_bx
         sta temp32
         lda reg_bx+1
@@ -239,10 +234,17 @@ _i13_read_loop:
         lda #0
         sta seg_override_en     ; Don't use override for this
         jsr seg_ofs_to_linear
-        jsr linear_to_chip      ; temp_ptr = destination
+        ; temp32 now has 20-bit linear address
 
-        ; Copy 512 bytes from SECTOR_BUF to temp_ptr
-        ; Use DMA for this (chip to chip)
+        ; Check if destination is in chip RAM or attic
+        lda temp32+2
+        beq _i13_dest_chip      ; $0xxxx = bank 4 chip RAM
+        cmp #$0F
+        beq _i13_dest_chip      ; $Fxxxx = bank 5 chip RAM (unlikely but safe)
+        bra _i13_dest_attic     ; $1xxxx-$Exxxx = attic
+_i13_dest_chip:
+        ; Destination is in chip RAM — safe to DMA 512 bytes directly
+        jsr linear_to_chip
         lda #<SECTOR_BUF
         sta dma_src_lo
         lda #>SECTOR_BUF
@@ -260,6 +262,35 @@ _i13_read_loop:
         lda #$02
         sta dma_count_hi
         jsr do_dma_chip_copy
+        bra _i13_advance
+
+_i13_dest_attic:
+        ; Destination is in attic — DMA 512 bytes directly to attic
+        ; temp32 has 20-bit linear address
+        ; Attic address = $8000000 + temp32 (20-bit)
+        ; DMA dest: MB = $80, bank = temp32+2, addr = temp32+1:temp32
+        lda #<SECTOR_BUF
+        sta dma_src_lo
+        lda #>SECTOR_BUF
+        sta dma_src_hi
+        lda #$00
+        sta dma_src_bank
+        lda temp32
+        sta dma_dst_lo
+        lda temp32+1
+        sta dma_dst_hi
+        lda temp32+2
+        sta dma_dst_bank
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_to_attic
+        ; INVALIDATE (not flush!) cache lines — the attic has fresh data,
+        ; flushing would overwrite it with stale cached data
+        jsr cache_invalidate_all
+
+_i13_advance:
 
         ; Advance BX by 512
         clc
@@ -272,24 +303,44 @@ _i13_read_loop:
 
         ; Advance floppy offset by 512
         clc
-        lda temp32
+        lda floppy_ofs
         adc #$00
-        sta temp32
-        lda temp32+1
+        sta floppy_ofs
+        lda floppy_ofs+1
         adc #$02
-        sta temp32+1
-        lda temp32+2
+        sta floppy_ofs+1
+        lda floppy_ofs+2
         adc #0
-        sta temp32+2
+        sta floppy_ofs+2
 
         dec disk_sect_left
         jmp _i13_read_loop
 
 _i13_read_done:
         ; Return success
-        ; AH = 0 (no error), AL = sectors read (already set by caller)
         lda #$00
         sta reg_ah
+        lda $8FF0               ; restore original sector count
+        sta reg_al              ; AL = sectors actually read
         lda #0
         sta flag_cf
+        ; Debug: save state snapshot at $8FA0 (overwritten each call)
+        lda reg_es
+        sta $8FA0
+        lda reg_es+1
+        sta $8FA1
+        lda reg_bx
+        sta $8FA2
+        lda reg_bx+1
+        sta $8FA3
+        lda reg_di
+        sta $8FA4
+        lda reg_di+1
+        sta $8FA5
+        lda reg_ds
+        sta $8FA6
+        lda reg_ds+1
+        sta $8FA7
+        lda flag_cf
+        sta $8FA8
         rts

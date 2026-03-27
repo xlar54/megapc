@@ -75,22 +75,16 @@ _adc_go:
 
 ; --- SBB ---
 alu_sbb:
+        ; SBB: dest - source - CF
+        ; 6502 SBC: dest - source - (1-carry)
+        ; So: 8086 CF=0 (no borrow) → 6502 SEC (carry=1)
+        ;     8086 CF=1 (borrow)    → 6502 CLC (carry=0)
         lda flag_cf
-        beq _sbb_no_c
+        bne _sbb_clc
         sec
-        bra _sbb_go
-_sbb_no_c:
-        clc
-_sbb_go:
-        ; SBB: dest - source - CF (note: 6502 SEC means no borrow)
-        ; We need to invert the carry sense
-        lda flag_cf
-        eor #1
-        beq _sbb_sec
-        clc
         bra _sbb_do
-_sbb_sec:
-        sec
+_sbb_clc:
+        clc
 _sbb_do:
         lda op_dest
         sbc op_source
@@ -98,6 +92,7 @@ _sbb_do:
         lda op_dest+1
         sbc op_source+1
         sta op_result+1
+        jmp set_flags_arith
         jmp set_flags_arith
 
 ; --- AND ---
@@ -156,12 +151,8 @@ alu_cmp:
 ; set_flags_logic — Set ZF, SF, PF after logic (CF, OF already cleared)
 
 set_flags_arith:
-        ; CF: check carry/borrow
-        ; For ADD/ADC: carry out of MSB
-        ; For SUB/SBB/CMP: borrow (inverted carry)
-        ; We use the 6502 carry flag state from the last operation
-        ; Actually, we need to compute this from the operands
         jsr compute_cf
+set_flags_arith_no_cf:
         jsr compute_af
         ; Fall through to common flags
 
