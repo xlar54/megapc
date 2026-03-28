@@ -108,6 +108,7 @@ CACHE_INVALID   = $FF           ; Sentinel: no page cached
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9600         ; 512-byte sector buffer
+ZP_SHADOW       = $8E00         ; Shadow page for ZP during CHROUT/GETIN
 CGA_ROWS        = 25
 CGA_COLS        = 80
 
@@ -190,6 +191,14 @@ entry:
 +
         ; Now disable IRQs for emulation loop
         sei
+
+        ; Re-init cache & segment state — KERNAL IRQs during CHROUT
+        ; may have trashed ZP $90–$9F
+        jsr init_cache
+        lda #1
+        sta cs_dirty
+        sta ss_dirty
+        sta ds_dirty
 
         ; Enter main emulation loop
         jmp main_loop

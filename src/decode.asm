@@ -82,9 +82,47 @@ ml_next:
         jmp *                   ; Halt silently
 _ml_cs_ok:
 
-        ; --- INT 8 timer tick DISABLED during boot ---
-        ; (The push/IRET cycle through attic-backed stack can corrupt flags)
-        ; TODO: re-enable after boot when stack is in chip RAM
+        ; --- Timer tick (INT 8 emulation) ---
+        ; Every ~1024 instructions: increment BDA timer counter and
+        ; deliver INT 8 only if FreeDOS has hooked it (IVT[8] != F000:FF00)
+        inc tick_counter
+        bne _ml_no_tick
+        inc tick_counter+1
+        lda tick_counter+1
+        and #$03
+        bne _ml_no_tick
+
+        ; Increment 32-bit BDA tick counter at $0040:006C (bank 4 $4046C)
+        lda #$6C
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04                ; Bank 4
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z
+        clc
+        adc #1
+        sta [temp_ptr],z
+        bcc +
+        ldz #1
+        lda [temp_ptr],z
+        adc #0
+        sta [temp_ptr],z
+        bcc +
+        ldz #2
+        lda [temp_ptr],z
+        adc #0
+        sta [temp_ptr],z
+        bcc +
+        ldz #3
+        lda [temp_ptr],z
+        adc #0
+        sta [temp_ptr],z
++
+_ml_no_tick:
 
         ; --- Code cache check (for attic-backed CS segments) ---
         lda cs_in_attic

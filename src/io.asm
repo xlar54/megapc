@@ -138,23 +138,16 @@ _i10_teletype:
         ; TODO: track cursor position in BDA and write to CGA
         ; For now: just CHROUT
         jsr ascii_to_pet
-        ; CHROUT needs IRQs enabled
-        cli
-        jsr CHROUT
-        sei
+        jsr chrout_safe
         rts
 _i10t_cr:
         lda #$0D
-        cli
-        jsr CHROUT
-        sei
+        jsr chrout_safe
         rts
 _i10t_lf:
         ; LF — output newline via CHROUT
         lda #$11                ; PETSCII cursor down
-        cli
-        jsr CHROUT
-        sei
+        jsr chrout_safe
         rts
 
 _i10_set_mode:
@@ -195,9 +188,7 @@ _i10_write_char_attr:
         ; Simplified: just write char via teletype
         lda reg_al
         jsr ascii_to_pet
-        cli
-        jsr CHROUT
-        sei
+        jsr chrout_safe
         rts
 
 _i10_get_mode:
@@ -229,12 +220,16 @@ int16_handler:
         rts                     ; Unknown function, ignore
 
 _i16_wait_key:
-        ; AH=00: Wait for key. Loop calling GETIN until we get something.
-        cli                     ; Enable IRQs for KERNAL
+        ; AH=00: Wait for key.
+        ; Save ZP once, keep IRQs on for the entire wait so KERNAL
+        ; keyboard scanner has time to process keypresses.
+        jsr save_zp
+        cli
 -       jsr GETIN
         cmp #$00
         beq -                   ; No key yet, keep polling
         sei
+        jsr restore_zp
         ; A = PETSCII key code. Convert to ASCII and store.
         jsr pet_to_ascii
         sta reg_al
@@ -245,9 +240,7 @@ _i16_wait_key:
 
 _i16_check_key:
         ; AH=01: Non-blocking check. Use GETIN once.
-        cli
-        jsr GETIN
-        sei
+        jsr getin_safe
         cmp #$00
         beq _i16_no_key
         ; Key available
@@ -291,4 +284,61 @@ _pta_other:
         ; Numbers and common symbols are same in PETSCII and ASCII
         ; for the $20-$3F range
 _pta_done:
+        rts
+
+; ============================================================================
+; chrout_safe — Call CHROUT without KERNAL IRQ trashing our ZP
+; ============================================================================
+; Input: A = PETSCII character to output
+; Saves ZP $90–$C0 before enabling IRQs, restores after.
+;
+chrout_safe:
+        pha                     ; Save character
+        jsr save_zp
+        pla                     ; Recover character
+        cli
+        jsr CHROUT
+        sei
+        jsr restore_zp
+        rts
+
+; ============================================================================
+; getin_safe — Call GETIN without KERNAL IRQ trashing our ZP
+; ============================================================================
+; Output: A = PETSCII key (0 = no key)
+;
+getin_safe:
+        jsr save_zp
+        cli
+        jsr GETIN
+        sei
+        pha                     ; Save key
+        jsr restore_zp
+        pla                     ; Recover key
+        rts
+
+; --- Save/restore ZP $70–$C0 (81 bytes) to shadow buffer ---
+; Covers 32-bit pointers ($70-$8F) AND cache/scratch state ($90-$C0)
+; Both ranges can be trashed by KERNAL IRQ during CLI
+save_zp:
+        ldx #0
+-       lda $70,x
+        sta ZP_SHADOW,x
+        inx
+        cpx #$51                ; $C0 - $70 + 1 = 81 = $51
+        bne -
+        rts
+
+restore_zp:
+        ldx #0
+-       lda ZP_SHADOW,x
+        sta $70,x
+        inx
+        cpx #$51
+        bne -
+        ; Force recomputation of cached segment bases
+        lda #1
+        sta cs_dirty
+        sta ss_dirty
+        sta ds_dirty
         rts

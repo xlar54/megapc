@@ -40,6 +40,7 @@ alu_add:
         lda op_dest+1
         adc op_source+1
         sta op_result+1
+        jsr capture_cf_add
         jmp set_flags_arith
 
 ; --- OR ---
@@ -71,6 +72,7 @@ _adc_go:
         lda op_dest+1
         adc op_source+1
         sta op_result+1
+        jsr capture_cf_add
         jmp set_flags_arith
 
 ; --- SBB ---
@@ -92,7 +94,7 @@ _sbb_do:
         lda op_dest+1
         sbc op_source+1
         sta op_result+1
-        jmp set_flags_arith
+        jsr capture_cf_sub
         jmp set_flags_arith
 
 ; --- AND ---
@@ -117,6 +119,7 @@ alu_sub:
         lda op_dest+1
         sbc op_source+1
         sta op_result+1
+        jsr capture_cf_sub
         jmp set_flags_arith
 
 ; --- XOR ---
@@ -141,6 +144,7 @@ alu_cmp:
         lda op_dest+1
         sbc op_source+1
         sta op_result+1
+        jsr capture_cf_sub
         jmp set_flags_arith
         ; Note: CMP caller must NOT write result back
 
@@ -151,7 +155,7 @@ alu_cmp:
 ; set_flags_logic — Set ZF, SF, PF after logic (CF, OF already cleared)
 
 set_flags_arith:
-        jsr compute_cf
+        ; CF already captured by ALU routine via capture_cf_add/sub
 set_flags_arith_no_cf:
         jsr compute_af
         ; Fall through to common flags
@@ -203,7 +207,46 @@ _sf_sf_store:
 
         rts
 
-; compute_cf — Compute carry flag from arithmetic result
+; capture_cf_add — Capture CF after addition (ADD/ADC)
+; For word: 6502 carry = 8086 carry
+; For byte: op_result+1 holds the carry (high bytes were 0)
+; IMPORTANT: call immediately after the adc — 6502 carry is fragile
+capture_cf_add:
+        lda i_w
+        bne _cca_word
+        ; Byte: carry overflowed into op_result+1
+        lda op_result+1
+        beq +
+        lda #1
++       sta flag_cf
+        rts
+_cca_word:
+        ; Word: 6502 carry is the 16-bit carry
+        lda #0
+        rol
+        sta flag_cf
+        rts
+
+; capture_cf_sub — Capture CF after subtraction (SUB/SBB/CMP)
+; 6502 carry = inverted borrow; 8086 CF = borrow
+capture_cf_sub:
+        lda i_w
+        bne _ccs_word
+        ; Byte: borrow overflowed into op_result+1 ($FF = borrow, $00 = no borrow)
+        lda op_result+1
+        beq +
+        lda #1
++       sta flag_cf
+        rts
+_ccs_word:
+        ; Word: 6502 carry is inverted borrow
+        lda #0
+        rol
+        eor #1
+        sta flag_cf
+        rts
+
+; compute_cf — LEGACY (no longer called from set_flags_arith)
 compute_cf:
         ; For ADD: CF = result < source (unsigned overflow)
         ; For SUB/CMP: CF = dest < source (unsigned borrow)

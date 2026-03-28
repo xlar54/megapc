@@ -106,6 +106,12 @@ _i13_read:
         sta disk_sect_left      ; sector count (safe from seg_ofs_to_linear)
         sta $8FF0               ; save original count for return (safe location)
 
+        ; Save BX — real BIOS preserves BX, caller advances it
+        lda reg_bx
+        sta $8FF2
+        lda reg_bx+1
+        sta $8FF3
+
         ; Compute LBA from CHS
         ; LBA = (C × 2 + H) × 18 + (S - 1)
         ; C = CH + (CL >> 6 << 8) — for floppy, CL bits 6–7 are always 0
@@ -197,8 +203,9 @@ _i13_read_loop:
         beq _i13_read_done
 
         ; DMA 512 bytes from floppy attic to SECTOR_BUF
+        clc
         lda floppy_ofs+2
-        ora #$10                ; Add $100000 offset (FLOPPY_ATTIC - $8000000 = $100000)
+        adc #$10                ; Add $100000 offset (FLOPPY_ATTIC - $8000000 = $100000)
         sta dma_src_bank
         lda floppy_ofs
         sta dma_src_lo
@@ -317,6 +324,11 @@ _i13_advance:
         jmp _i13_read_loop
 
 _i13_read_done:
+        ; Restore BX — real BIOS preserves BX
+        lda $8FF2
+        sta reg_bx
+        lda $8FF3
+        sta reg_bx+1
         ; Return success
         lda #$00
         sta reg_ah

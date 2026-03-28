@@ -34,17 +34,56 @@ push_word:
         lda #0
         sta temp32+2
         sta temp32+3
+
+        lda seg_override_en     ; Save & disable override — stack always uses SS
+        pha
+        lda #0
+        sta seg_override_en
+
         ldx #SEG_SS_OFS
         jsr seg_ofs_to_linear
+
+        pla
+        sta seg_override_en     ; Restore override
+
         jsr linear_to_chip
 
         lda op_result
         ldz #0
         sta [temp_ptr],z
+
+        ; Check if high byte crosses cache page boundary
+        lda temp32
+        cmp #$FF
+        beq _pushw_cross
+
+        ; Same page: write high byte directly
         lda op_result+1
         ldz #1
         sta [temp_ptr],z
         ; Mark cache dirty
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty,x
++       rts
+
+_pushw_cross:
+        ; Mark first page dirty
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty,x
++
+        ; Page boundary: increment linear address and re-resolve
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark second page dirty
         lda temp_ptr+2
         bne +
         lda #1
@@ -66,17 +105,46 @@ pop_word:
         lda #0
         sta temp32+2
         sta temp32+3
+
+        lda seg_override_en     ; Save & disable override — stack always uses SS
+        pha
+        lda #0
+        sta seg_override_en
+
         ldx #SEG_SS_OFS
         jsr seg_ofs_to_linear
+
+        pla
+        sta seg_override_en     ; Restore override
+
         jsr linear_to_chip
 
         ldz #0
         lda [temp_ptr],z
         sta op_result
+
+        ; Check if high byte crosses cache page boundary
+        lda temp32
+        cmp #$FF
+        beq _popw_cross
+
+        ; Same page: read high byte directly
         ldz #1
         lda [temp_ptr],z
         sta op_result+1
+        bra _popw_sp
 
+_popw_cross:
+        ; Page boundary: increment linear address and re-resolve
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
+        sta op_result+1
+
+_popw_sp:
         ; Increment SP by 2
         clc
         lda reg_sp86

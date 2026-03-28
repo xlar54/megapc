@@ -227,7 +227,7 @@ op_inc_dec_r16:
         cmp #$48
         bcs _idr_dec
 
-        ; INC
+        ; INC (extra_field = 0 from table → ADD logic for OF)
         clc
         lda op_dest
         adc #1
@@ -243,6 +243,7 @@ op_inc_dec_r16:
         jmp opcode_done
 
 _idr_dec:
+        ; extra_field = 5 from table → SUB logic for OF
         sec
         lda op_dest
         sbc #1
@@ -1133,6 +1134,8 @@ op_alu_imm_rm:
         ; 81: word r/m, imm16
         ; 82: byte r/m, imm8 (same as 80)
         ; 83: word r/m, sign-extended imm8
+        lda i_reg
+        sta extra_field         ; Set extra_field for compute_cf / compute_of_arith
         lda i_w
         beq _airm_byte
 
@@ -1729,7 +1732,7 @@ op_movs_stos:
         sta scratch_a           ; High byte
 
 _movs_byte:
-        ; Write to ES:DI
+        ; Write to ES:DI (must force ES regardless of segment override)
         lda reg_di
         sta temp32
         lda reg_di+1
@@ -1737,6 +1740,10 @@ _movs_byte:
         lda scratch_d
         sta scratch_d           ; Value to write (byte mode)
         ldx #SEG_ES_OFS
+        lda seg_override_en
+        pha
+        lda #0
+        sta seg_override_en     ; Force ES for destination
         lda i_w
         beq _movs_wr_byte
         ; Word mode: save high byte on stack before write (seg_ofs_to_linear trashes scratch_a)
@@ -1758,10 +1765,15 @@ _movs_byte:
         sta scratch_d
         ldx #SEG_ES_OFS
         jsr mem_write8
+        pla
+        sta seg_override_en     ; Restore override for REP
         bra _movs_upd
 
 _movs_wr_byte:
         jsr mem_write8
+
+        pla
+        sta seg_override_en     ; Restore override for REP
 
 _movs_upd:
         ; Update SI and DI based on DF
@@ -1812,7 +1824,7 @@ _ms_stos_lods:
         lda raw_opcode
         cmp #$AC
         bcs _ms_lods
-        ; AA/AB: STOS — store AL/AX to ES:DI
+        ; AA/AB: STOS — store AL/AX to ES:DI (must force ES)
         lda reg_di
         sta temp32
         lda reg_di+1
@@ -1820,9 +1832,13 @@ _ms_stos_lods:
         lda reg_al
         sta scratch_d
         ldx #SEG_ES_OFS
+        lda seg_override_en
+        pha
+        lda #0
+        sta seg_override_en     ; Force ES for destination
         jsr mem_write8
         lda i_w
-        beq _stos_upd
+        beq _stos_restore
         ; Word: store AH to next byte
         lda reg_di
         clc
@@ -1835,6 +1851,9 @@ _ms_stos_lods:
         sta scratch_d
         ldx #SEG_ES_OFS
         jsr mem_write8
+_stos_restore:
+        pla
+        sta seg_override_en     ; Restore override for REP
 _stos_upd:
         ; Update DI
         lda #1
@@ -1924,30 +1943,46 @@ op_cmps_scas:
         lda reg_si+1
         sta temp32+1
         ldx #SEG_DS_OFS
+        lda i_w
+        bne _cmps_word_src
         jsr mem_read8
         sta op_dest
         lda #0
         sta op_dest+1
-        ; Read ES:DI
+        bra _cmps_read_dst
+_cmps_word_src:
+        jsr mem_read16
+        lda op_source
+        sta op_dest
+        lda op_source+1
+        sta op_dest+1
+_cmps_read_dst:
+        ; Read ES:DI (must force ES regardless of segment override)
         lda reg_di
         sta temp32
         lda reg_di+1
         sta temp32+1
         ldx #SEG_ES_OFS
+        lda seg_override_en
+        pha
         lda #0
         sta seg_override_en     ; Force ES
+        lda i_w
+        bne _cmps_word_dst
         jsr mem_read8
         sta op_source
         lda #0
         sta op_source+1
-
-        lda i_w
-        beq _cmps_do
-        ; Word: read second bytes
-        ; TODO: full word compare (simplified: byte only for now)
+        bra _cmps_dst_done
+_cmps_word_dst:
+        jsr mem_read16          ; Result in op_source+0/+1
+_cmps_dst_done:
+        pla
+        sta seg_override_en     ; Restore override for REP
 _cmps_do:
         ; CMP dest - source
         lda #5                  ; SUB
+        sta extra_field         ; Tell compute_cf / compute_of_arith this is SUB
         jsr alu_dispatch
         jsr compute_of_arith
 
@@ -2006,14 +2041,25 @@ _cs_scas:
         lda reg_di+1
         sta temp32+1
         ldx #SEG_ES_OFS
+        lda seg_override_en
+        pha
         lda #0
-        sta seg_override_en
+        sta seg_override_en     ; Force ES
+        lda i_w
+        bne _scas_word
         jsr mem_read8
         sta op_source
         lda #0
         sta op_source+1
+        bra _scas_src_done
+_scas_word:
+        jsr mem_read16          ; Result in op_source+0/+1
+_scas_src_done:
+        pla
+        sta seg_override_en     ; Restore override for REP
 
         lda #5                  ; SUB (CMP)
+        sta extra_field         ; Tell compute_cf / compute_of_arith this is SUB
         jsr alu_dispatch
         jsr compute_of_arith
 
@@ -2389,7 +2435,20 @@ op_les_lds:
         ; Load far pointer: reg ← [r/m], segment ← [r/m+2]
         ; C4: LES (extra_field = ES offset)
         ; C5: LDS (extra_field = DS offset)
-        jsr read_rm16           ; op_source = offset from memory
+
+        ; Read offset from ea_offset using mem_read16 (cache-safe)
+        lda ea_offset_lo
+        sta temp32
+        lda ea_offset_hi
+        sta temp32+1
+        ; Save segment override (mem_read16 uses seg_ofs_to_linear)
+        lda seg_override_en
+        pha
+        lda seg_override
+        pha
+        ldx #SEG_DS_OFS
+        jsr mem_read16          ; op_source = offset word
+
         ; Store offset in destination register
         lda i_reg
         asl
@@ -2399,27 +2458,28 @@ op_les_lds:
         lda op_source+1
         sta regs+1,x
 
-        ; Read segment value from [r/m+2]
-        ; Advance rm_addr by 2
+        ; Restore segment override for second read
+        pla
+        sta seg_override
+        pla
+        sta seg_override_en
+
+        ; Read segment from ea_offset+2 (cache-safe)
         clc
-        lda rm_addr
+        lda ea_offset_lo
         adc #2
-        sta rm_addr
-        bcc +
-        inc rm_addr+1
-+
-        ldz #0
-        lda [rm_addr],z
-        sta scratch_a
-        ldz #1
-        lda [rm_addr],z
-        sta scratch_b
+        sta temp32
+        lda ea_offset_hi
+        adc #0
+        sta temp32+1
+        ldx #SEG_DS_OFS
+        jsr mem_read16          ; op_source = segment word
 
         ; Store segment
         ldx extra_field         ; ES or DS offset
-        lda scratch_a
+        lda op_source
         sta regs,x
-        lda scratch_b
+        lda op_source+1
         sta regs+1,x
 
         ; Mark segment dirty
@@ -2469,9 +2529,17 @@ _ii_not0_count:
         beq _ii_int10
         cmp #$16
         beq _ii_int16
+        cmp #$12
+        beq _ii_int12
+        cmp #$11
+        beq _ii_int11
+        cmp #$29
+        beq _ii_int29
         cmp #$19
         beq _ii_int19
         ; Default: execute via IVT
+        sta $8FDB               ; Track last non-intercepted INT number
+        inc $8FDC               ; Count non-intercepted INT calls
         jsr do_sw_interrupt
         jsr compute_cs_base
         jmp opcode_done
@@ -2489,6 +2557,47 @@ _ii_int10:
 _ii_int16:
         ; INT 16h — keyboard services
         jsr int16_handler
+        jmp opcode_done
+
+_ii_int29:
+        ; INT 29h — Fast console output (used by FreeDOS printf)
+        ; AL = character to print
+        lda reg_al
+        cmp #$0D
+        beq _i29_cr
+        cmp #$0A
+        beq _i29_lf
+        jsr ascii_to_pet
+        jsr chrout_safe
+        jmp opcode_done
+_i29_cr:
+        lda #$0D
+        jsr chrout_safe
+        jmp opcode_done
+_i29_lf:
+        lda #$11                ; PETSCII cursor down
+        jsr chrout_safe
+        jmp opcode_done
+
+_ii_int12:
+        ; INT 12h — Get conventional memory size
+        ; Returns AX = memory size in KB (640)
+        lda #$80                ; $0280 = 640
+        sta reg_al
+        lda #$02
+        sta reg_ah
+        lda #0
+        sta flag_cf             ; CF=0 success
+        jmp opcode_done
+
+_ii_int11:
+        ; INT 11h — Get equipment list
+        ; Returns AX = equipment word
+        ; Bit 0 = floppy present, bits 4-5 = video mode (10 = 80-col CGA)
+        lda #$21                ; Floppy + 80-col CGA
+        sta reg_al
+        lda #$00
+        sta reg_ah
         jmp opcode_done
 
 _ii_int19:
@@ -2513,6 +2622,28 @@ _reboot_msg:
 op_into:
         lda flag_of
         beq +
+        ; Debug: save state when INTO fires
+        lda $8F00               ; Previous opcode (instruction before INTO)
+        sta $8FD0
+        lda reg_ip
+        sta $8FD1
+        lda reg_ip+1
+        sta $8FD2
+        lda extra_field
+        sta $8FD3
+        lda op_dest
+        sta $8FD4
+        lda op_dest+1
+        sta $8FD5
+        lda op_source
+        sta $8FD6
+        lda op_source+1
+        sta $8FD7
+        lda op_result
+        sta $8FD8
+        lda op_result+1
+        sta $8FD9
+        inc $8FDA               ; INTO fire counter
         lda #4
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -2688,6 +2819,8 @@ op_inc_dec_rm:
         lda i_reg
         beq _idr_rm_inc_w
         ; DEC word
+        lda #5
+        sta extra_field         ; SUB logic for compute_of_arith
         sec
         lda op_dest
         sbc #1
@@ -2697,6 +2830,8 @@ op_inc_dec_rm:
         sta op_result+1
         bra _idr_rm_w_done
 _idr_rm_inc_w:
+        lda #0
+        sta extra_field         ; ADD logic for compute_of_arith
         clc
         lda op_dest
         adc #1
@@ -2721,12 +2856,16 @@ _idr_rm_byte:
         sta op_source+1
         lda i_reg
         beq _idr_rm_inc_b
+        lda #5
+        sta extra_field         ; SUB logic for compute_of_arith
         sec
         lda op_dest
         sbc #1
         sta op_result
         bra _idr_rm_b_done
 _idr_rm_inc_b:
+        lda #0
+        sta extra_field         ; ADD logic for compute_of_arith
         clc
         lda op_dest
         adc #1
@@ -2791,23 +2930,39 @@ _idr_jmp_ind:
 
 _idr_call_far_ind:
         ; CALL far indirect: push CS, push IP, load CS:IP from [r/m]
-        jsr read_rm16           ; IP from [r/m]
+        ; Read IP from ea_offset (cache-safe)
+        lda ea_offset_lo
+        sta temp32
+        lda ea_offset_hi
+        sta temp32+1
+        lda seg_override_en
+        pha
+        lda seg_override
+        pha
+        ldx #SEG_DS_OFS
+        jsr mem_read16
         lda op_source
         sta i_data0
         lda op_source+1
         sta i_data0+1
-        ; Read CS from [r/m+2]
+        ; Restore override for second read
+        pla
+        sta seg_override
+        pla
+        sta seg_override_en
+        ; Read CS from ea_offset+2 (cache-safe)
         clc
-        lda rm_addr
+        lda ea_offset_lo
         adc #2
-        sta rm_addr
-        bcc +
-        inc rm_addr+1
-+       ldz #0
-        lda [rm_addr],z
+        sta temp32
+        lda ea_offset_hi
+        adc #0
+        sta temp32+1
+        ldx #SEG_DS_OFS
+        jsr mem_read16
+        lda op_source
         sta i_data1
-        ldz #1
-        lda [rm_addr],z
+        lda op_source+1
         sta i_data1+1
         ; Push CS
         lda reg_cs
@@ -2837,50 +2992,41 @@ _idr_call_far_ind:
         jmp opcode_done
 
 _idr_jmp_far_ind:
-        ; JMP far indirect: load CS:IP from [r/m]
-        jsr read_rm16
+        ; JMP far indirect: load CS:IP from [r/m] (cache-safe)
+        ; Read IP from ea_offset
+        lda ea_offset_lo
+        sta temp32
+        lda ea_offset_hi
+        sta temp32+1
+        lda seg_override_en
+        pha
+        lda seg_override
+        pha
+        ldx #SEG_DS_OFS
+        jsr mem_read16
         lda op_source
         sta i_data0
         lda op_source+1
         sta i_data0+1
+        ; Restore override for second read
+        pla
+        sta seg_override
+        pla
+        sta seg_override_en
+        ; Read CS from ea_offset+2
         clc
-        lda rm_addr
+        lda ea_offset_lo
         adc #2
-        sta rm_addr
-        bcc +
-        inc rm_addr+1
-+       ldz #0
-        lda [rm_addr],z
+        sta temp32
+        lda ea_offset_hi
+        adc #0
+        sta temp32+1
+        ldx #SEG_DS_OFS
+        jsr mem_read16
+        lda op_source
         sta reg_cs
-        ldz #1
-        lda [rm_addr],z
+        lda op_source+1
         sta reg_cs+1
-        ; DEBUG: trap if CS is not 0060 or 1FE0 or F000 or 0000
-        lda reg_cs+1
-        cmp #$00
-        beq _jfi_ok
-        cmp #$1F
-        beq _jfi_ok
-        cmp #$F0
-        beq _jfi_ok
-        ; Unexpected CS! Store for debugging
-        lda reg_cs
-        sta $8FC0
-        lda reg_cs+1
-        sta $8FC1
-        lda i_data0
-        sta $8FC2
-        lda i_data0+1
-        sta $8FC3
-        lda rm_addr
-        sta $8FC4
-        lda rm_addr+1
-        sta $8FC5
-        lda rm_addr+2
-        sta $8FC6
-        lda rm_addr+3
-        sta $8FC7
-_jfi_ok:
         lda i_data0
         sta reg_ip
         lda i_data0+1
@@ -2957,9 +3103,15 @@ _gfn_byte:
         jmp opcode_done
 
 _gf_neg:
+        lda #5
+        sta extra_field         ; SUB logic for compute_of_arith
         lda i_w
         beq _gfng_byte
         jsr read_rm16
+        ; op_dest = 0 (the minuend for 0 - source)
+        lda #0
+        sta op_dest
+        sta op_dest+1
         ; result = 0 - source
         sec
         lda #0
@@ -2974,17 +3126,17 @@ _gf_neg:
         beq +
         lda #1
 +       sta flag_cf
-        lda #0
-        sta op_dest
-        sta op_dest+1
-        lda op_source
-        sta op_source
         jsr write_rm16
         jsr set_flags_logic
+        jsr compute_of_arith
         jmp opcode_done
 _gfng_byte:
         jsr read_rm8
         sta op_source
+        lda #0
+        sta op_source+1
+        sta op_dest
+        sta op_dest+1
         sec
         lda #0
         sbc op_source
@@ -2998,6 +3150,7 @@ _gfng_byte:
         lda op_result
         jsr write_rm8
         jsr set_flags_logic
+        jsr compute_of_arith
         jmp opcode_done
 
 _gf_mul:
@@ -3150,19 +3303,24 @@ _d8_loop:
         asl div_dividend
         rol div_dividend+1
         rol div_remainder
+        rol div_remainder+1     ; Must shift high byte too
 
         ; Shift quotient left
         asl div_quotient
         rol div_quotient+1
 
-        ; Try subtract divisor from remainder
-        lda div_remainder
+        ; Try subtract divisor from remainder (16-bit remainder vs 8-bit divisor)
         sec
+        lda div_remainder
         sbc div_divisor
+        tay
+        lda div_remainder+1
+        sbc #0
         bcc _d8_no_sub
 
         ; Fits: store new remainder, set quotient bit
-        sta div_remainder
+        sta div_remainder+1
+        sty div_remainder
         lda div_quotient
         ora #$01
         sta div_quotient
@@ -3183,6 +3341,7 @@ div_32by16:
         sta div_quotient+3
         sta div_remainder
         sta div_remainder+1
+        sta $8F0E               ; 17th bit of remainder (overflow byte)
 
         ldx #32
 _d16_loop:
@@ -3193,6 +3352,7 @@ _d16_loop:
         rol div_dividend+3
         rol div_remainder
         rol div_remainder+1
+        rol $8F0E               ; Shift 17th bit
 
         ; Shift quotient left
         asl div_quotient
@@ -3200,18 +3360,25 @@ _d16_loop:
         rol div_quotient+2
         rol div_quotient+3
 
-        ; Try subtract: remainder - divisor
+        ; Try subtract: remainder - divisor (with 17th bit)
         sec
         lda div_remainder
         sbc div_divisor
-        tay                     ; Save tentative low byte
+        sta scratch_a           ; Tentative low byte
         lda div_remainder+1
         sbc div_divisor+1
-        bcc _d16_no_sub
+        sta scratch_b           ; Tentative high byte
+        lda $8F0E
+        sbc #0
+        bcc _d16_no_sub         ; Doesn't fit (17th bit borrow)
 
-        ; Fits
+        ; Fits: commit the subtraction
+        lda scratch_a
+        sta div_remainder
+        lda scratch_b
         sta div_remainder+1
-        sty div_remainder
+        lda #0
+        sta $8F0E               ; Clear 17th bit
         lda div_quotient
         ora #$01
         sta div_quotient
