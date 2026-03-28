@@ -1045,6 +1045,39 @@ op_push_imm8:
         jsr push_word
         jmp opcode_done
 
+; ============================================================================
+; $39 — HLT (F4)
+; ============================================================================
+; On real 8086, HLT stops CPU until interrupt arrives.
+; We simulate by delivering INT 8 (timer tick) if IF=1.
+; This unblocks FreeDOS idle loops that do STI; HLT.
+;
+op_hlt:
+        ; On real 8086, HLT waits for an interrupt.
+        ; We can't deliver INT 8 via do_sw_interrupt (corrupts stack on attic segments).
+        ; Instead: just bump the BDA timer counter and return.
+        ; FreeDOS idle loop checks the timer counter, not the interrupt itself.
+        lda #$6C
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z
+        clc
+        adc #1
+        sta [temp_ptr],z
+        bcc +
+        ldz #1
+        lda [temp_ptr],z
+        adc #0
+        sta [temp_ptr],z
++
+        jmp opcode_done
+
 op_nop_unimpl:
         inc unimpl_count
         lda raw_opcode
@@ -2538,8 +2571,6 @@ _ii_not0_count:
         cmp #$19
         beq _ii_int19
         ; Default: execute via IVT
-        sta $8FDB               ; Track last non-intercepted INT number
-        inc $8FDC               ; Count non-intercepted INT calls
         jsr do_sw_interrupt
         jsr compute_cs_base
         jmp opcode_done
@@ -2563,19 +2594,16 @@ _ii_int29:
         ; INT 29h — Fast console output (used by FreeDOS printf)
         ; AL = character to print
         lda reg_al
+        cmp #$0A
+        beq _i29_done           ; Ignore LF — CR already does newline on MEGA65
         cmp #$0D
         beq _i29_cr
-        cmp #$0A
-        beq _i29_lf
         jsr ascii_to_pet
         jsr chrout_safe
+_i29_done:
         jmp opcode_done
 _i29_cr:
         lda #$0D
-        jsr chrout_safe
-        jmp opcode_done
-_i29_lf:
-        lda #$11                ; PETSCII cursor down
         jsr chrout_safe
         jmp opcode_done
 
@@ -2622,28 +2650,6 @@ _reboot_msg:
 op_into:
         lda flag_of
         beq +
-        ; Debug: save state when INTO fires
-        lda $8F00               ; Previous opcode (instruction before INTO)
-        sta $8FD0
-        lda reg_ip
-        sta $8FD1
-        lda reg_ip+1
-        sta $8FD2
-        lda extra_field
-        sta $8FD3
-        lda op_dest
-        sta $8FD4
-        lda op_dest+1
-        sta $8FD5
-        lda op_source
-        sta $8FD6
-        lda op_source+1
-        sta $8FD7
-        lda op_result
-        sta $8FD8
-        lda op_result+1
-        sta $8FD9
-        inc $8FDA               ; INTO fire counter
         lda #4
         jsr do_sw_interrupt
         jsr compute_cs_base

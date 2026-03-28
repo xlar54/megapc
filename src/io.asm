@@ -130,23 +130,19 @@ _i10_teletype:
         inc $8FE0
 +
         lda reg_al
+        cmp #$0A
+        beq _i10t_done          ; Ignore LF — CR already does newline on MEGA65
         cmp #$0D
         beq _i10t_cr
-        cmp #$0A
-        beq _i10t_lf
         ; Regular character: write to CGA buffer
         ; TODO: track cursor position in BDA and write to CGA
         ; For now: just CHROUT
         jsr ascii_to_pet
         jsr chrout_safe
+_i10t_done:
         rts
 _i10t_cr:
         lda #$0D
-        jsr chrout_safe
-        rts
-_i10t_lf:
-        ; LF — output newline via CHROUT
-        lda #$11                ; PETSCII cursor down
         jsr chrout_safe
         rts
 

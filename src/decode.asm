@@ -512,6 +512,7 @@ opcode_jump_tbl:
         .word op_popa           ; $36 — POPA (61)
         .word op_push_imm16     ; $37 — PUSH imm16 (68)
         .word op_push_imm8      ; $38 — PUSH imm8 (6A)
+        .word op_hlt            ; $39 — HLT (F4)
         .word op_nop_unimpl    ; $39
         .word op_nop_unimpl    ; $3A
 

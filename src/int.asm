@@ -162,6 +162,7 @@ _popw_sp:
 ; Pushes FLAGS, CS, IP then loads new CS:IP from IVT.
 ;
 do_sw_interrupt:
+
         pha                     ; Save int number
 
         ; Push FLAGS

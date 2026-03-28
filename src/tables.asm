@@ -120,7 +120,7 @@ opcode_dispatch:
 
         ; Fx row: LOCK, REP, HLT, CMC, GRP F6/F7, flag ops, INC/DEC
         ;         F0    F1    F2    F3    F4    F5    F6    F7
-        .byte   $31,  $31,  $17,  $17,  $31,  $2D,  $06,  $06  ; LOCK, ?, REP, REPZ, HLT, CMC, GRP1
+        .byte   $31,  $31,  $17,  $17,  $39,  $2D,  $06,  $06  ; LOCK, ?, REP, REPZ, HLT, CMC, GRP1
         ;         F8    F9    FA    FB    FC    FD    FE    FF
         .byte   $2E,  $2E,  $2E,  $2E,  $2E,  $2E,  $05,  $05  ; CLC,STC,CLI,STI,CLD,STD, INC/DEC rm
 
