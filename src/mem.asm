@@ -144,10 +144,6 @@ _ltc_f_seg:
 
 _ltc_attic:
         ; --- $10000–$EFFFF: Attic via cache ---
-        inc $8F44               ; Count attic accesses (low byte)
-        bne +
-        inc $8F45               ; Count attic accesses (high byte)
-+
         ; Page = temp32+2 : temp32+1 (high byte + mid byte)
         ; Offset = temp32+0
         jsr cache_access        ; Returns pointer in temp_ptr

@@ -234,7 +234,6 @@ _i10_get_mode:
 ; AH=01: Check key available → ZF=0 if key ready (AL=ASCII, AH=scan)
 ;                               ZF=1 if no key
 ;
-GETIN           = $FFE4
 
 int16_handler:
         lda reg_ah
@@ -563,42 +562,3 @@ _pts_lower:
 _pts_done:
         rts
 
-; ============================================================================
-; getin_safe — Call GETIN without KERNAL IRQ trashing our ZP
-; ============================================================================
-; Output: A = PETSCII key (0 = no key)
-;
-getin_safe:
-        jsr save_zp
-        cli
-        jsr GETIN
-        sei
-        pha                     ; Save key
-        jsr restore_zp
-        pla                     ; Recover key
-        rts
-
-; --- Save/restore ZP $70–$C0 (81 bytes) to shadow buffer ---
-; Covers 32-bit pointers ($70-$8F) AND cache/scratch state ($90-$C0)
-save_zp:
-        ldx #0
--       lda $70,x
-        sta ZP_SHADOW,x
-        inx
-        cpx #$51                ; $C0 - $70 + 1 = 81 = $51
-        bne -
-        rts
-
-restore_zp:
-        ldx #0
--       lda ZP_SHADOW,x
-        sta $70,x
-        inx
-        cpx #$51
-        bne -
-        ; Force recomputation of cached segment bases
-        lda #1
-        sta cs_dirty
-        sta ss_dirty
-        sta ds_dirty
-        rts

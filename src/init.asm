@@ -578,8 +578,6 @@ init_regs:
         sta rep_override_en
         sta int8_asap
         sta trap_flag_var
-        sta $8F44               ; Clear attic access counter
-        sta $8F45
 
         ldx #0
 -       lda _reg_msg,x

@@ -126,7 +126,6 @@ CRTC_PORT       = $03B4         ; MDA CRTC base port
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9600         ; 512-byte sector buffer
-ZP_SHADOW       = $8E00         ; Shadow page for ZP during CHROUT/GETIN
 CGA_ROWS        = 25
 CGA_COLS        = 80
 
@@ -223,11 +222,6 @@ entry:
         ; Clear screen before emulation
         lda #147
         jsr CHROUT
-
-        ; Clear attic access counter (after init, before emulation)
-        lda #0
-        sta $8F44
-        sta $8F45
 
         ; Set text color based on video mode
 .if VIDEO_MODE == 7
