@@ -106,6 +106,12 @@ CODE_CACHE_SPILL = $9100        ; 8-byte spillover from next page
                                 ; $9200–$95FF
 CACHE_INVALID   = $FF           ; Sentinel: no page cached
 
+; --- RAM size ---
+; Conventional memory reported to DOS via INT 12h and BDA
+RAM_KB          = 64           ; 64 = 64KB (bank 4 only), 640 = full conventional
+RAM_KB_LO       = <RAM_KB       ; Low byte for registers
+RAM_KB_HI       = >RAM_KB       ; High byte for registers
+
 ; --- Video mode ---
 ; Set VIDEO_MODE to 3 for CGA color, 7 for monochrome
 VIDEO_MODE      = 7             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)

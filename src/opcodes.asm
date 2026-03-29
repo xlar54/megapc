@@ -2631,10 +2631,10 @@ _i15_not88:
 
 _ii_int12:
         ; INT 12h — Get conventional memory size
-        ; Returns AX = memory size in KB (64)
-        lda #$40                ; $0040 = 64
+        ; Returns AX = memory size in KB
+        lda #RAM_KB_LO
         sta reg_al
-        lda #$00
+        lda #RAM_KB_HI
         sta reg_ah
         lda #0
         sta flag_cf             ; CF=0 success

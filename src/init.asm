@@ -343,15 +343,15 @@ _ivt_loop:
         ldz #0
         sta [temp_ptr],z
 
-        ; Conventional memory size at $40413: 64KB = $0040
+        ; Conventional memory size at $40413
         lda #$13
         sta temp_ptr
         lda #$04
         sta temp_ptr+1
-        lda #$40
+        lda #RAM_KB_LO
         ldz #0
         sta [temp_ptr],z
-        lda #$00
+        lda #RAM_KB_HI
         ldz #1
         sta [temp_ptr],z
 
