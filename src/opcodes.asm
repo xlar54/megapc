@@ -2643,8 +2643,8 @@ _ii_int12:
 _ii_int11:
         ; INT 11h — Get equipment list
         ; Returns AX = equipment word
-        ; Bit 0 = floppy present, bits 4-5 = video mode (10 = 80-col CGA)
-        lda #$21                ; Floppy + 80-col CGA
+        ; Bit 0 = floppy present, bits 4-5 = video mode
+        lda #VIDEO_EQUIP        ; From config in main.asm
         sta reg_al
         lda #$00
         sta reg_ah

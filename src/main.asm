@@ -98,13 +98,18 @@ ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
 FLOPPY_ATTIC    = $8100000      ; Floppy image in attic (1.44MB at +1MB)
 
 ; --- Cache constants ---
-CACHE_LINES     = 2             ; Number of cache lines
+CACHE_LINES     = 1             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line
 CACHE_BUF       = $9200         ; Cache buffer in bank 0 (4×256 = 1KB)
 CODE_CACHE_BUF  = $9000         ; 256-byte code cache buffer
 CODE_CACHE_SPILL = $9100        ; 8-byte spillover from next page
                                 ; $9200–$95FF
 CACHE_INVALID   = $FF           ; Sentinel: no page cached
+
+; --- Video mode ---
+; Set VIDEO_MODE to 3 for CGA color, 7 for monochrome
+VIDEO_MODE      = 7             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
+VIDEO_EQUIP     = $31           ; Equipment word: $21 = CGA, $31 = mono
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9600         ; 512-byte sector buffer

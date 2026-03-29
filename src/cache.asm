@@ -86,9 +86,7 @@ _ca_hit:
         bcc +
         inc temp_ptr+1
 +
-        ; Mark dirty (conservative)
-        lda #1
-        sta cache_dirty,x
+        ; Dirty flag is set only by write paths (mem_write8/16, push_word)
         rts
 
 ; ============================================================================

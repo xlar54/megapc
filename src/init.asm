@@ -339,28 +339,28 @@ _ivt_loop:
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
-        lda #$21                ; Floppy + 80-col CGA
+        lda #VIDEO_EQUIP        ; Floppy + video mode from config
         ldz #0
         sta [temp_ptr],z
 
-        ; Conventional memory size at $40413: 640KB = $0280
+        ; Conventional memory size at $40413: 64KB = $0040
         lda #$13
         sta temp_ptr
         lda #$04
         sta temp_ptr+1
-        lda #$80
+        lda #$40
         ldz #0
         sta [temp_ptr],z
-        lda #$02
+        lda #$00
         ldz #1
         sta [temp_ptr],z
 
-        ; Video mode at $40449: mode 3 (80×25 color text)
+        ; Video mode at $40449
         lda #$49
         sta temp_ptr
         lda #$04
         sta temp_ptr+1
-        lda #$03
+        lda #VIDEO_MODE
         ldz #0
         sta [temp_ptr],z
 
@@ -523,12 +523,6 @@ init_regs:
         sta cs_dirty
         sta ss_dirty
         sta ds_dirty
-
-        ; Initialize 64KB window: no region loaded yet
-        lda #$FF
-        sta current_bank
-        lda #$00
-        sta bank_dirty
 
         ; Clear counters
         lda #0

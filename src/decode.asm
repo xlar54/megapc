@@ -159,6 +159,7 @@ _ml_code_miss:
         sta code_cache_pg_lo
         lda cs_base_linear+2
         adc #0
+        and #$0F                ; Mask to 20 bits (prevent floppy attic overlap)
         sta temp32+2            ; page hi
         sta code_cache_pg_hi
 
@@ -355,6 +356,27 @@ _ml_no_modrm:
         ; --- Reset advance_ip (handlers that jump set this to 0) ---
         lda #1
         sta advance_ip
+
+        ; --- REP with CX=0: skip string op entirely ---
+        ; On real 8086, REP with CX=0 performs zero iterations
+        lda rep_override_en
+        beq _ml_no_rep_skip
+        ; Check if this is a string op (A4-AF)
+        lda raw_opcode
+        cmp #$A4
+        bcc _ml_no_rep_skip
+        cmp #$B0
+        bcs _ml_no_rep_skip
+        ; It's a REP string op — check CX
+        lda reg_cx
+        ora reg_cx+1
+        bne _ml_no_rep_skip
+        ; CX=0: skip execution, clear REP
+        lda #0
+        sta rep_override_en
+        sta seg_override_en
+        jmp opcode_done
+_ml_no_rep_skip:
 
         ; --- Dispatch to handler ---
         lda xlat_opcode

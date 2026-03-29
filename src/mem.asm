@@ -100,9 +100,12 @@ linear_to_chip:
         lda temp32+1
         cmp #$80
         bcs _ltc_cga            ; $B8xxx+ → CGA buffer
+        bra _ltc_attic          ; $B0xxx-$B7xxx → attic
 _ltc_not_b:
+        cmp #$01
+        bcs _ltc_attic          ; $10000-$EFFFF → attic DMA
+
         ; --- $00000–$0FFFF: Bank 4 direct ---
-        ; With 64KB reported, all guest RAM stays here
         lda temp32
         sta temp_ptr
         lda temp32+1
@@ -139,6 +142,17 @@ _ltc_f_seg:
         sta temp_ptr+3
         rts
 
+_ltc_attic:
+        ; --- $10000–$EFFFF: Attic via cache ---
+        inc $8F44               ; Count attic accesses (low byte)
+        bne +
+        inc $8F45               ; Count attic accesses (high byte)
++
+        ; Page = temp32+2 : temp32+1 (high byte + mid byte)
+        ; Offset = temp32+0
+        jsr cache_access        ; Returns pointer in temp_ptr
+        rts
+
 ; ============================================================================
 ; mem_read8 — Read byte from segment:offset
 ; ============================================================================
@@ -168,7 +182,12 @@ mem_write8:
         lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        rts
+        ; Mark cache dirty if we wrote to cache buffer (bank 0)
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty
++       rts
 
 ; ============================================================================
 ; mem_read16 — Read 16-bit word from segment:offset
@@ -183,7 +202,20 @@ mem_read16:
         ldz #0
         lda [temp_ptr],z
         sta op_source
+        ; Check page boundary crossing
+        lda temp32
+        cmp #$FF
+        beq _mr16_cross
         ldz #1
+        lda [temp_ptr],z
+        sta op_source+1
+        rts
+_mr16_cross:
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        ldz #0
         lda [temp_ptr],z
         sta op_source+1
         rts
@@ -201,10 +233,34 @@ mem_write16:
         lda op_result
         ldz #0
         sta [temp_ptr],z
+        ; Mark cache dirty if in cache buffer
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty
++
+        ; Check page boundary crossing
+        lda temp32
+        cmp #$FF
+        beq _mw16_cross
         lda op_result+1
         ldz #1
         sta [temp_ptr],z
         rts
+_mw16_cross:
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark second page dirty
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty
++       rts
 
 ; ============================================================================
 ; Instruction Fetch Helpers

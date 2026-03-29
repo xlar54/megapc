@@ -325,8 +325,27 @@ read_rm16:
         ldz #0
         lda [rm_addr],z
         sta op_source
+        ; Check page boundary if in cache buffer (bank 0)
+        lda rm_addr+2
+        bne _rrm16_no_cross     ; Not cache → safe to read z=1
+        lda rm_addr
+        cmp #$FF
+        beq _rrm16_cross
+_rrm16_no_cross:
         ldz #1
         lda [rm_addr],z
+        sta op_source+1
+        rts
+_rrm16_cross:
+        ; Re-resolve next linear byte through cache
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
         sta op_source+1
         rts
 _rrm16_reg:
@@ -346,16 +365,11 @@ write_rm8:
         pla
         ldz #0
         sta [rm_addr],z
-        ; Mark cache dirty if rm_addr is in cache buffer
+        ; Mark cache dirty if rm_addr is in cache buffer (bank 0)
         lda rm_addr+2
         bne +
-        ; Derive cache line from rm_addr+1: line = (rm_addr+1 - >CACHE_BUF)
-        lda rm_addr+1
-        sec
-        sbc #>CACHE_BUF
-        tax
         lda #1
-        sta cache_dirty,x
+        sta cache_dirty
 +       rts
 _wrm8_reg:
         pla
@@ -371,18 +385,39 @@ write_rm16:
         lda op_result
         ldz #0
         sta [rm_addr],z
+        ; Mark cache dirty if in cache buffer
+        lda rm_addr+2
+        bne +
+        lda #1
+        sta cache_dirty
++
+        ; Check page boundary if in cache buffer (bank 0)
+        lda rm_addr+2
+        bne _wrm16_no_cross
+        lda rm_addr
+        cmp #$FF
+        beq _wrm16_cross
+_wrm16_no_cross:
         lda op_result+1
         ldz #1
         sta [rm_addr],z
-        ; Mark cache dirty if rm_addr is in cache buffer
-        lda rm_addr+2
+        rts
+_wrm16_cross:
+        ; Re-resolve next linear byte through cache
+        inc temp32
         bne +
-        lda rm_addr+1
-        sec
-        sbc #>CACHE_BUF
-        tax
+        inc temp32+1
+        bne +
+        inc temp32+2
++       jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark second page dirty
+        lda temp_ptr+2
+        bne +
         lda #1
-        sta cache_dirty,x
+        sta cache_dirty
 +       rts
 _wrm16_reg:
         ldx rm_addr

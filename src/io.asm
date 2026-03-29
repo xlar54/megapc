@@ -242,8 +242,8 @@ _i10_write_char_attr:
 
 _i10_get_mode:
         ; AH=0F: Get current video mode
-        ; AL=mode(3), AH=columns(80), BH=page(0)
-        lda #$03
+        ; AL=mode, AH=columns(80), BH=page(0)
+        lda #VIDEO_MODE
         sta reg_al
         lda #80
         sta reg_ah

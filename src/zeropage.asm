@@ -119,9 +119,8 @@ cache_page_hi   = $90           ; 4 bytes: page high (bits 16–19) per line
 cache_page_lo   = $94           ; 4 bytes: page low (bits 8–15) per line
 cache_dirty     = $98           ; 4 bytes: dirty flag per line
 cache_next_line = $9C           ; Round-robin pointer (0–3)
-; 64KB window: which region ($00-$0E) is currently in bank 4
-current_bank    = $8F48         ; Current 64KB region loaded in bank 4
-bank_dirty      = $8F49         ; 1 = bank 4 has been written to (needs flush)
+; Attic access flag: set by linear_to_chip when address is in attic range
+attic_access    = $8F48         ; 1 = current access needs attic DMA
 cs_dirty        = $9D           ; CS base needs recompute
 ss_dirty        = $9E           ; SS base needs recompute
 ds_dirty        = $9F           ; DS base needs recompute
