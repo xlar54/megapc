@@ -134,18 +134,16 @@ _i10_teletype:
         beq _i10t_bs            ; Backspace
         cmp #$07
         beq _i10t_done          ; Bell — ignore
-        cmp #$DB
-        beq _i10t_done          ; Block cursor char — ignore (cursor blink)
         cmp #$20
-        bcc _i10t_done          ; Control chars < $20 — ignore (cursor/attr)
-        ; Regular character: convert and output via direct screen write
+        bcc _i10t_done          ; Control chars < $20 — ignore
+        ; Regular character: always write and advance
         jsr ascii_to_pet
-        jsr chrout_safe         ; chrout_safe handles scr_row/scr_col internally
+        jsr chrout_safe
 _i10t_done:
         rts
 _i10t_cr:
         lda #$0D
-        jsr chrout_safe         ; chrout_safe handles CR and row tracking
+        jsr chrout_safe
         rts
 _i10t_bs:
         lda #$9D                ; PETSCII cursor left
@@ -185,7 +183,11 @@ _i10_set_cursor:
         sta scr_row
         lda reg_dl
         sta scr_col
+        lda #1
+        sta cursor_set          ; Mark that cursor was repositioned
         rts
+
+cursor_set      .byte 0         ; 1 = AH=02 just called, next AH=0E writes in-place
 
 _i10_get_cursor:
         ; AH=03: Get cursor position
@@ -343,7 +345,7 @@ chrout_safe:
         beq _cs_home
         ; Regular character: write to screen RAM at scr_row * 80 + scr_col
         pha
-        jsr _cs_calc_ptr        ; temp_ptr = screen address
+        jsr calc_scr_ptr        ; temp_ptr = screen address
         pla
         jsr pet_to_screen       ; Convert PETSCII to screen code
         ldz #0
@@ -360,7 +362,7 @@ chrout_safe:
         lda scr_row
         cmp #SCR_ROWS
         bcc _cs_done
-        jsr _cs_scroll
+        jsr do_scr_scroll
 _cs_done:
         rts
 
@@ -371,7 +373,7 @@ _cs_cr:
         lda scr_row
         cmp #SCR_ROWS
         bcc +
-        jsr _cs_scroll
+        jsr do_scr_scroll
 +       rts
 
 _cs_cls:
@@ -398,7 +400,7 @@ _cs_down:
         lda scr_row
         cmp #SCR_ROWS
         bcc +
-        jsr _cs_scroll
+        jsr do_scr_scroll
 +       rts
 
 _cs_right:
@@ -424,7 +426,7 @@ _cs_home:
 
 ; --- Calculate screen pointer from scr_row/scr_col ---
 ; Output: temp_ptr = SCREEN_BASE + scr_row * 80 + scr_col
-_cs_calc_ptr:
+calc_scr_ptr:
         ; row * 80 = row * 64 + row * 16
         lda scr_row
         asl
@@ -479,10 +481,10 @@ _cs_calc_ptr:
         rts
 
 ; --- Scroll screen up one line via DMA ---
-_cs_scroll:
+do_scr_scroll:
         lda scr_row
         cmp #SCR_ROWS
-        bcc _cs_scroll_done     ; Not past bottom, no scroll needed
+        bcc do_scr_scroll_done     ; Not past bottom, no scroll needed
         ; DMA copy: row 1-24 → row 0-23 (1920 bytes = 24*80)
         lda #$00
         sta $D707
@@ -511,7 +513,7 @@ _cs_scroll:
         .byte $00, $00, $00
         lda #SCR_ROWS-1
         sta scr_row             ; Cursor on last row
-_cs_scroll_done:
+do_scr_scroll_done:
         rts
 
 ; Screen position tracking
@@ -533,13 +535,17 @@ pet_to_screen:
         ; $5B-$5F ([\]^_) → screen $1B-$1F
         cmp #$60
         bcc _pts_bracket
-        ; $60-$BF → not standard, use as-is
-        cmp #$C0
+        ; $60-$7F → use as-is
+        cmp #$80
         bcc _pts_done
+        ; $80-$BF → mask off bit 7 (reverse/alternate)
+        cmp #$C0
+        bcc _pts_mask
         ; $C1-$DA (PETSCII lowercase a-z) → screen $01-$1A
         cmp #$DB
         bcc _pts_lower
         ; $DB+ → mask
+_pts_mask:
         and #$7F
         rts
 _pts_at:

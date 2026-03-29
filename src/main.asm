@@ -98,7 +98,7 @@ ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
 FLOPPY_ATTIC    = $8100000      ; Floppy image in attic (1.44MB at +1MB)
 
 ; --- Cache constants ---
-CACHE_LINES     = 2             ; Number of cache lines
+CACHE_LINES     = 1             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line
 CACHE_BUF       = $9200         ; Cache buffer in bank 0 (4×256 = 1KB)
 CODE_CACHE_BUF  = $9000         ; 256-byte code cache buffer
