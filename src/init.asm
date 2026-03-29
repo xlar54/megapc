@@ -371,6 +371,48 @@ _ivt_loop:
         ldz #0
         sta [temp_ptr],z
 
+        ; Regen buffer size at $4044C: 4000 bytes (80*25*2 = $0FA0)
+        lda #$4C
+        sta temp_ptr
+        lda #$A0                ; Low byte of $0FA0
+        ldz #0
+        sta [temp_ptr],z
+        lda #$0F                ; High byte of $0FA0
+        ldz #1
+        sta [temp_ptr],z
+
+        ; CRT page start at $4044E: $0000 (page 0 starts at offset 0)
+        lda #$4E
+        sta temp_ptr
+        lda #$00
+        ldz #0
+        sta [temp_ptr],z
+        ldz #1
+        sta [temp_ptr],z
+
+        ; Cursor positions at $40450: row 0, col 0 for all 8 pages
+        ; (Already zeroed by memory clear)
+
+        ; Cursor shape at $40460: start=6, end=7 (underline cursor)
+        lda #$60
+        sta temp_ptr
+        lda #$07                ; End scan line
+        ldz #0
+        sta [temp_ptr],z
+        lda #$06                ; Start scan line
+        ldz #1
+        sta [temp_ptr],z
+
+        ; CRT controller base port at $40463
+        lda #$63
+        sta temp_ptr
+        lda #<CRTC_PORT
+        ldz #0
+        sta [temp_ptr],z
+        lda #>CRTC_PORT
+        ldz #1
+        sta [temp_ptr],z
+
         ; Active display page at $40462: 0
         lda #$62
         sta temp_ptr

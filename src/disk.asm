@@ -289,8 +289,7 @@ _i13_copy_loop:
         ; Mark cache dirty if write went to cache buffer
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +
         ; Advance linear address
         inc temp32
@@ -313,8 +312,7 @@ _i13_copy_loop2:
         sta [temp_ptr],z
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +
         inc temp32
         bne +

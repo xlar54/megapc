@@ -368,8 +368,12 @@ write_rm8:
         ; Mark cache dirty if rm_addr is in cache buffer (bank 0)
         lda rm_addr+2
         bne +
+        lda rm_addr+1
+        sec
+        sbc #>CACHE_BUF
+        tax
         lda #1
-        sta cache_dirty
+        sta cache_dirty,x
 +       rts
 _wrm8_reg:
         pla
@@ -388,8 +392,12 @@ write_rm16:
         ; Mark cache dirty if in cache buffer
         lda rm_addr+2
         bne +
+        lda rm_addr+1
+        sec
+        sbc #>CACHE_BUF
+        tax
         lda #1
-        sta cache_dirty
+        sta cache_dirty,x
 +
         ; Check page boundary if in cache buffer (bank 0)
         lda rm_addr+2
@@ -416,8 +424,7 @@ _wrm16_cross:
         ; Mark second page dirty
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +       rts
 _wrm16_reg:
         ldx rm_addr

@@ -251,10 +251,21 @@ _i16_wait_key:
 -       lda $D610               ; Read ASCII key from hardware queue
         beq -                   ; $00 = queue empty, keep polling
         sta $D610               ; Dequeue the event (write any value)
-        ; A = ASCII key code (hardware provides ASCII directly)
+        ; Map MEGA65 key codes to IBM PC codes
+        cmp #$14                ; MEGA65 DELETE/backspace (PETSCII DEL)
+        beq _i16_bs
+        cmp #$7F                ; ASCII DEL
+        beq _i16_bs
+        ; A = ASCII key code
         sta reg_al
         lda #$00
         sta reg_ah              ; Fake scancode
+        rts
+_i16_bs:
+        lda #$08                ; IBM PC backspace
+        sta reg_al
+        lda #$0E                ; Scancode for backspace
+        sta reg_ah
         rts
 
 _i16_check_key:
@@ -262,7 +273,14 @@ _i16_check_key:
         ; Peek at hardware typing queue — don't dequeue
         lda $D610               ; Read ASCII key from hardware queue
         beq _i16_no_key         ; $00 = no key
-        ; Key available (don't dequeue — AH=00 will do that)
+        ; Map MEGA65 key codes
+        cmp #$14                ; MEGA65 DELETE/backspace
+        bne +
+        lda #$08
++       cmp #$7F                ; ASCII DEL
+        bne +
+        lda #$08
++       ; Key available (don't dequeue — AH=00 will do that)
         sta reg_al
         lda #$00
         sta reg_ah

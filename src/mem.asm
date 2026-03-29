@@ -154,6 +154,22 @@ _ltc_attic:
         rts
 
 ; ============================================================================
+; mark_cache_dirty — Mark the correct cache line as dirty
+; ============================================================================
+; Derives line index from temp_ptr+1 (high byte of cache buffer pointer).
+; CACHE_BUF is page-aligned, so line = temp_ptr+1 - >CACHE_BUF.
+; Must only be called when temp_ptr+2 == 0 (confirmed in cache buffer).
+;
+mark_cache_dirty:
+        lda temp_ptr+1
+        sec
+        sbc #>CACHE_BUF
+        tax
+        lda #1
+        sta cache_dirty,x
+        rts
+
+; ============================================================================
 ; mem_read8 — Read byte from segment:offset
 ; ============================================================================
 ; Input:  X = segment register offset (SEG_DS_OFS etc.)
@@ -185,8 +201,7 @@ mem_write8:
         ; Mark cache dirty if we wrote to cache buffer (bank 0)
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +       rts
 
 ; ============================================================================
@@ -236,8 +251,7 @@ mem_write16:
         ; Mark cache dirty if in cache buffer
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +
         ; Check page boundary crossing
         lda temp32
@@ -258,8 +272,7 @@ _mw16_cross:
         ; Mark second page dirty
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +       rts
 
 ; ============================================================================

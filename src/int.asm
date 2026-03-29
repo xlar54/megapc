@@ -64,16 +64,14 @@ push_word:
         ; Mark cache dirty if write went to cache buffer (bank 0)
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +       rts
 
 _pushw_cross:
         ; Mark first page dirty if in cache
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +
         ; Page boundary: increment linear address and re-resolve
         inc temp32+1
@@ -86,8 +84,7 @@ _pushw_cross:
         ; Mark second page dirty if in cache
         lda temp_ptr+2
         bne +
-        lda #1
-        sta cache_dirty
+        jsr mark_cache_dirty
 +       rts
 
 ; ============================================================================

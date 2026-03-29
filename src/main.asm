@@ -98,7 +98,7 @@ ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
 FLOPPY_ATTIC    = $8100000      ; Floppy image in attic (1.44MB at +1MB)
 
 ; --- Cache constants ---
-CACHE_LINES     = 1             ; Number of cache lines
+CACHE_LINES     = 2             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line
 CACHE_BUF       = $9200         ; Cache buffer in bank 0 (4×256 = 1KB)
 CODE_CACHE_BUF  = $9000         ; 256-byte code cache buffer
@@ -114,8 +114,15 @@ RAM_KB_HI       = >RAM_KB       ; High byte for registers
 
 ; --- Video mode ---
 ; Set VIDEO_MODE to 3 for CGA color, 7 for monochrome
-VIDEO_MODE      = 3             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
-VIDEO_EQUIP     = $21           ; Equipment word: $21 = CGA, $31 = mono
+; All other constants derive automatically
+VIDEO_MODE      = 7             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
+.if VIDEO_MODE == 3
+VIDEO_EQUIP     = $21           ; Floppy + 80-col CGA
+CRTC_PORT       = $03D4         ; CGA CRTC base port
+.elsif VIDEO_MODE == 7
+VIDEO_EQUIP     = $31           ; Floppy + 80-col monochrome
+CRTC_PORT       = $03B4         ; MDA CRTC base port
+.endif
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9600         ; 512-byte sector buffer
@@ -222,8 +229,12 @@ entry:
         sta $8F44
         sta $8F45
 
-        ; Set green text on black background (monochrome green monitor)
-        lda #30                 ; PETSCII green
+        ; Set text color based on video mode
+.if VIDEO_MODE == 7
+        lda #30                 ; PETSCII green (monochrome phosphor)
+.else
+        lda #15                 ; PETSCII light grey (CGA white)
+.endif
         jsr CHROUT
         lda #147                ; PETSCII clear screen
         jsr CHROUT
