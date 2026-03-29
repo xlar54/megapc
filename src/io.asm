@@ -125,6 +125,14 @@ int10_handler:
 
 _i10_teletype:
         ; AH=0E: Teletype output — write character AL to screen
+        ; Debug: save last 8 chars printed to $8F50-$8F57
+        lda $8F58               ; ring index
+        and #$07
+        tax
+        lda reg_al
+        sta $8F50,x
+        inx
+        stx $8F58
         lda reg_al
         cmp #$0A
         beq _i10t_done          ; Ignore LF — CR already does newline on MEGA65

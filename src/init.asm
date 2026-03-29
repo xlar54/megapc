@@ -524,6 +524,12 @@ init_regs:
         sta ss_dirty
         sta ds_dirty
 
+        ; Initialize 64KB window: no region loaded yet
+        lda #$FF
+        sta current_bank
+        lda #$00
+        sta bank_dirty
+
         ; Clear counters
         lda #0
         sta inst_counter

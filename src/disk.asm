@@ -144,15 +144,19 @@ _i13_read:
         ; LBA = (C × heads + H) × SPT + (S - 1)
         ; C = CH + (CL >> 6 << 8) — for floppy, CL bits 6–7 are always 0
         lda reg_ch              ; Cylinder
-        sta scratch_b           ; C
-
-        ; C × 2 (all standard floppy formats have 2 heads)
-        asl scratch_b           ; C × 2
+        ; C × heads (use hardware multiplier)
+        sta $D770
+        lda #0
+        sta $D771
+        lda floppy_heads
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778               ; Result low = C × heads
         ; + H
         clc
-        lda scratch_b
         adc reg_dh              ; + head
-        sta scratch_b           ; = C×2 + H
+        sta scratch_b           ; = C×heads + H
 
         ; × sectors_per_track
         ; Use hardware multiplier at $D770

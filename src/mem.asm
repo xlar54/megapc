@@ -100,12 +100,9 @@ linear_to_chip:
         lda temp32+1
         cmp #$80
         bcs _ltc_cga            ; $B8xxx+ → CGA buffer
-        bra _ltc_attic          ; $B0xxx-$B7xxx → treat as attic
 _ltc_not_b:
-        cmp #$01
-        bcs _ltc_attic
-
         ; --- $00000–$0FFFF: Bank 4 direct ---
+        ; With 64KB reported, all guest RAM stays here
         lda temp32
         sta temp_ptr
         lda temp32+1
@@ -113,21 +110,18 @@ _ltc_not_b:
         lda #$04
         sta temp_ptr+2
         lda #$00
-        sta temp_ptr+3          ; NOT stz
+        sta temp_ptr+3
         rts
 
 _ltc_cga:
         ; --- $B8000–$BFFFF: Map to bank 2 at $2A000 ---
-        ; CGA text buffer B800:xxxx → $02A000 + (xxxx - $8000)
-        ; temp32+1 has $80-$FF (from $B8xxx-$BFxxx)
-        ; Map $80→$A0, $81→$A1, ..., $8F→$AF (4KB = $B8000-$B8FFF)
         lda temp32
         sta temp_ptr
         lda temp32+1
         clc
-        adc #$20                ; $80+$20=$A0, $81+$21=$A1, etc.
+        adc #$20
         sta temp_ptr+1
-        lda #$02                ; Bank 2
+        lda #$02
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
@@ -142,14 +136,7 @@ _ltc_f_seg:
         lda #$05
         sta temp_ptr+2
         lda #$00
-        sta temp_ptr+3          ; NOT stz
-        rts
-
-_ltc_attic:
-        ; --- $10000–$EFFFF: Attic via cache ---
-        ; Page = temp32+2 : temp32+1 (high byte + mid byte)
-        ; Offset = temp32+0
-        jsr cache_access        ; Returns pointer in temp_ptr
+        sta temp_ptr+3
         rts
 
 ; ============================================================================
@@ -181,12 +168,7 @@ mem_write8:
         lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        ; Mark cache dirty if we wrote to cache buffer (bank 0, $92xx-$95xx)
-        lda temp_ptr+2
-        bne +                   ; Not bank 0 = not cache
-        lda #1
-        sta cache_dirty,x       ; X = cache line from cache_access
-+       rts
+        rts
 
 ; ============================================================================
 ; mem_read16 — Read 16-bit word from segment:offset
@@ -222,12 +204,7 @@ mem_write16:
         lda op_result+1
         ldz #1
         sta [temp_ptr],z
-        ; Mark cache dirty if we wrote to cache buffer
-        lda temp_ptr+2
-        bne +
-        lda #1
-        sta cache_dirty,x       ; X = cache line from cache_access
-+       rts
+        rts
 
 ; ============================================================================
 ; Instruction Fetch Helpers
