@@ -2651,18 +2651,39 @@ _ii_int11:
         jmp opcode_done
 
 _ii_int19:
+        ; Debug: save state at reboot
+        lda reg_cs
+        sta $8F30
+        lda reg_cs+1
+        sta $8F31
+        lda reg_ip
+        sta $8F32
+        lda reg_ip+1
+        sta $8F33
+        lda reg_ss
+        sta $8F34
+        lda reg_ss+1
+        sta $8F35
+        lda reg_ds
+        sta $8F36
+        lda reg_ds+1
+        sta $8F37
+        lda reg_ax
+        sta $8F38
+        lda reg_ax+1
+        sta $8F39
         ; INT 19h — reboot. Print message and halt.
-        cli
         lda #$0D
-        jsr CHROUT
+        jsr chrout_safe
         ldx #0
 -       lda _reboot_msg,x
         beq +
-        jsr CHROUT
+        phx
+        jsr chrout_safe         ; String is already PETSCII from .text
+        plx
         inx
         bra -
-+       sei
-        jmp *                   ; Halt
++       jmp *                   ; Halt
 _reboot_msg:
         .text "INT 19H: REBOOT REQUESTED", $0D, 0
 

@@ -202,6 +202,16 @@ entry:
         sta ss_dirty
         sta ds_dirty
 
+        ; Clear screen before emulation
+        lda #147
+        jsr CHROUT
+
+        ; Set green text on black background (monochrome green monitor)
+        lda #30                 ; PETSCII green
+        jsr CHROUT
+        lda #147                ; PETSCII clear screen
+        jsr CHROUT
+
         ; Enter main emulation loop
         jmp main_loop
 

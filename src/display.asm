@@ -96,9 +96,7 @@ _atp_upper:
         ; $20–$5F: mostly the same in PETSCII
         rts
 _atp_lower:
-        ; $60–$7A: lowercase a–z → PETSCII lowercase
-        ; PETSCII lowercase is $41–$5A in lowercase mode
-        ; or just return as-is and rely on screen mode
-        sec
-        sbc #$20                ; Convert to uppercase range
+        ; $61–$7A: lowercase a–z → PETSCII $C1–$DA
+        clc
+        adc #$60                ; $61+$60=$C1, $7A+$60=$DA
         rts

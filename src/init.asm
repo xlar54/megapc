@@ -414,7 +414,7 @@ _init_write_dpt:
         lda #$02                ; Bytes/sector code (2=512)
         sta [temp_ptr],z
         ldz #4
-        lda #18                 ; SPT (default 18, updated by detect_floppy_geom)
+        lda floppy_spt          ; SPT from detected geometry
         sta [temp_ptr],z
         ldz #5
         lda #$2A                ; Gap length
@@ -689,21 +689,101 @@ detect_floppy_geom:
         sta dma_count_hi        ; 512 bytes
         jsr do_dma_from_attic
 
-        ; Read total sectors from BPB offset $13 (16-bit LE)
+        ; Check if BPB is valid: bytes per sector at offset $0B should be $0200
+        lda SECTOR_BUF+$0B
+        cmp #$00
+        bne _dfg_try_media      ; Not $00 in low byte → invalid BPB
+        lda SECTOR_BUF+$0C
+        cmp #$02
+        bne _dfg_try_media      ; Not $02 in high byte → invalid BPB
+
+        ; --- Valid BPB: use total sectors field ---
         lda SECTOR_BUF+$13
         sta scratch_a           ; Total sectors low
         lda SECTOR_BUF+$14
         sta scratch_b           ; Total sectors high
+        jmp _dfg_match_sectors
 
-        ; Match against known formats
+_dfg_try_media:
+        ; --- No valid BPB: read FAT media descriptor from sector 1 ---
+        ; DMA sector 1 from floppy attic
+        lda #$00
+        sta dma_src_lo
+        lda #$02
+        sta dma_src_hi          ; Sector 1 = offset $200
+        lda #$10
+        sta dma_src_bank
+        lda #<SECTOR_BUF
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_from_attic
+
+        ; Media descriptor is first byte of FAT
+        lda SECTOR_BUF
+        ; $FE = 160K, $FF = 320K, $FC = 180K, $FD = 360K
+        ; $F9 = 720K or 1.2MB, $F0 = 1.44MB
+        cmp #$FF
+        beq _dfg_320k
+        cmp #$FE
+        beq _dfg_160k
+        cmp #$FD
+        beq _dfg_360k
+        cmp #$FC
+        beq _dfg_180k
+        cmp #$F9
+        beq _dfg_720k           ; Could also be 1.2MB, assume 720K
+        ; Default: keep 1.44MB
+        bra _dfg_print
+
+_dfg_160k:
+        lda #8
+        sta floppy_spt
+        lda #1
+        sta floppy_heads
+        lda #40
+        sta floppy_cyls
+        lda #$01
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_180k:
+        lda #9
+        sta floppy_spt
+        lda #1
+        sta floppy_heads
+        lda #40
+        sta floppy_cyls
+        lda #$01
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_320k:
+        lda #8
+        sta floppy_spt
+        lda #2
+        sta floppy_heads
+        lda #40
+        sta floppy_cyls
+        lda #$01
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_match_sectors:
+        ; Match total sectors against known formats
         ; 360K: 720 sectors ($02D0)
         lda scratch_b
         cmp #$02
-        bne _dfg_not_360
+        bne _dfg_ns_not_360
         lda scratch_a
         cmp #$D0
-        bne _dfg_not_360
-        ; 360K: 40 cyl, 2 heads, 9 SPT
+        bne _dfg_ns_not_360
+_dfg_360k:
         lda #9
         sta floppy_spt
         lda #2
@@ -714,14 +794,15 @@ detect_floppy_geom:
         sta floppy_type
         bra _dfg_print
 
-_dfg_not_360:
+_dfg_ns_not_360:
         ; 720K: 1440 sectors ($05A0)
         lda scratch_b
         cmp #$05
-        bne _dfg_not_720
+        bne _dfg_ns_not_720
         lda scratch_a
         cmp #$A0
-        bne _dfg_not_720
+        bne _dfg_ns_not_720
+_dfg_720k:
         lda #9
         sta floppy_spt
         lda #2
@@ -732,14 +813,14 @@ _dfg_not_360:
         sta floppy_type
         bra _dfg_print
 
-_dfg_not_720:
+_dfg_ns_not_720:
         ; 1.2MB: 2400 sectors ($0960)
         lda scratch_b
         cmp #$09
-        bne _dfg_not_12
+        bne _dfg_ns_not_12
         lda scratch_a
         cmp #$60
-        bne _dfg_not_12
+        bne _dfg_ns_not_12
         lda #15
         sta floppy_spt
         lda #2
@@ -750,7 +831,7 @@ _dfg_not_720:
         sta floppy_type
         bra _dfg_print
 
-_dfg_not_12:
+_dfg_ns_not_12:
         ; 2880 sectors ($0B40) = 1.44MB (already set as default)
         ; Fall through to print
 

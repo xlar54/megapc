@@ -102,6 +102,8 @@ io_write_port:
 ; ============================================================================
 ; INT 10h — Video Services
 ; ============================================================================
+; (cursor position tracked by scr_row/scr_col in chrout_safe)
+
 int10_handler:
         lda reg_ah
         cmp #$0E
@@ -123,65 +125,75 @@ int10_handler:
 
 _i10_teletype:
         ; AH=0E: Teletype output — write character AL to screen
-        ; Count 'F' prints at $8FE0 (tracks how many times "FreeDOS" is printed)
-        lda reg_al
-        cmp #$46                ; 'F'
-        bne +
-        inc $8FE0
-+
         lda reg_al
         cmp #$0A
         beq _i10t_done          ; Ignore LF — CR already does newline on MEGA65
         cmp #$0D
         beq _i10t_cr
-        ; Regular character: write to CGA buffer
-        ; TODO: track cursor position in BDA and write to CGA
-        ; For now: just CHROUT
+        cmp #$08
+        beq _i10t_bs            ; Backspace
+        cmp #$07
+        beq _i10t_done          ; Bell — ignore
+        cmp #$DB
+        beq _i10t_done          ; Block cursor char — ignore (cursor blink)
+        cmp #$20
+        bcc _i10t_done          ; Control chars < $20 — ignore (cursor/attr)
+        ; Regular character: convert and output via direct screen write
         jsr ascii_to_pet
-        jsr chrout_safe
+        jsr chrout_safe         ; chrout_safe handles scr_row/scr_col internally
 _i10t_done:
         rts
 _i10t_cr:
         lda #$0D
+        jsr chrout_safe         ; chrout_safe handles CR and row tracking
+        rts
+_i10t_bs:
+        lda #$9D                ; PETSCII cursor left
         jsr chrout_safe
+        rts
+
+; Also handle AH=02 set cursor — update BDA cursor position
+; (needed for DOS to track where it is, even if we don't move CHROUT cursor)
+_i10_set_cursor_bda:
+        ; Write cursor pos to BDA $0040:0050 (page 0 cursor)
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda reg_dl              ; Column
+        ldz #0
+        sta [temp_ptr],z
+        lda reg_dh              ; Row
+        ldz #1
+        sta [temp_ptr],z
         rts
 
 _i10_set_mode:
         ; AH=00: Set video mode (AL=mode)
         ; Clear screen and home cursor
         lda #$93                ; PETSCII clear screen
-        jsr chrout_safe
+        jsr chrout_safe         ; chrout_safe handles scr_row/scr_col reset
         rts
 
 _i10_set_cursor:
         ; AH=02: Set cursor position — DH=row, DL=col, BH=page
-        ; Home cursor first, then move down DH rows and right DL cols
-        lda #$13                ; PETSCII home
-        jsr chrout_safe
-        ; Move down DH rows
-        ldx reg_dh
-        beq _i10sc_cols
--       lda #$11                ; PETSCII cursor down
-        jsr chrout_safe
-        dex
-        bne -
-_i10sc_cols:
-        ; Move right DL columns
-        ldx reg_dl
-        beq _i10sc_done
--       lda #$1D                ; PETSCII cursor right
-        jsr chrout_safe
-        dex
-        bne -
-_i10sc_done:
+        lda reg_dh
+        sta scr_row
+        lda reg_dl
+        sta scr_col
         rts
 
 _i10_get_cursor:
         ; AH=03: Get cursor position
         ; Return DH=row, DL=col, CH=cursor start, CL=cursor end
-        lda #0
-        sta reg_dx              ; DL=col=0
-        sta reg_dx+1            ; DH=row=0
+        lda scr_col
+        sta reg_dx              ; DL=col
+        lda scr_row
+        sta reg_dx+1            ; DH=row
         lda #6
         sta reg_cx              ; CL=cursor end
         lda #7
@@ -198,40 +210,24 @@ _i10_scroll_up:
         lda reg_al
         bne _i10su_scroll
         ; AL=0: clear window — just clear screen
-        lda #$93                ; PETSCII clear screen
+        lda #$93
         jsr chrout_safe
         rts
 _i10su_scroll:
-        ; AL>0: scroll up AL lines (simplified: just print AL newlines)
-        tax
--       lda #$0D
-        jsr chrout_safe
-        dex
-        bne -
+        ; AL>0: scroll up — adjust row tracking
+        sec
+        lda scr_row
+        sbc reg_al
+        bcs +
+        lda #0
++       sta scr_row
         rts
 
 _i10_write_char_attr:
-        ; AH=09: Write character + attribute at cursor
-        ; AL=char, BL=attribute, CX=count
-        lda reg_al
-        jsr ascii_to_pet
-        sta scratch_d           ; Save converted char
-        lda reg_cx
-        ora reg_cx+1
-        beq _i10wa_done         ; CX=0: nothing to write
-        ; Repeat CX times (16-bit count, but cap at 255 for sanity)
-        lda reg_cx+1
-        bne _i10wa_many         ; High byte set = lots
-        ldx reg_cx
-        bra _i10wa_loop
-_i10wa_many:
-        ldx #255                ; Cap at 255
-_i10wa_loop:
-        lda scratch_d
-        jsr chrout_safe
-        dex
-        bne _i10wa_loop
-_i10wa_done:
+        ; AH=09: Write character + attribute at cursor position
+        ; On real PC this writes to CGA buffer WITHOUT advancing cursor.
+        ; We can't do in-place writes via CHROUT, so just NOP.
+        ; Real text output uses AH=0E (teletype) which we handle.
         rts
 
 _i10_get_mode:
@@ -264,30 +260,23 @@ int16_handler:
 
 _i16_wait_key:
         ; AH=00: Wait for key.
-        ; Save ZP once, keep IRQs on for the entire wait so KERNAL
-        ; keyboard scanner has time to process keypresses.
-        jsr save_zp
-        cli
--       jsr GETIN
-        cmp #$00
-        beq -                   ; No key yet, keep polling
-        sei
-        jsr restore_zp
-        ; A = PETSCII key code. Convert to ASCII and store.
-        jsr pet_to_ascii
+        ; Use MEGA65 hardware typing queue at $D610 (ASCII direct!)
+        ; No KERNAL needed — no IRQs, no ZP save/restore!
+-       lda $D610               ; Read ASCII key from hardware queue
+        beq -                   ; $00 = queue empty, keep polling
+        sta $D610               ; Dequeue the event (write any value)
+        ; A = ASCII key code (hardware provides ASCII directly)
         sta reg_al
-        ; Fake scancode in AH (just use 0 for now)
         lda #$00
-        sta reg_ah
+        sta reg_ah              ; Fake scancode
         rts
 
 _i16_check_key:
-        ; AH=01: Non-blocking check. Use GETIN once.
-        jsr getin_safe
-        cmp #$00
-        beq _i16_no_key
-        ; Key available
-        jsr pet_to_ascii
+        ; AH=01: Non-blocking check.
+        ; Peek at hardware typing queue — don't dequeue
+        lda $D610               ; Read ASCII key from hardware queue
+        beq _i16_no_key         ; $00 = no key
+        ; Key available (don't dequeue — AH=00 will do that)
         sta reg_al
         lda #$00
         sta reg_ah
@@ -330,19 +319,240 @@ _pta_done:
         rts
 
 ; ============================================================================
-; chrout_safe — Call CHROUT without KERNAL IRQ trashing our ZP
+; chrout_safe — Output character without trashing ZP
 ; ============================================================================
 ; Input: A = PETSCII character to output
-; Saves ZP $90–$C0 before enabling IRQs, restores after.
+; Writes directly to MEGA65 screen RAM — no KERNAL, no IRQs.
 ;
+SCREEN_BASE     = $0800         ; MEGA65 default 80-col screen RAM
+SCR_COLS        = 80
+SCR_ROWS        = 25
+
 chrout_safe:
-        pha                     ; Save character
-        jsr save_zp
-        pla                     ; Recover character
-        cli
-        jsr CHROUT
-        sei
-        jsr restore_zp
+        cmp #$0D
+        beq _cs_cr
+        cmp #$93
+        beq _cs_cls
+        cmp #$11
+        beq _cs_down
+        cmp #$1D
+        beq _cs_right
+        cmp #$9D
+        beq _cs_left
+        cmp #$13
+        beq _cs_home
+        ; Regular character: write to screen RAM at scr_row * 80 + scr_col
+        pha
+        jsr _cs_calc_ptr        ; temp_ptr = screen address
+        pla
+        jsr pet_to_screen       ; Convert PETSCII to screen code
+        ldz #0
+        sta [temp_ptr],z
+        ; Advance column
+        inc scr_col
+        lda scr_col
+        cmp #SCR_COLS
+        bcc _cs_done
+        ; Wrap to next line
+        lda #0
+        sta scr_col
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc _cs_done
+        jsr _cs_scroll
+_cs_done:
+        rts
+
+_cs_cr:
+        lda #0
+        sta scr_col
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc +
+        jsr _cs_scroll
++       rts
+
+_cs_cls:
+        ; Clear screen via DMA fill
+        lda #$00
+        sta $D707
+        .byte $80, $00          ; Source MB = 0
+        .byte $81, $00          ; Dest MB = 0
+        .byte $00               ; End options
+        .byte $03               ; Command = FILL
+        .word 2000              ; Count = 80*25
+        .word $0020             ; Fill value = $20 (space screen code) in low byte
+        .byte $00               ; Source bank (unused for fill, but value used as fill)
+        .word SCREEN_BASE       ; Dest address
+        .byte $00               ; Dest bank
+        .byte $00, $00, $00     ; Modulo
+        lda #0
+        sta scr_row
+        sta scr_col
+        rts
+
+_cs_down:
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc +
+        jsr _cs_scroll
++       rts
+
+_cs_right:
+        inc scr_col
+        lda scr_col
+        cmp #SCR_COLS
+        bcc +
+        lda #SCR_COLS-1
+        sta scr_col
++       rts
+
+_cs_left:
+        lda scr_col
+        beq +
+        dec scr_col
++       rts
+
+_cs_home:
+        lda #0
+        sta scr_row
+        sta scr_col
+        rts
+
+; --- Calculate screen pointer from scr_row/scr_col ---
+; Output: temp_ptr = SCREEN_BASE + scr_row * 80 + scr_col
+_cs_calc_ptr:
+        ; row * 80 = row * 64 + row * 16
+        lda scr_row
+        asl
+        asl
+        asl
+        asl
+        sta scratch_a           ; row*16 low
+        lda scr_row
+        lsr
+        lsr
+        lsr
+        lsr
+        sta scratch_b           ; row*16 high
+        lda scr_row
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta scratch_c           ; row*64 low
+        lda scr_row
+        lsr
+        lsr
+        sta scratch_d           ; row*64 high
+        clc
+        lda scratch_a
+        adc scratch_c
+        sta scratch_a           ; (row*80) low
+        lda scratch_b
+        adc scratch_d
+        sta scratch_b           ; (row*80) high
+        ; Add column
+        clc
+        lda scratch_a
+        adc scr_col
+        sta scratch_a
+        lda scratch_b
+        adc #0
+        sta scratch_b
+        ; Add SCREEN_BASE
+        clc
+        lda scratch_a
+        adc #<SCREEN_BASE
+        sta temp_ptr
+        lda scratch_b
+        adc #>SCREEN_BASE
+        sta temp_ptr+1
+        lda #$00
+        sta temp_ptr+2
+        sta temp_ptr+3
+        rts
+
+; --- Scroll screen up one line via DMA ---
+_cs_scroll:
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc _cs_scroll_done     ; Not past bottom, no scroll needed
+        ; DMA copy: row 1-24 → row 0-23 (1920 bytes = 24*80)
+        lda #$00
+        sta $D707
+        .byte $80, $00          ; Source MB = 0
+        .byte $81, $00          ; Dest MB = 0
+        .byte $00               ; End options
+        .byte $00               ; Command = COPY
+        .word 1920              ; Count = 24 * 80
+        .word SCREEN_BASE+SCR_COLS ; Source = row 1
+        .byte $00               ; Source bank
+        .word SCREEN_BASE       ; Dest = row 0
+        .byte $00               ; Dest bank
+        .byte $00, $00, $00     ; Modulo
+        ; Clear last row (fill with spaces)
+        lda #$00
+        sta $D707
+        .byte $80, $00
+        .byte $81, $00
+        .byte $00
+        .byte $03               ; Command = FILL
+        .word SCR_COLS          ; Count = 80
+        .word $0020             ; Fill value = space
+        .byte $00
+        .word SCREEN_BASE+1920  ; Dest = row 24
+        .byte $00
+        .byte $00, $00, $00
+        lda #SCR_ROWS-1
+        sta scr_row             ; Cursor on last row
+_cs_scroll_done:
+        rts
+
+; Screen position tracking
+scr_row         .byte 0
+scr_col         .byte 0
+
+; Convert PETSCII to screen code (lowercase charset mode)
+; Lowercase charset: screen $01-$1A = lowercase a-z
+;                    screen $41-$5A = uppercase A-Z
+;                    screen $00 = @
+pet_to_screen:
+        ; $20-$3F → $20-$3F (space, digits, punctuation)
+        cmp #$40
+        bcc _pts_done
+        beq _pts_at             ; $40 (@) → $00
+        ; $41-$5A (PETSCII uppercase A-Z) → screen $41-$5A (uppercase)
+        cmp #$5B
+        bcc _pts_done           ; Stay as-is
+        ; $5B-$5F ([\]^_) → screen $1B-$1F
+        cmp #$60
+        bcc _pts_bracket
+        ; $60-$BF → not standard, use as-is
+        cmp #$C0
+        bcc _pts_done
+        ; $C1-$DA (PETSCII lowercase a-z) → screen $01-$1A
+        cmp #$DB
+        bcc _pts_lower
+        ; $DB+ → mask
+        and #$7F
+        rts
+_pts_at:
+        lda #$00
+        rts
+_pts_bracket:
+        sec
+        sbc #$40                ; $5B→$1B, $5F→$1F
+        rts
+_pts_lower:
+        sec
+        sbc #$C0                ; $C1→$01, $DA→$1A
+_pts_done:
         rts
 
 ; ============================================================================
