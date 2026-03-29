@@ -24,16 +24,16 @@ io_read_port:
         lda temp32+1
         bne _irp_high
 
-        ; Low port range (0–255)
+        ; Low port range (0–255) — check highest first
         lda temp32
-        cmp #$3D
-        bcs _irp_cga_range
         cmp #$60
-        bcs _irp_kbd
+        bcs _irp_kbd            ; $60+ → keyboard
         cmp #$40
-        bcs _irp_pit
+        bcs _irp_pit            ; $40-$5F → PIT
+        cmp #$3D
+        bcs _irp_cga_range      ; $3D-$3F → CGA (but high byte check needed)
         cmp #$20
-        bcs _irp_pic
+        bcs _irp_pic            ; $20-$3C → PIC
 
         ; Unhandled low port: return $FF
         lda #$FF
@@ -158,26 +158,6 @@ _i10t_bs:
         jsr chrout_safe
         rts
 
-; Also handle AH=02 set cursor — update BDA cursor position
-; (needed for DOS to track where it is, even if we don't move CHROUT cursor)
-_i10_set_cursor_bda:
-        ; Write cursor pos to BDA $0040:0050 (page 0 cursor)
-        lda #$50
-        sta temp_ptr
-        lda #$04
-        sta temp_ptr+1
-        lda #$04
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
-        lda reg_dl              ; Column
-        ldz #0
-        sta [temp_ptr],z
-        lda reg_dh              ; Row
-        ldz #1
-        sta [temp_ptr],z
-        rts
-
 _i10_set_mode:
         ; AH=00: Set video mode (AL=mode)
         ; Clear screen and home cursor
@@ -191,11 +171,7 @@ _i10_set_cursor:
         sta scr_row
         lda reg_dl
         sta scr_col
-        lda #1
-        sta cursor_set          ; Mark that cursor was repositioned
         rts
-
-cursor_set      .byte 0         ; 1 = AH=02 just called, next AH=0E writes in-place
 
 _i10_get_cursor:
         ; AH=03: Get cursor position

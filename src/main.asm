@@ -108,14 +108,14 @@ CACHE_INVALID   = $FF           ; Sentinel: no page cached
 
 ; --- RAM size ---
 ; Conventional memory reported to DOS via INT 12h and BDA
-RAM_KB          = 64           ; 64 = 64KB (bank 4 only), 640 = full conventional
+RAM_KB          = 640           ; 64 = 64KB (bank 4 only), 640 = full conventional
 RAM_KB_LO       = <RAM_KB       ; Low byte for registers
 RAM_KB_HI       = >RAM_KB       ; High byte for registers
 
 ; --- Video mode ---
 ; Set VIDEO_MODE to 3 for CGA color, 7 for monochrome
-VIDEO_MODE      = 7             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
-VIDEO_EQUIP     = $31           ; Equipment word: $21 = CGA, $31 = mono
+VIDEO_MODE      = 3             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
+VIDEO_EQUIP     = $21           ; Equipment word: $21 = CGA, $31 = mono
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9600         ; 512-byte sector buffer
@@ -216,6 +216,11 @@ entry:
         ; Clear screen before emulation
         lda #147
         jsr CHROUT
+
+        ; Clear attic access counter (after init, before emulation)
+        lda #0
+        sta $8F44
+        sta $8F45
 
         ; Set green text on black background (monochrome green monitor)
         lda #30                 ; PETSCII green

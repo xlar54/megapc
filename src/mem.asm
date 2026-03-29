@@ -342,6 +342,12 @@ fetch_word:
         sta opcode_ptr+1
         bcc +
         inc opcode_ptr+2
+        ; A20 wrap check (same as fetch_byte)
+        lda opcode_ptr+2
+        cmp #$06
+        bcc +
+        lda #$04
+        sta opcode_ptr+2
 +
         pla                     ; A = low byte
         rts

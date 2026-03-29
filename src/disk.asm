@@ -275,59 +275,55 @@ _i13_read_loop:
         jsr seg_ofs_to_linear
         ; temp32 now has 20-bit linear address
 
-        ; Check if destination is in chip RAM or attic
-        lda temp32+2
-        beq _i13_dest_chip      ; $0xxxx = bank 4 chip RAM
-        cmp #$0F
-        beq _i13_dest_chip      ; $Fxxxx = bank 5 chip RAM (unlikely but safe)
-        bra _i13_dest_attic     ; $1xxxx-$Exxxx = attic
-_i13_dest_chip:
-        ; Destination is in chip RAM — safe to DMA 512 bytes directly
+        ; Copy 512 bytes from SECTOR_BUF to ES:BX byte by byte
+        ; This handles boundary crossings between bank 4 and attic safely
+        ldy #0
+_i13_copy_loop:
+        lda SECTOR_BUF,y
+        sta scratch_d
+        phy
         jsr linear_to_chip
-        lda #<SECTOR_BUF
-        sta dma_src_lo
-        lda #>SECTOR_BUF
-        sta dma_src_hi
-        lda #$00
-        sta dma_src_bank
-        lda temp_ptr
-        sta dma_dst_lo
-        lda temp_ptr+1
-        sta dma_dst_hi
+        lda scratch_d
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark cache dirty if write went to cache buffer
         lda temp_ptr+2
-        sta dma_dst_bank
-        lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi
-        jsr do_dma_chip_copy
-        bra _i13_advance
-
-_i13_dest_attic:
-        ; Destination is in attic — DMA 512 bytes directly to attic
-        ; temp32 has 20-bit linear address
-        ; Attic address = $8000000 + temp32 (20-bit)
-        ; DMA dest: MB = $80, bank = temp32+2, addr = temp32+1:temp32
-        lda #<SECTOR_BUF
-        sta dma_src_lo
-        lda #>SECTOR_BUF
-        sta dma_src_hi
-        lda #$00
-        sta dma_src_bank
-        lda temp32
-        sta dma_dst_lo
-        lda temp32+1
-        sta dma_dst_hi
-        lda temp32+2
-        sta dma_dst_bank
-        lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi
-        jsr do_dma_to_attic
-        ; INVALIDATE (not flush!) cache lines — the attic has fresh data,
-        ; flushing would overwrite it with stale cached data
-        jsr cache_invalidate_all
+        bne +
+        lda #1
+        sta cache_dirty
++
+        ; Advance linear address
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
+        iny
+        bne _i13_copy_loop
+        ; Second 256 bytes
+        ldy #0
+_i13_copy_loop2:
+        lda SECTOR_BUF+256,y
+        sta scratch_d
+        phy
+        jsr linear_to_chip
+        lda scratch_d
+        ldz #0
+        sta [temp_ptr],z
+        lda temp_ptr+2
+        bne +
+        lda #1
+        sta cache_dirty
++
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
+        iny
+        bne _i13_copy_loop2
 
 _i13_advance:
 
