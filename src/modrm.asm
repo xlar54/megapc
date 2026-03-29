@@ -325,10 +325,8 @@ read_rm16:
         ldz #0
         lda [rm_addr],z
         sta op_source
-        ; Check page boundary if in cache buffer (bank 0)
-        lda rm_addr+2
-        bne _rrm16_no_cross     ; Not cache → safe to read z=1
-        lda rm_addr
+        ; Check page boundary crossing
+        lda temp32
         cmp #$FF
         beq _rrm16_cross
 _rrm16_no_cross:
@@ -337,9 +335,11 @@ _rrm16_no_cross:
         sta op_source+1
         rts
 _rrm16_cross:
-        ; Re-resolve next linear byte through cache
-        inc temp32
-        bne +
+        ; Save temp32, resolve next byte, restore
+        lda temp32+1
+        sta scratch_a
+        lda temp32+2
+        sta scratch_b
         inc temp32+1
         bne +
         inc temp32+2
@@ -347,6 +347,13 @@ _rrm16_cross:
         ldz #0
         lda [temp_ptr],z
         sta op_source+1
+        ; Restore temp32 so write_rm16 sees original address
+        lda #$FF
+        sta temp32
+        lda scratch_a
+        sta temp32+1
+        lda scratch_b
+        sta temp32+2
         rts
 _rrm16_reg:
         ldx rm_addr
@@ -374,6 +381,7 @@ write_rm8:
         tax
         lda #1
         sta cache_dirty,x
+        jsr invalidate_code_cache_for_line
 +       rts
 _wrm8_reg:
         pla
@@ -398,11 +406,10 @@ write_rm16:
         tax
         lda #1
         sta cache_dirty,x
+        jsr invalidate_code_cache_for_line
 +
-        ; Check page boundary if in cache buffer (bank 0)
-        lda rm_addr+2
-        bne _wrm16_no_cross
-        lda rm_addr
+        ; Check page boundary crossing
+        lda temp32
         cmp #$FF
         beq _wrm16_cross
 _wrm16_no_cross:
@@ -411,9 +418,11 @@ _wrm16_no_cross:
         sta [rm_addr],z
         rts
 _wrm16_cross:
-        ; Re-resolve next linear byte through cache
-        inc temp32
-        bne +
+        ; Save temp32 so repeated accesses stay anchored
+        lda temp32+1
+        sta scratch_a
+        lda temp32+2
+        sta scratch_b
         inc temp32+1
         bne +
         inc temp32+2
@@ -425,7 +434,14 @@ _wrm16_cross:
         lda temp_ptr+2
         bne +
         jsr mark_cache_dirty
-+       rts
++       ; Restore temp32
+        lda #$FF
+        sta temp32
+        lda scratch_a
+        sta temp32+1
+        lda scratch_b
+        sta temp32+2
+        rts
 _wrm16_reg:
         ldx rm_addr
         lda op_result

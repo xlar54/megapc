@@ -163,6 +163,7 @@ mark_cache_dirty:
         tax
         lda #1
         sta cache_dirty,x
+        jsr invalidate_code_cache_for_line
         rts
 
 ; ============================================================================

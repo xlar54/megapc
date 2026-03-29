@@ -187,7 +187,7 @@ _dma_ccache_src_bank:
         .byte $00
         .word $0000
 
-        ; Also load 8 bytes from NEXT page for instruction spillover
+        ; Also load full next page for instruction spillover
         clc
         lda temp32+1
         adc #1
@@ -204,7 +204,7 @@ _dma_ccache_src_bank:
         .byte $81, $00          ; dst MB = $00 (chip)
         .byte $00               ; end options
         .byte $00               ; copy
-        .word $0008             ; 8 bytes
+        .word $0100             ; full next page (256 bytes)
 _dma_ccache_spill_src:
         .word $0000             ; src addr (patched)
 _dma_ccache_spill_bank:

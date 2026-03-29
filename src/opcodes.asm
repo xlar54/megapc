@@ -1303,49 +1303,35 @@ op_mov_acc_mem:
 
         ; Load: acc ← memory
         ldx #SEG_DS_OFS
-        jsr seg_ofs_to_linear
-        jsr linear_to_chip
         lda i_w
         beq _mam_load_byte
-        ; Word
-        ldz #0
-        lda [temp_ptr],z
+        jsr mem_read16
+        lda op_source
         sta reg_ax
-        ldz #1
-        lda [temp_ptr],z
+        lda op_source+1
         sta reg_ax+1
         jmp opcode_done
 _mam_load_byte:
-        ldz #0
-        lda [temp_ptr],z
+        jsr mem_read8
         sta reg_al
         jmp opcode_done
 
 _mam_store:
         ; Store: memory ← acc
         ldx #SEG_DS_OFS
-        jsr seg_ofs_to_linear
-        jsr linear_to_chip
         lda i_w
         beq _mam_store_byte
         lda reg_ax
-        ldz #0
-        sta [temp_ptr],z
+        sta op_result
         lda reg_ax+1
-        ldz #1
-        sta [temp_ptr],z
-        bra _mam_mark_dirty
+        sta op_result+1
+        jsr mem_write16
+        jmp opcode_done
 _mam_store_byte:
         lda reg_al
-        ldz #0
-        sta [temp_ptr],z
-_mam_mark_dirty:
-        ; Mark cache dirty if we wrote to cache buffer
-        lda temp_ptr+2
-        bne +
-        lda #1
-        sta cache_dirty,x       ; X = cache line from cache_access
-+       jmp opcode_done
+        sta scratch_d
+        jsr mem_write8
+        jmp opcode_done
 
 ; ============================================================================
 ; $0C — Shift/Rotate (C0/C1/D0–D3)
@@ -2164,15 +2150,15 @@ _in_read:
         jsr io_read_port
         sta reg_al
         lda i_w
-        beq +
-        ; Word: second byte read (port+1)
+        beq _in_done
+        ; Word: read high byte from port+1
         inc temp32
         bne +
         inc temp32+1
-        ; Simplified: high byte = 0
-        lda #0
++       jsr io_read_port
         sta reg_ah
-+       jmp opcode_done
+_in_done:
+        jmp opcode_done
 
 ; ============================================================================
 ; $16 — OUT (E6/E7/EE/EF)
@@ -2194,6 +2180,15 @@ _out_dx:
 _out_write:
         lda reg_al
         jsr io_write_port
+        lda i_w
+        beq _out_done
+        ; Word: write high byte to port+1
+        inc temp32
+        bne +
+        inc temp32+1
++       lda reg_ah
+        jsr io_write_port
+_out_done:
         jmp opcode_done
 
 ; ============================================================================
@@ -3254,9 +3249,172 @@ _gfm_byte:
         jmp opcode_done
 
 _gf_imul:
-        ; Signed multiply — simplified: treat as unsigned for now
-        ; TODO: proper sign handling
-        jmp _gf_mul
+        ; Signed multiply: AL * r/m8 → AX  or  AX * r/m16 → DX:AX
+        lda i_w
+        beq _gfim_byte
+        ; Word: AX * r/m16
+        jsr read_rm16
+        ; Detect signs
+        lda #0
+        sta $8F52               ; Sign flag: 0=positive, 1=negative result
+        lda reg_ax+1
+        bpl _gfim_w_src
+        ; Negate AX
+        lda #1
+        eor $8F52
+        sta $8F52
+        sec
+        lda #0
+        sbc reg_ax
+        sta reg_ax
+        lda #0
+        sbc reg_ax+1
+        sta reg_ax+1
+_gfim_w_src:
+        lda op_source+1
+        bpl _gfim_w_do
+        ; Negate source
+        lda #1
+        eor $8F52
+        sta $8F52
+        sec
+        lda #0
+        sbc op_source
+        sta op_source
+        lda #0
+        sbc op_source+1
+        sta op_source+1
+_gfim_w_do:
+        ; Unsigned multiply via hardware multiplier
+        lda reg_ax
+        sta $D770
+        lda reg_ax+1
+        sta $D771
+        lda op_source
+        sta $D774
+        lda op_source+1
+        sta $D775
+        lda $D778
+        sta reg_ax
+        lda $D779
+        sta reg_ax+1
+        lda $D77A
+        sta reg_dx
+        lda $D77B
+        sta reg_dx+1
+        ; Apply sign to DX:AX if needed
+        lda $8F52
+        beq _gfim_w_flags
+        ; Negate DX:AX
+        sec
+        lda #0
+        sbc reg_ax
+        sta reg_ax
+        lda #0
+        sbc reg_ax+1
+        sta reg_ax+1
+        lda #0
+        sbc reg_dx
+        sta reg_dx
+        lda #0
+        sbc reg_dx+1
+        sta reg_dx+1
+_gfim_w_flags:
+        ; CF=OF=1 if DX is sign extension of AX (i.e., upper half matters)
+        lda reg_ax+1
+        bpl _gfim_w_pos
+        ; AX is negative: DX should be $FFFF for no overflow
+        lda reg_dx
+        and reg_dx+1
+        cmp #$FF
+        beq _gfim_w_noof
+        bra _gfim_w_of
+_gfim_w_pos:
+        ; AX is positive: DX should be $0000 for no overflow
+        lda reg_dx
+        ora reg_dx+1
+        beq _gfim_w_noof
+_gfim_w_of:
+        lda #1
+        sta flag_cf
+        sta flag_of
+        jmp opcode_done
+_gfim_w_noof:
+        lda #0
+        sta flag_cf
+        sta flag_of
+        jmp opcode_done
+
+_gfim_byte:
+        ; Byte: AL * r/m8 → AX
+        jsr read_rm8
+        sta op_source
+        lda #0
+        sta $8F52
+        lda reg_al
+        bpl _gfim_b_src
+        lda #1
+        sta $8F52
+        ; Negate AL
+        sec
+        lda #0
+        sbc reg_al
+        sta reg_al
+_gfim_b_src:
+        lda op_source
+        bpl _gfim_b_do
+        lda #1
+        eor $8F52
+        sta $8F52
+        sec
+        lda #0
+        sbc op_source
+        sta op_source
+_gfim_b_do:
+        ; Unsigned multiply
+        lda reg_al
+        sta $D770
+        lda #0
+        sta $D771
+        lda op_source
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778
+        sta reg_al
+        lda $D779
+        sta reg_ah
+        ; Apply sign
+        lda $8F52
+        beq _gfim_b_flags
+        sec
+        lda #0
+        sbc reg_al
+        sta reg_al
+        lda #0
+        sbc reg_ah
+        sta reg_ah
+_gfim_b_flags:
+        ; CF=OF=1 if AH is not sign extension of AL
+        lda reg_al
+        bpl _gfim_b_pos
+        lda reg_ah
+        cmp #$FF
+        beq _gfim_b_noof
+        bra _gfim_b_of
+_gfim_b_pos:
+        lda reg_ah
+        beq _gfim_b_noof
+_gfim_b_of:
+        lda #1
+        sta flag_cf
+        sta flag_of
+        jmp opcode_done
+_gfim_b_noof:
+        lda #0
+        sta flag_cf
+        sta flag_of
+        jmp opcode_done
 
 _gf_div:
         ; Unsigned divide: AX / r/m8 → AL=quot, AH=rem
@@ -3328,9 +3486,217 @@ _gfd_div0:
 _gf_div_count = $8F15           ; counter for DIV BYTE ops
 
 _gf_idiv:
-        ; Signed divide — simplified: treat as unsigned for now
-        ; TODO: proper sign handling
-        jmp _gf_div
+        ; Signed divide: AX / r/m8 → AL=quot, AH=rem
+        ; or DX:AX / r/m16 → AX=quot, DX=rem
+        ; Quotient sign = dividend sign XOR divisor sign
+        ; Remainder sign = dividend sign
+        lda i_w
+        beq _gfid_byte
+
+        ; Word: DX:AX / r/m16
+        jsr read_rm16
+        lda op_source
+        ora op_source+1
+        beq _gfd_div0           ; Divide by zero
+
+        lda #0
+        sta $8F52               ; Quotient sign
+        sta $8F53               ; Remainder sign (= dividend sign)
+
+        ; Check dividend sign (DX:AX)
+        lda reg_dx+1
+        bpl _gfid_w_divsrc
+        ; Negate DX:AX
+        lda #1
+        sta $8F52
+        sta $8F53
+        sec
+        lda #0
+        sbc reg_ax
+        sta reg_ax
+        lda #0
+        sbc reg_ax+1
+        sta reg_ax+1
+        lda #0
+        sbc reg_dx
+        sta reg_dx
+        lda #0
+        sbc reg_dx+1
+        sta reg_dx+1
+
+_gfid_w_divsrc:
+        ; Check divisor sign
+        lda op_source+1
+        bpl _gfid_w_do
+        ; Negate divisor
+        lda #1
+        eor $8F52
+        sta $8F52               ; Flip quotient sign
+        sec
+        lda #0
+        sbc op_source
+        sta op_source
+        lda #0
+        sbc op_source+1
+        sta op_source+1
+
+_gfid_w_do:
+        ; Unsigned divide
+        lda reg_ax
+        sta div_dividend
+        lda reg_ax+1
+        sta div_dividend+1
+        lda reg_dx
+        sta div_dividend+2
+        lda reg_dx+1
+        sta div_dividend+3
+        lda op_source
+        sta div_divisor
+        lda op_source+1
+        sta div_divisor+1
+        jsr div_32by16
+
+        ; Signed overflow check: quotient must fit in -32768..32767
+        lda div_quotient+2
+        ora div_quotient+3
+        bne _gfd_div0           ; Absolute quotient > 16 bits
+        lda $8F52
+        beq _gfid_w_posq
+        ; Negative quotient: max absolute value is 32768 ($8000)
+        lda div_quotient+1
+        cmp #$80
+        beq _gfid_w_exact_neg
+        bcs _gfd_div0           ; > $8000 → overflow
+        bra _gfid_w_apply
+_gfid_w_exact_neg:
+        lda div_quotient
+        bne _gfd_div0           ; > $8000 → overflow
+        bra _gfid_w_apply
+_gfid_w_posq:
+        ; Positive quotient: max is 32767 ($7FFF)
+        lda div_quotient+1
+        bmi _gfd_div0           ; >= $8000 → overflow
+
+_gfid_w_apply:
+        ; Apply quotient sign
+        lda div_quotient
+        sta reg_ax
+        lda div_quotient+1
+        sta reg_ax+1
+        lda $8F52
+        beq _gfid_w_rem
+        ; Negate quotient
+        sec
+        lda #0
+        sbc reg_ax
+        sta reg_ax
+        lda #0
+        sbc reg_ax+1
+        sta reg_ax+1
+
+_gfid_w_rem:
+        ; Apply remainder sign (= dividend sign)
+        lda div_remainder
+        sta reg_dx
+        lda div_remainder+1
+        sta reg_dx+1
+        lda $8F53
+        beq _gfid_w_done
+        sec
+        lda #0
+        sbc reg_dx
+        sta reg_dx
+        lda #0
+        sbc reg_dx+1
+        sta reg_dx+1
+_gfid_w_done:
+        jmp opcode_done
+
+_gfid_byte:
+        ; Byte: AX / r/m8 → AL=quot, AH=rem
+        jsr read_rm8
+        beq _gfd_div0
+        sta op_source
+
+        lda #0
+        sta $8F52               ; Quotient sign
+        sta $8F53               ; Remainder sign
+
+        ; Check dividend sign (AX)
+        lda reg_ah
+        bpl _gfid_b_divsrc
+        lda #1
+        sta $8F52
+        sta $8F53
+        ; Negate AX
+        sec
+        lda #0
+        sbc reg_al
+        sta reg_al
+        lda #0
+        sbc reg_ah
+        sta reg_ah
+
+_gfid_b_divsrc:
+        lda op_source
+        bpl _gfid_b_do
+        lda #1
+        eor $8F52
+        sta $8F52
+        sec
+        lda #0
+        sbc op_source
+        sta op_source
+
+_gfid_b_do:
+        lda reg_al
+        sta div_dividend
+        lda reg_ah
+        sta div_dividend+1
+        lda #0
+        sta div_dividend+2
+        sta div_dividend+3
+        lda op_source
+        sta div_divisor
+        lda #0
+        sta div_divisor+1
+        jsr div_16by8
+
+        ; Signed overflow: quotient must fit -128..127
+        lda div_quotient+1
+        bne _gfd_div0           ; > 8 bits
+        lda $8F52
+        beq _gfid_b_posq
+        ; Negative: max absolute is 128 ($80)
+        lda div_quotient
+        cmp #$81
+        bcs _gfd_div0
+        bra _gfid_b_apply
+_gfid_b_posq:
+        lda div_quotient
+        cmp #$80
+        bcs _gfd_div0           ; >= 128 → overflow
+
+_gfid_b_apply:
+        lda div_quotient
+        sta reg_al
+        lda $8F52
+        beq _gfid_b_rem
+        sec
+        lda #0
+        sbc reg_al
+        sta reg_al
+_gfid_b_rem:
+        lda div_remainder
+        sta reg_ah
+        lda $8F53
+        beq _gfid_b_done
+        sec
+        lda #0
+        sbc reg_ah
+        sta reg_ah
+_gfid_b_done:
+        jmp opcode_done
 
 ; ============================================================================
 ; Software Division Routines

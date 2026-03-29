@@ -130,6 +130,53 @@ _cel_no_flush:
 cache_mark_dirty:
         lda #1
         sta cache_dirty,x
+        jsr invalidate_code_cache_for_line
+        rts
+
+; ============================================================================
+; invalidate_code_cache_for_line — Invalidate code cache if line X overlaps it
+; ============================================================================
+; Input: X = cache line index
+; Compares the cache line's linear page against the current code-cache page
+; and the spill page immediately following it. If either matches, the code
+; cache is invalidated so freshly written attic-backed code will be reloaded.
+;
+invalidate_code_cache_for_line:
+        lda code_cache_pg_hi
+        cmp #CACHE_INVALID
+        beq _iccf_done
+
+        ; Match current code page?
+        lda cache_page_lo,x
+        cmp code_cache_pg_lo
+        bne _iccf_check_spill
+        lda cache_page_hi,x
+        cmp code_cache_pg_hi
+        beq _iccf_invalidate
+
+_iccf_check_spill:
+        ; Match spill page (code page + 1)?
+        lda code_cache_pg_lo
+        clc
+        adc #1
+        sta scratch_a
+        lda code_cache_pg_hi
+        adc #0
+        and #$0F
+        sta scratch_b
+
+        lda cache_page_lo,x
+        cmp scratch_a
+        bne _iccf_done
+        lda cache_page_hi,x
+        cmp scratch_b
+        bne _iccf_done
+
+_iccf_invalidate:
+        lda #CACHE_INVALID
+        sta code_cache_pg_lo
+        sta code_cache_pg_hi
+_iccf_done:
         rts
 
 ; ============================================================================

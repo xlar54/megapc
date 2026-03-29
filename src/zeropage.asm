@@ -157,7 +157,7 @@ floppy_cyls     = $8F42         ; Number of cylinders
 floppy_type     = $8F43         ; BIOS drive type ($01=360K,$02=1.2M,$03=720K,$04=1.44M)
 
 ; PUSHA saved SP (2 bytes) — in non-ZP RAM to avoid KERNAL conflicts
-pusha_saved_sp  = $8F00         ; 2 bytes
+pusha_saved_sp  = $8F50         ; 2 bytes (moved from $8F00 which is used for prev opcode)
 
 ; Division working variables — in non-ZP RAM to avoid KERNAL conflicts
 ; (KERNAL uses $C1-$CE for screen/keyboard during CHROUT)
