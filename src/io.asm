@@ -148,12 +148,32 @@ _i10t_cr:
 
 _i10_set_mode:
         ; AH=00: Set video mode (AL=mode)
-        ; Just acknowledge — we always run mode 3 (80x25 text)
+        ; Clear screen and home cursor
+        lda #$93                ; PETSCII clear screen
+        jsr chrout_safe
         rts
 
 _i10_set_cursor:
         ; AH=02: Set cursor position — DH=row, DL=col, BH=page
-        ; TODO: update BDA cursor position
+        ; Home cursor first, then move down DH rows and right DL cols
+        lda #$13                ; PETSCII home
+        jsr chrout_safe
+        ; Move down DH rows
+        ldx reg_dh
+        beq _i10sc_cols
+-       lda #$11                ; PETSCII cursor down
+        jsr chrout_safe
+        dex
+        bne -
+_i10sc_cols:
+        ; Move right DL columns
+        ldx reg_dl
+        beq _i10sc_done
+-       lda #$1D                ; PETSCII cursor right
+        jsr chrout_safe
+        dex
+        bne -
+_i10sc_done:
         rts
 
 _i10_get_cursor:
@@ -175,16 +195,43 @@ _i10_get_cursor:
 
 _i10_scroll_up:
         ; AH=06: Scroll up — AL=lines (0=clear)
-        ; TODO: implement CGA buffer scrolling
+        lda reg_al
+        bne _i10su_scroll
+        ; AL=0: clear window — just clear screen
+        lda #$93                ; PETSCII clear screen
+        jsr chrout_safe
+        rts
+_i10su_scroll:
+        ; AL>0: scroll up AL lines (simplified: just print AL newlines)
+        tax
+-       lda #$0D
+        jsr chrout_safe
+        dex
+        bne -
         rts
 
 _i10_write_char_attr:
         ; AH=09: Write character + attribute at cursor
         ; AL=char, BL=attribute, CX=count
-        ; Simplified: just write char via teletype
         lda reg_al
         jsr ascii_to_pet
+        sta scratch_d           ; Save converted char
+        lda reg_cx
+        ora reg_cx+1
+        beq _i10wa_done         ; CX=0: nothing to write
+        ; Repeat CX times (16-bit count, but cap at 255 for sanity)
+        lda reg_cx+1
+        bne _i10wa_many         ; High byte set = lots
+        ldx reg_cx
+        bra _i10wa_loop
+_i10wa_many:
+        ldx #255                ; Cap at 255
+_i10wa_loop:
+        lda scratch_d
         jsr chrout_safe
+        dex
+        bne _i10wa_loop
+_i10wa_done:
         rts
 
 _i10_get_mode:
@@ -315,7 +362,6 @@ getin_safe:
 
 ; --- Save/restore ZP $70–$C0 (81 bytes) to shadow buffer ---
 ; Covers 32-bit pointers ($70-$8F) AND cache/scratch state ($90-$C0)
-; Both ranges can be trashed by KERNAL IRQ during CLI
 save_zp:
         ldx #0
 -       lda $70,x

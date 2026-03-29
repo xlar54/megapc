@@ -2568,6 +2568,8 @@ _ii_not0_count:
         beq _ii_int11
         cmp #$29
         beq _ii_int29
+        cmp #$15
+        beq _ii_int15
         cmp #$19
         beq _ii_int19
         ; Default: execute via IVT
@@ -2605,6 +2607,26 @@ _i29_done:
 _i29_cr:
         lda #$0D
         jsr chrout_safe
+        jmp opcode_done
+
+_ii_int15:
+        ; INT 15h — System services
+        ; AH=88: Get extended memory size → return 0 (no extended memory)
+        ; AH=C0: Get system config → return CF=1 (not supported)
+        ; All others: return CF=1, AH=86 (unsupported)
+        lda reg_ah
+        cmp #$88
+        bne _i15_not88
+        lda #0
+        sta reg_ax
+        sta reg_ax+1            ; AX=0 (0KB extended memory)
+        sta flag_cf             ; CF=0 success
+        jmp opcode_done
+_i15_not88:
+        lda #$86                ; Unsupported function
+        sta reg_ah
+        lda #1
+        sta flag_cf             ; CF=1 error
         jmp opcode_done
 
 _ii_int12:

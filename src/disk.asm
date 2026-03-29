@@ -16,9 +16,7 @@
 ;
 ; For 1.44MB floppy: 80 cylinders, 2 heads, 18 sectors/track
 
-FLOPPY_CYLS     = 80
-FLOPPY_HEADS    = 2
-FLOPPY_SPT      = 18
+; Floppy geometry is now auto-detected — see floppy_spt/heads/cyls in zeropage.asm
 FLOPPY_SECTOR_SZ = 512
 
 ; ============================================================================
@@ -56,28 +54,58 @@ _i13_get_params:
         ; DL = drive (0 = floppy A:)
         lda reg_dl
         bne _i13_no_drive
-        ; Return parameters for 1.44MB floppy
+        ; Return parameters for detected floppy geometry
         lda #$00
         sta reg_ah              ; Status = OK
-        lda #FLOPPY_SPT
+        lda floppy_spt
         sta reg_cl              ; Sectors per track in CL bits 0–5
-        lda #(FLOPPY_CYLS-1)
-        sta reg_ch              ; Max cylinder in CH
-        lda #(FLOPPY_HEADS-1)
-        sta reg_dh              ; Max head
+        lda floppy_cyls
+        sec
+        sbc #1
+        sta reg_ch              ; Max cylinder (cyls - 1)
+        lda floppy_heads
+        sec
+        sbc #1
+        sta reg_dh              ; Max head (heads - 1)
         lda #$01
         sta reg_dl              ; Number of drives
-        lda #$04
-        sta reg_bl              ; Drive type (1.44MB)
+        lda floppy_type
+        sta reg_bl              ; Drive type
+        ; ES:DI = pointer to disk parameter table at F000:F000
+        lda #$00
+        sta reg_di
+        sta reg_es
+        lda #$F0
+        sta reg_di+1
+        sta reg_es+1
+        ; Write disk parameter table to $5F000 (F000:F000)
+        jsr _i13_write_dpt
         lda #0
         sta flag_cf
         rts
 
 _i13_no_drive:
-        lda #$01
+        ; Drive not present — return timeout error
+        lda #$80                ; Timeout / drive not ready
         sta reg_ah
+        lda #0
+        sta reg_al              ; 0 sectors transferred
+        lda #$01
+        sta reg_dl              ; Only 1 floppy drive
         lda #1
         sta flag_cf
+        ; Write status to BDA $0040:0041 (bank 4 $40441)
+        lda #$41
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$80
+        ldz #0
+        sta [temp_ptr],z
         rts
 
 ; ============================================================================
@@ -113,12 +141,12 @@ _i13_read:
         sta $8FF3
 
         ; Compute LBA from CHS
-        ; LBA = (C × 2 + H) × 18 + (S - 1)
+        ; LBA = (C × heads + H) × SPT + (S - 1)
         ; C = CH + (CL >> 6 << 8) — for floppy, CL bits 6–7 are always 0
         lda reg_ch              ; Cylinder
         sta scratch_b           ; C
 
-        ; C × 2 (heads_per_cyl = 2)
+        ; C × 2 (all standard floppy formats have 2 heads)
         asl scratch_b           ; C × 2
         ; + H
         clc
@@ -126,13 +154,13 @@ _i13_read:
         adc reg_dh              ; + head
         sta scratch_b           ; = C×2 + H
 
-        ; × 18 (sectors_per_track)
+        ; × sectors_per_track
         ; Use hardware multiplier at $D770
         lda scratch_b
         sta $D770               ; Multiplier input A (low)
         lda #0
         sta $D771               ; Multiplier input A (high)
-        lda #FLOPPY_SPT
+        lda floppy_spt
         sta $D774               ; Multiplier input B (low)
         lda #0
         sta $D775               ; Multiplier input B (high)
@@ -355,4 +383,53 @@ _i13_read_done:
         sta $8FA7
         lda flag_cf
         sta $8FA8
+        rts
+
+; ============================================================================
+; _i13_write_dpt — Write disk parameter table to F000:F000
+; ============================================================================
+; Standard 11-byte disk parameter table for INT 1Eh / AH=08
+;
+_i13_write_dpt:
+        lda #$00
+        sta temp_ptr
+        lda #$F0
+        sta temp_ptr+1
+        lda #$05                ; Bank 5 (F000 segment)
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda #$CF                ; Byte 0: SRT/HUT (step rate 0xC, head unload 0xF)
+        sta [temp_ptr],z
+        ldz #1
+        lda #$02                ; Byte 1: DMA/HLT (head load time)
+        sta [temp_ptr],z
+        ldz #2
+        lda #$25                ; Byte 2: Motor off delay (ticks)
+        sta [temp_ptr],z
+        ldz #3
+        lda #$02                ; Byte 3: Bytes per sector (2 = 512 bytes)
+        sta [temp_ptr],z
+        ldz #4
+        lda floppy_spt          ; Byte 4: Sectors per track
+        sta [temp_ptr],z
+        ldz #5
+        lda #$2A                ; Byte 5: Gap length
+        sta [temp_ptr],z
+        ldz #6
+        lda #$FF                ; Byte 6: Data length
+        sta [temp_ptr],z
+        ldz #7
+        lda #$50                ; Byte 7: Format gap length
+        sta [temp_ptr],z
+        ldz #8
+        lda #$F6                ; Byte 8: Format fill byte
+        sta [temp_ptr],z
+        ldz #9
+        lda #$0F                ; Byte 9: Head settle time (ms)
+        sta [temp_ptr],z
+        ldz #10
+        lda #$08                ; Byte 10: Motor start time (1/8 sec)
+        sta [temp_ptr],z
         rts

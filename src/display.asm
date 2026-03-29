@@ -3,7 +3,7 @@
 ; ============================================================================
 ;
 ; CGA text mode: 80×25, character + attribute pairs.
-; CGA buffer at 8086 address $B8000 → bank 4 at $048000
+; CGA buffer at 8086 address $B8000 → bank 2 at $02A000
 ; We periodically refresh the MEGA65 screen from the CGA buffer.
 ;
 ; The MEGA65 screen at $0800 (40-col) or $C000 (80-col) is updated
@@ -21,7 +21,7 @@ init_display:
 ; ============================================================================
 ; refresh_cga — Copy CGA text buffer to screen
 ; ============================================================================
-; Reads 80×25 characters from CGA buffer at $048000.
+; Reads 80×25 characters from CGA buffer at $02A000.
 ; Writes to screen using CHROUT (slow but reliable for testing).
 ;
 ; CGA format: char, attr, char, attr, ... (4000 bytes for 80×25)
@@ -31,12 +31,12 @@ refresh_cga:
         lda #$13                ; PETSCII home
         jsr CHROUT
 
-        ; Set up pointer to CGA buffer
+        ; Set up pointer to CGA buffer (bank 2 at $2A000)
         lda #$00
         sta temp_ptr
-        lda #$80
+        lda #$A0
         sta temp_ptr+1
-        lda #$04                ; Bank 4
+        lda #$02                ; Bank 2
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3

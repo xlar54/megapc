@@ -147,6 +147,13 @@ code_cache_pg_hi = $BD          ; Cached code page identifier (bits 16-19 of lin
 ; Floppy byte offset for multi-sector disk reads (3 bytes)
 floppy_ofs      = $BE           ; 3 bytes: $BE-$C0
 
+; Floppy geometry (detected from BPB at boot) — in non-ZP RAM
+; to avoid KERNAL IRQ corruption during init CHROUT calls
+floppy_spt      = $8F40         ; Sectors per track
+floppy_heads    = $8F41         ; Number of heads
+floppy_cyls     = $8F42         ; Number of cylinders
+floppy_type     = $8F43         ; BIOS drive type ($01=360K,$02=1.2M,$03=720K,$04=1.44M)
+
 ; PUSHA saved SP (2 bytes) — in non-ZP RAM to avoid KERNAL conflicts
 pusha_saved_sp  = $8F00         ; 2 bytes
 

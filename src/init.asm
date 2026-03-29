@@ -303,6 +303,32 @@ _ivt_loop:
         iny
         bne _ivt_loop           ; 256 iterations
 
+        ; --- Set INT 1Eh vector to disk parameter table at F000:F000 ---
+        ; IVT entry 1Eh = 4 bytes at linear $0078 (bank 4 $40078)
+        lda #$78
+        sta temp_ptr
+        lda #$00
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$00                ; IP low = $00
+        ldz #0
+        sta [temp_ptr],z
+        lda #$F0                ; IP high = $F0 (offset $F000)
+        ldz #1
+        sta [temp_ptr],z
+        lda #$00                ; CS low = $00
+        ldz #2
+        sta [temp_ptr],z
+        lda #$F0                ; CS high = $F0 (segment $F000)
+        ldz #3
+        sta [temp_ptr],z
+
+        ; Write disk parameter table at F000:F000 (bank 5 $5F000)
+        jsr _init_write_dpt
+
         ; --- Set up BDA (BIOS Data Area) at $40400 ---
         ; Equipment word at $40410: bit 0=floppy present
         lda #$10
@@ -363,6 +389,51 @@ _ivt_loop:
         inx
         bne -
 +
+        rts
+
+; --- Helper: Write disk parameter table to F000:F000 ---
+_init_write_dpt:
+        lda #$00
+        sta temp_ptr
+        lda #$F0
+        sta temp_ptr+1
+        lda #$05                ; Bank 5 (F000 segment)
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda #$CF                ; SRT/HUT
+        sta [temp_ptr],z
+        ldz #1
+        lda #$02                ; DMA/HLT
+        sta [temp_ptr],z
+        ldz #2
+        lda #$25                ; Motor off delay
+        sta [temp_ptr],z
+        ldz #3
+        lda #$02                ; Bytes/sector code (2=512)
+        sta [temp_ptr],z
+        ldz #4
+        lda #18                 ; SPT (default 18, updated by detect_floppy_geom)
+        sta [temp_ptr],z
+        ldz #5
+        lda #$2A                ; Gap length
+        sta [temp_ptr],z
+        ldz #6
+        lda #$FF                ; Data length
+        sta [temp_ptr],z
+        ldz #7
+        lda #$50                ; Format gap length
+        sta [temp_ptr],z
+        ldz #8
+        lda #$F6                ; Format fill byte
+        sta [temp_ptr],z
+        ldz #9
+        lda #$0F                ; Head settle time
+        sta [temp_ptr],z
+        ldz #10
+        lda #$08                ; Motor start time
+        sta [temp_ptr],z
         rts
 
 ; --- Helper: Fill bank 4 with zeros ---
@@ -577,6 +648,251 @@ _msg_floppy_nf:
         .text "not found (place fd.img on sd card)", 13, 0
 _msg_floppy_err:
         .text "load failed", 13, 0
+
+; ============================================================================
+; detect_floppy_geom — Auto-detect floppy geometry from BPB
+; ============================================================================
+; Reads total sectors from sector 0 of the loaded floppy image.
+; Matches against known formats to set geometry variables.
+; Must be called after load_floppy and before init_guest_mem.
+;
+detect_floppy_geom:
+        ; Set defaults (1.44MB) in case detection fails
+        lda #18
+        sta floppy_spt
+        lda #2
+        sta floppy_heads
+        lda #80
+        sta floppy_cyls
+        lda #$04
+        sta floppy_type
+
+        ; Skip if no floppy loaded
+        lda floppy_loaded
+        beq _dfg_done
+
+        ; DMA 512 bytes from FLOPPY_ATTIC to SECTOR_BUF
+        lda #$00
+        sta dma_src_lo
+        sta dma_src_hi
+        lda #$10                ; Attic bank offset for floppy ($8100000)
+        sta dma_src_bank
+        lda #<SECTOR_BUF
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi        ; 512 bytes
+        jsr do_dma_from_attic
+
+        ; Read total sectors from BPB offset $13 (16-bit LE)
+        lda SECTOR_BUF+$13
+        sta scratch_a           ; Total sectors low
+        lda SECTOR_BUF+$14
+        sta scratch_b           ; Total sectors high
+
+        ; Match against known formats
+        ; 360K: 720 sectors ($02D0)
+        lda scratch_b
+        cmp #$02
+        bne _dfg_not_360
+        lda scratch_a
+        cmp #$D0
+        bne _dfg_not_360
+        ; 360K: 40 cyl, 2 heads, 9 SPT
+        lda #9
+        sta floppy_spt
+        lda #2
+        sta floppy_heads
+        lda #40
+        sta floppy_cyls
+        lda #$01
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_not_360:
+        ; 720K: 1440 sectors ($05A0)
+        lda scratch_b
+        cmp #$05
+        bne _dfg_not_720
+        lda scratch_a
+        cmp #$A0
+        bne _dfg_not_720
+        lda #9
+        sta floppy_spt
+        lda #2
+        sta floppy_heads
+        lda #80
+        sta floppy_cyls
+        lda #$03
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_not_720:
+        ; 1.2MB: 2400 sectors ($0960)
+        lda scratch_b
+        cmp #$09
+        bne _dfg_not_12
+        lda scratch_a
+        cmp #$60
+        bne _dfg_not_12
+        lda #15
+        sta floppy_spt
+        lda #2
+        sta floppy_heads
+        lda #80
+        sta floppy_cyls
+        lda #$02
+        sta floppy_type
+        bra _dfg_print
+
+_dfg_not_12:
+        ; 2880 sectors ($0B40) = 1.44MB (already set as default)
+        ; Fall through to print
+
+_dfg_print:
+        ; Update DPT at F000:F000 with detected SPT
+        lda #$00
+        sta temp_ptr
+        lda #$F0
+        sta temp_ptr+1
+        lda #$05
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda floppy_spt
+        ldz #4                  ; Byte 4 = sectors per track
+        sta [temp_ptr],z
+
+        ; Print detected format
+        ldx #0
+-       lda _dfg_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        ; Print SPT value
+        lda floppy_spt
+        jsr _dfg_print_dec
+        lda #'/'
+        jsr CHROUT
+        ; Print heads
+        lda floppy_heads
+        jsr _dfg_print_dec
+        lda #'/'
+        jsr CHROUT
+        ; Print cylinders
+        lda floppy_cyls
+        jsr _dfg_print_dec
+        lda #' '
+        jsr CHROUT
+        lda #'('
+        jsr CHROUT
+
+        ; Print format name based on type
+        lda floppy_type
+        cmp #$01
+        beq _dfg_p360
+        cmp #$02
+        beq _dfg_p12
+        cmp #$03
+        beq _dfg_p720
+        ; Default: 1.44MB
+        ldx #0
+-       lda _dfg_144,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+_dfg_p360:
+        ldx #0
+-       lda _dfg_360,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p12:
+        ldx #0
+-       lda _dfg_12m,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p720:
+        ldx #0
+-       lda _dfg_720,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+
+_dfg_close:
+        lda #')'
+        jsr CHROUT
+        lda #$0D
+        jsr CHROUT
+_dfg_done:
+        rts
+
+; Print A as 1-3 digit decimal number
+_dfg_print_dec:
+        ldx #0                  ; Suppress leading zeros
+        ; Hundreds
+        ldy #0
+-       cmp #100
+        bcc _dfg_tens
+        sbc #100
+        iny
+        bra -
+_dfg_tens:
+        pha
+        tya
+        beq _dfg_skip_h         ; Skip leading zero
+        ora #$30
+        jsr CHROUT
+        ldx #1                  ; No longer suppress
+_dfg_skip_h:
+        pla
+        ; Tens
+        ldy #0
+-       cmp #10
+        bcc _dfg_ones
+        sbc #10
+        iny
+        bra -
+_dfg_ones:
+        pha
+        tya
+        bne _dfg_do_tens
+        cpx #0
+        beq _dfg_skip_t         ; Skip leading zero
+_dfg_do_tens:
+        ora #$30
+        jsr CHROUT
+_dfg_skip_t:
+        pla
+        ; Ones (always print)
+        ora #$30
+        jsr CHROUT
+        rts
+
+_dfg_msg:
+        .text "FLOPPY: ", 0
+_dfg_360:
+        .text "360K", 0
+_dfg_720:
+        .text "720K", 0
+_dfg_12m:
+        .text "1.2MB", 0
+_dfg_144:
+        .text "1.44MB", 0
 
 ; ============================================================================
 ; test_bios — Install a small test program in place of real BIOS

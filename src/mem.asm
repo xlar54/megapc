@@ -117,15 +117,17 @@ _ltc_not_b:
         rts
 
 _ltc_cga:
-        ; --- $B8000–$BFFFF: Map to bank 4 at $48000 ---
-        ; CGA text buffer B800:xxxx → $048000 + xxxx
+        ; --- $B8000–$BFFFF: Map to bank 2 at $2A000 ---
+        ; CGA text buffer B800:xxxx → $02A000 + (xxxx - $8000)
+        ; temp32+1 has $80-$FF (from $B8xxx-$BFxxx)
+        ; Map $80→$A0, $81→$A1, ..., $8F→$AF (4KB = $B8000-$B8FFF)
         lda temp32
         sta temp_ptr
-        clc
         lda temp32+1
-        adc #$80                ; $B8000 offset: add $80 to high byte → $8xxx in bank 4
+        clc
+        adc #$20                ; $80+$20=$A0, $81+$21=$A1, etc.
         sta temp_ptr+1
-        lda #$04
+        lda #$02                ; Bank 2
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3

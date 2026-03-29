@@ -144,9 +144,10 @@ entry:
         lda #$53
         sta VIC_KEY
 
-        ; Disable VIC-IV hot registers (bit 7)
-        ;lda #$80
-        ;tsb VIC_HOTREGS
+        ; Disable ROM write-protect for bank 2 (used for CGA buffer)
+        lda #$70
+        sta $D640
+        clv
 
         ; Map: $0000–$1FFF = bank 0 ZP/stack
         ;       $6000–$7FFF = bank 0 (emulator code continues)
@@ -176,6 +177,7 @@ entry:
         ; Initialize emulator subsystems (IRQs still enabled for CHROUT)
         jsr init_tables         ; Load BIOS, extract decode tables
         jsr load_floppy         ; Load floppy image to attic via Hyppo
+        jsr detect_floppy_geom  ; Auto-detect disk geometry from BPB
         jsr init_guest_mem      ; Clear guest RAM, set up IVT/BDA
         jsr init_cache          ; Initialize attic cache
         jsr init_regs           ; Set 8086 registers to power-on state
