@@ -191,6 +191,10 @@ mem_read8:
 ;
 mem_write8:
         jsr seg_ofs_to_linear
+        ; Write-protect F-segment (BIOS ROM)
+        lda temp32+2
+        cmp #$0F
+        bcs _mw8_rom            ; $F0000+ = ROM, discard write
         jsr linear_to_chip
         lda scratch_d
         ldz #0
@@ -200,6 +204,8 @@ mem_write8:
         bne +
         jsr mark_cache_dirty
 +       rts
+_mw8_rom:
+        rts                     ; Silently discard ROM write
 
 ; ============================================================================
 ; mem_read16 — Read 16-bit word from segment:offset
@@ -274,6 +280,10 @@ mem_write16:
         stx $8F62               ; Save segment register offset
 
         jsr seg_ofs_to_linear
+        ; Write-protect F-segment (BIOS ROM)
+        lda temp32+2
+        cmp #$0F
+        bcs _mw16_rom
         jsr linear_to_chip
         lda op_result
         ldz #0
@@ -326,6 +336,8 @@ _mw16_seg_wrap:
         bne +
         jsr mark_cache_dirty
 +       rts
+_mw16_rom:
+        rts                     ; Silently discard ROM write
 
 ; ============================================================================
 ; Instruction Fetch Helpers

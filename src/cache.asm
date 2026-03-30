@@ -185,6 +185,13 @@ _iccf_done:
 ; Input: X = cache line to flush
 ;
 cache_flush_line:
+        inc $8FE8               ; Count cache flushes
+        ; Save last flush info for debug
+        lda cache_page_lo,x
+        sta $8FE9               ; Last flushed page_lo
+        lda cache_page_hi,x
+        sta $8FEA               ; Last flushed page_hi
+        stx $8FEB               ; Last flushed line index
         ; Source: CACHE_BUF + (X * 256) in chip RAM
         ; Dest:   attic at $8000000 + (page_hi:page_lo:00)
 

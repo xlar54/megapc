@@ -401,6 +401,10 @@ write_rm8:
         lda i_mod
         cmp #3
         beq _wrm8_reg
+        ; Write-protect BIOS ROM (bank 5)
+        lda rm_addr+2
+        cmp #$05
+        beq _wrm8_rom
         pla
         ldz #0
         sta [rm_addr],z
@@ -415,6 +419,9 @@ write_rm8:
         sta cache_dirty,x
         jsr invalidate_code_cache_for_line
 +       rts
+_wrm8_rom:
+        pla                     ; Discard the value
+        rts                     ; Silently discard ROM write
 _wrm8_reg:
         pla
         ldx rm_addr
@@ -426,6 +433,10 @@ write_rm16:
         lda i_mod
         cmp #3
         beq _wrm16_reg
+        ; Write-protect BIOS ROM (bank 5)
+        lda rm_addr+2
+        cmp #$05
+        beq _wrm16_rom_skip
         lda op_result
         ldz #0
         sta [rm_addr],z
@@ -507,6 +518,8 @@ _wrm16_seg_wrap:
         lda scratch_b
         sta temp32+2
         rts
+_wrm16_rom_skip:
+        rts                     ; Silently discard ROM write
 _wrm16_reg:
         ldx rm_addr
         lda op_result

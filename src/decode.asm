@@ -83,13 +83,8 @@ ml_next:
 _ml_cs_ok:
 
         ; --- Timer tick (INT 8 emulation) ---
-        ; Every ~1024 instructions: increment BDA timer counter and
-        ; deliver INT 8 only if FreeDOS has hooked it (IVT[8] != F000:FF00)
+        ; Every ~256 instructions: increment BDA timer counter
         inc tick_counter
-        bne _ml_no_tick
-        inc tick_counter+1
-        lda tick_counter+1
-        and #$03
         bne _ml_no_tick
 
         ; Increment 32-bit BDA tick counter at $0040:006C (bank 4 $4046C)
@@ -218,17 +213,39 @@ _ml_code_miss:
         sta temp32+2            ; page hi
         sta code_cache_pg_hi
 
-        ; DMA 256 bytes from attic to CODE_CACHE_BUF
+        ; DMA 256 bytes to CODE_CACHE_BUF
+        ; Source is attic (MB $80) if linear >= $10000, or bank 4 (MB $00) if < $10000
+        lda temp32+2
+        bne _ml_ccache_from_attic
+
+        ; --- Source is bank 4 (chip RAM, linear < $10000) ---
+        lda temp32+1
+        sta _dma_ccache_src+1
+        lda #$00
+        sta _dma_ccache_src
+        lda #$04                ; Bank 4
+        sta _dma_ccache_src_bank
+        lda #$00
+        sta _dma_ccache_src_mb  ; Source MB = $00 (chip)
+        bra _ml_ccache_do_dma
+
+_ml_ccache_from_attic:
+        ; --- Source is attic (linear >= $10000) ---
         lda temp32+2
         sta _dma_ccache_src_bank
         lda temp32+1
         sta _dma_ccache_src+1
         lda #$00
         sta _dma_ccache_src
+        lda #$80
+        sta _dma_ccache_src_mb  ; Source MB = $80 (attic)
 
+_ml_ccache_do_dma:
         lda #$00
         sta $D707
-        .byte $80, $80          ; src MB = $80 (attic)
+        .byte $80               ; src MB option
+_dma_ccache_src_mb:
+        .byte $80               ; src MB value (patched)
         .byte $81, $00          ; dst MB = $00 (chip)
         .byte $00               ; end options
         .byte $00               ; copy
@@ -242,20 +259,41 @@ _dma_ccache_src_bank:
         .byte $00
         .word $0000
 
-        ; Also load full next page for instruction spillover
+        ; Also load next page for instruction spillover
+        ; Compute next page address
         clc
         lda temp32+1
         adc #1
         sta _dma_ccache_spill_src+1
         lda temp32+2
         adc #0
-        sta _dma_ccache_spill_bank
+        sta _dma_ccache_spill_temp   ; Next page's high byte
 
+        ; Determine source MB for spill page
+        lda _dma_ccache_spill_temp
+        bne _ml_spill_from_attic
+
+        ; Spill from bank 4
+        lda #$04
+        sta _dma_ccache_spill_bank
+        lda #$00
+        sta _dma_ccache_spill_mb
+        bra _ml_spill_do_dma
+
+_ml_spill_from_attic:
+        lda _dma_ccache_spill_temp
+        sta _dma_ccache_spill_bank
+        lda #$80
+        sta _dma_ccache_spill_mb
+
+_ml_spill_do_dma:
         lda #$00
         sta _dma_ccache_spill_src
         lda #$00
         sta $D707
-        .byte $80, $80          ; src MB = $80 (attic)
+        .byte $80               ; src MB option
+_dma_ccache_spill_mb:
+        .byte $80               ; src MB (patched)
         .byte $81, $00          ; dst MB = $00 (chip)
         .byte $00               ; end options
         .byte $00               ; copy
@@ -268,6 +306,8 @@ _dma_ccache_spill_bank:
         .byte $00               ; dst bank
         .byte $00
         .word $0000
+_dma_ccache_spill_temp:
+        .byte $00               ; Temp storage for spill page high byte
 
 _ml_code_hit:
         ; Set opcode_ptr to CODE_CACHE_BUF + (low byte of linear addr)

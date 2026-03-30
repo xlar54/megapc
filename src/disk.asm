@@ -31,14 +31,47 @@ int13_handler:
         beq _i13_reset
         cmp #$02
         beq _i13_read
+        cmp #$03
+        beq _i13_write
+        cmp #$04
+        beq _i13_verify
         cmp #$08
         beq _i13_get_params
+        cmp #$15
+        beq _i13_get_type
 
-        ; Unsupported function: return error
+        ; Unsupported function: log and return error
+        sta $8FD2               ; Save the unsupported AH value
+        inc $8FD3               ; Count unsupported calls
         lda #$01                ; Invalid function
         sta reg_ah
         lda #1
         sta flag_cf             ; CF=1 = error
+        rts
+
+_i13_verify:
+        ; AH=04: Verify sectors — always succeed (no actual verification)
+        lda #$00
+        sta reg_ah
+        lda #0
+        sta flag_cf
+        rts
+
+_i13_get_type:
+        ; AH=15: Get disk type
+        ; DL=0 (floppy): return AH=01 (floppy without change-line)
+        lda reg_dl
+        bne _i13_get_type_none
+        lda #$01
+        sta reg_ah
+        lda #0
+        sta flag_cf
+        rts
+_i13_get_type_none:
+        lda #$00                ; No drive
+        sta reg_ah
+        lda #1
+        sta flag_cf
         rts
 
 _i13_reset:
@@ -85,7 +118,10 @@ _i13_get_params:
         rts
 
 _i13_no_drive:
-        ; Drive not present — return timeout error
+        ; Check if this is a hard disk query (DL >= $80)
+        lda reg_dl
+        bmi _i13_hard_disk
+        ; Floppy drive > 0 — return timeout error
         lda #$80                ; Timeout / drive not ready
         sta reg_ah
         lda #0
@@ -94,18 +130,82 @@ _i13_no_drive:
         sta reg_dl              ; Only 1 floppy drive
         lda #1
         sta flag_cf
-        ; Write status to BDA $0040:0041 (bank 4 $40441)
-        lda #$41
-        sta temp_ptr
-        lda #$04
-        sta temp_ptr+1
-        lda #$04
-        sta temp_ptr+2
+        rts
+
+_i13_hard_disk:
+        ; Hard disk (DL >= $80): check function
+        lda reg_ah
+        cmp #$02
+        beq _i13_hd_read
+        cmp #$08
+        beq _i13_hd_params
+        ; All other functions: return error
+        lda #$01
+        sta reg_ah
+        lda #0
+        sta reg_dl              ; 0 hard drives
+        lda #1
+        sta flag_cf
+        rts
+
+_i13_hd_params:
+        ; AH=08 for hard disk: return 1 drive with minimal geometry
+        ; This makes FreeDOS try to read the partition table (gets zeros = invalid)
+        ; which matches the reference emulator behavior ("illegal partition table")
         lda #$00
-        sta temp_ptr+3
-        lda #$80
-        ldz #0
+        sta reg_ah              ; Status OK
+        lda #$01
+        sta reg_dl              ; 1 hard drive
+        lda #$01
+        sta reg_cl              ; 1 sector per track
+        lda #$00
+        sta reg_ch              ; 0 cylinders (max)
+        sta reg_dh              ; 0 heads (max)
+        lda #0
+        sta flag_cf             ; CF=0 = success
+        rts
+
+_i13_hd_read:
+        ; AH=02 for hard disk: return a blank sector (all zeros)
+        ; This makes FreeDOS read it and find "illegal partition table"
+        ; instead of "no hard disks", taking the same code path as real PC
+        lda reg_bx
+        sta temp32
+        lda reg_bx+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        ldx #SEG_ES_OFS
+        lda #0
+        sta seg_override_en
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
+        ; Fill 512 bytes with zeros at ES:BX
+        lda #$00
+        ldy #0
+_i13_hd_fill:
+        tya
+        taz
+        lda #$00
         sta [temp_ptr],z
+        iny
+        bne _i13_hd_fill
+        inc temp_ptr+1
+        ldy #0
+_i13_hd_fill2:
+        tya
+        taz
+        lda #$00
+        sta [temp_ptr],z
+        iny
+        bne _i13_hd_fill2
+        ; Return success
+        lda #$00
+        sta reg_ah
+        lda reg_al              ; Sectors requested = sectors read
+        lda #0
+        sta flag_cf
         rts
 
 ; ============================================================================
@@ -275,53 +375,62 @@ _i13_read_loop:
         jsr seg_ofs_to_linear
         ; temp32 now has 20-bit linear address
 
-        ; Copy 512 bytes from SECTOR_BUF to ES:BX byte by byte
-        ; This handles boundary crossings between bank 4 and attic safely
+        ; Check if destination is in attic (>= $10000)
+        lda temp32+2
+        beq _i13_copy_bank4
+        ; Attic destination: DMA 512 bytes from SECTOR_BUF to attic directly
+        ; This bypasses the cache entirely — much faster and avoids cache bugs
+        jsr cache_flush_all     ; Flush any dirty cache data first
+        jsr cache_invalidate_all ; Invalidate cache (we're writing attic directly)
+        ; Source: SECTOR_BUF in chip RAM
+        lda #<SECTOR_BUF
+        sta dma_src_lo
+        lda #>SECTOR_BUF
+        sta dma_src_hi
+        lda #$00
+        sta dma_src_bank
+        ; Dest: attic at linear temp32
+        lda temp32
+        sta dma_dst_lo
+        lda temp32+1
+        sta dma_dst_hi
+        lda temp32+2
+        sta dma_dst_bank
+        ; Count: 512 bytes
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_to_attic
+        bra _i13_copy_done
+
+_i13_copy_bank4:
+        ; Bank 4 destination: copy byte by byte (handles < $10000)
+        ; Use [temp_ptr],z for direct bank 4 writes
+        jsr linear_to_chip      ; Map first byte address
         ldy #0
 _i13_copy_loop:
         lda SECTOR_BUF,y
-        sta scratch_d
-        phy
-        jsr linear_to_chip
-        lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        ; Mark cache dirty if write went to cache buffer
-        lda temp_ptr+2
+        ; Advance pointer
+        inc temp_ptr
         bne +
-        jsr mark_cache_dirty
-+
-        ; Advance linear address
-        inc temp32
-        bne +
-        inc temp32+1
-        bne +
-        inc temp32+2
-+       ply
-        iny
+        inc temp_ptr+1
++       iny
         bne _i13_copy_loop
         ; Second 256 bytes
         ldy #0
 _i13_copy_loop2:
         lda SECTOR_BUF+256,y
-        sta scratch_d
-        phy
-        jsr linear_to_chip
-        lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        lda temp_ptr+2
+        inc temp_ptr
         bne +
-        jsr mark_cache_dirty
-+
-        inc temp32
-        bne +
-        inc temp32+1
-        bne +
-        inc temp32+2
-+       ply
-        iny
+        inc temp_ptr+1
++       iny
         bne _i13_copy_loop2
+_i13_copy_done:
 
 _i13_advance:
 
@@ -381,6 +490,218 @@ _i13_read_done:
         sta $8FA7
         lda flag_cf
         sta $8FA8
+        rts
+
+; ============================================================================
+; _i13_write — Write sectors to floppy image (AH=03)
+; ============================================================================
+; Input: same as _i13_read (AL=count, CH/CL=cyl/sec, DH=head, ES:BX=buffer)
+; Reads data from ES:BX, writes to floppy image in attic.
+;
+_i13_write:
+        lda reg_dl
+        bne _i13_no_drive       ; Only drive 0
+
+        lda floppy_loaded
+        beq _i13_no_drive
+
+        ; Save sector count and BX
+        lda reg_al
+        sta disk_sect_left
+        sta $8FF0
+        lda reg_bx
+        sta $8FF2
+        lda reg_bx+1
+        sta $8FF3
+
+        ; Compute LBA from CHS (same as read)
+        lda reg_ch
+        sta $D770
+        lda #0
+        sta $D771
+        lda floppy_heads
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778
+        clc
+        adc reg_dh
+        sta scratch_b
+
+        lda scratch_b
+        sta $D770
+        lda #0
+        sta $D771
+        lda floppy_spt
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778
+        sta scratch_b
+        lda $D779
+        sta scratch_c
+
+        lda reg_cl
+        and #$3F
+        sec
+        sbc #1
+        clc
+        adc scratch_b
+        sta scratch_b
+        lda scratch_c
+        adc #0
+        sta scratch_c
+
+        ; LBA to byte offset
+        lda #0
+        sta temp32
+        lda scratch_b
+        asl
+        sta temp32+1
+        lda scratch_b
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        sta temp32+2
+        lda scratch_c
+        asl
+        ora temp32+2
+        sta temp32+2
+
+        lda temp32
+        sta floppy_ofs
+        lda temp32+1
+        sta floppy_ofs+1
+        lda temp32+2
+        sta floppy_ofs+2
+
+_i13_write_loop:
+        lda disk_sect_left
+        beq _i13_write_done
+
+        ; Read 512 bytes from ES:BX into SECTOR_BUF
+        lda reg_bx
+        sta temp32
+        lda reg_bx+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        ldx #SEG_ES_OFS
+        lda #0
+        sta seg_override_en
+        jsr seg_ofs_to_linear
+
+        ; Flush cache before reading (data may be in cache)
+        jsr cache_flush_all
+
+        ; Check if source is in attic or bank 4
+        lda temp32+2
+        beq _i13w_bank4_read
+        ; Attic source: DMA from attic to SECTOR_BUF
+        lda temp32
+        sta dma_src_lo
+        lda temp32+1
+        sta dma_src_hi
+        lda temp32+2
+        sta dma_src_bank
+        lda #<SECTOR_BUF
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_from_attic
+        bra _i13w_do_write
+
+_i13w_bank4_read:
+        ; Bank 4 source: copy 512 bytes via [ptr],z
+        jsr linear_to_chip
+        ldy #0
+_i13w_rd_loop:
+        tya
+        taz
+        lda [temp_ptr],z
+        sta SECTOR_BUF,y
+        iny
+        bne _i13w_rd_loop
+        ; Advance temp_ptr by 256 for second half
+        inc temp_ptr+1
+        ldy #0
+_i13w_rd_loop2:
+        tya
+        taz
+        lda [temp_ptr],z
+        sta SECTOR_BUF+256,y
+        iny
+        bne _i13w_rd_loop2
+
+_i13w_do_write:
+        ; DMA 512 bytes from SECTOR_BUF to floppy attic
+        lda #<SECTOR_BUF
+        sta dma_src_lo
+        lda #>SECTOR_BUF
+        sta dma_src_hi
+        lda #$00
+        sta dma_src_bank
+        clc
+        lda floppy_ofs+2
+        adc #$10
+        sta dma_dst_bank
+        lda floppy_ofs
+        sta dma_dst_lo
+        lda floppy_ofs+1
+        sta dma_dst_hi
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_to_attic
+
+        ; Advance BX by 512
+        clc
+        lda reg_bx
+        adc #$00
+        sta reg_bx
+        lda reg_bx+1
+        adc #$02
+        sta reg_bx+1
+
+        ; Advance floppy offset by 512
+        clc
+        lda floppy_ofs
+        adc #$00
+        sta floppy_ofs
+        lda floppy_ofs+1
+        adc #$02
+        sta floppy_ofs+1
+        lda floppy_ofs+2
+        adc #0
+        sta floppy_ofs+2
+
+        dec disk_sect_left
+        jmp _i13_write_loop
+
+_i13_write_done:
+        ; Restore BX
+        lda $8FF2
+        sta reg_bx
+        lda $8FF3
+        sta reg_bx+1
+        lda #$00
+        sta reg_ah
+        lda $8FF0
+        sta reg_al
+        lda #0
+        sta flag_cf
         rts
 
 ; ============================================================================
