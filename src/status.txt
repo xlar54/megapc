@@ -126,6 +126,65 @@ DEBUG INSTRUMENTATION (left in code)
 These can be removed once BASICA is working. They have negligible
 performance impact except for the 64K snapshot block.
 
+8. Attic cache data corruption (THE CRITICAL BUG)
+   - Both FreeDOS and BASICA fail when guest RAM > 64KB (attic) is needed.
+   - FreeDOS: "Bad or missing Command Interpreter" — kernel reads CONFIG.SYS
+     from disk OK (uses /E:256 defaults, not the /E:1024 from actual file),
+     then can't load COMMAND.COM. INT 13h read counter shows 113 reads, so
+     the disk driver is being called. Data written through cache to attic
+     comes back corrupted on subsequent reads.
+   - BASICA: Hangs with DS=$0018 after init. Same root cause — code or data
+     in attic is corrupted.
+   - Confirmed NOT a CHS/LBA calculation bug (math verified for all sectors).
+   - Confirmed NOT a DMA address calculation bug (flush and load are symmetric,
+     source MB/bank derivation is correct).
+   - 2-line cache (CACHE_LINES=2) causes heavy thrashing during byte-by-byte
+     sector copies. Each byte calls linear_to_chip -> cache_access, which may
+     evict and reload. With only 2 lines, writing 512 bytes across 2+ pages
+     causes many evictions.
+   - Possible causes to investigate:
+     a) Cache thrashing causing data loss during evict-load cycles
+     b) DMA timing: flush DMA might not complete before load DMA starts
+     c) X register corruption in cache_flush_line/cache_dma_load during
+        nested calls from cache_evict_load
+     d) temp32 being clobbered between linear_to_chip calls in the
+        INT 13h byte-copy loop (each call to linear_to_chip sets temp32
+        but the loop also uses temp32 for the linear address increment)
+   - Investigation note (d) is the most suspicious: the INT 13h copy loop
+     calls linear_to_chip which calls cache_access which may modify temp32
+     internally. Then the loop does inc temp32 expecting it to still be the
+     sequential linear address. If cache_access modifies temp32, the next
+     byte reads from a wrong address.
+   - Test: works with RAM_KB=64 (no attic involved).
+
+9. POP r/m16 (opcode $8F) was missing
+   - Standard 8086 opcode, was mapped to op_nop_unimpl.
+   - FreeDOS kernel uses this. Without it, kernel init failed silently.
+   - Fixed: now implemented as op_pop_rm (dispatch $3B).
+
+10. Other potentially missing opcodes
+    - $9B (WAIT): harmless NOP, currently hits op_nop_unimpl but skips OK
+    - $69/$6B (3-operand IMUL, 80186): not implemented, FreeDOS may need
+    - $C8/$C9 (ENTER/LEAVE, 80186): ENTER skips 3 bytes as NOP, LEAVE skips 0
+      Both will produce wrong results if actually used for stack frames.
+    - $62 (BOUND, 80186): not implemented, rarely used
+    - All standard 8086 opcodes are now implemented except WAIT (NOP) and
+      ESC $D8-$DF (handled as NOP with ModR/M consumption).
+
+DISK IMAGES
+============
+Two disk images have been tested:
+
+1. FreeDOS 1.44MB (currently active):
+   C:\Users\scott\AppData\Roaming\xemu-lgb\mega65\hdos\FD.IMG
+   FAT12, 80 cyl, 2 heads, 18 SPT
+   Files: KERNEL.SYS, COMMAND.COM, CONFIG.SYS, AUTOEXEC.BAT, etc.
+   CONFIG.SYS SHELL line: SHELL=A:\command.com A:\command.com /E:1024 /P
+
+2. PC-DOS 1.25 (CDP) 320KB:
+   Same path, swap FD.IMG to use
+   See below for details.
+
 DISK IMAGE
 ==========
 The active floppy image is at:
