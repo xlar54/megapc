@@ -82,7 +82,7 @@ opcode_dispatch:
         ;         80    81    82    83    84    85    86    87
         .byte   $08,  $08,  $08,  $08,  $0F,  $0F,  $18,  $18  ; ALU imm, TEST, XCHG
         ;         88    89    8A    8B    8C    8D    8E    8F
-        .byte   $32,  $32,  $32,  $32,  $0A,  $33,  $0A,  $31  ; MOV r/m, MOV sreg, LEA, (8F=POP r/m)
+        .byte   $32,  $32,  $32,  $32,  $0A,  $33,  $0A,  $3B  ; MOV r/m, MOV sreg, LEA, POP r/m
 
         ; 9x row: XCHG AX, CBW, CWD, CALL far, WAIT, PUSHF/POPF, SAHF/LAHF
         ;         90    91    92    93    94    95    96    97
