@@ -79,11 +79,18 @@ _irp_cga_range:
         cmp #$03
         bne _irp_cga_other
         ; Toggle bit 0 (hsync) and bit 3 (vsync) for timing loops
+        inc $8FD6               ; Count $3DA reads
         lda inst_counter
         and #$09                ; Bits 0 and 3 toggle
         rts
 
 _irp_cga_other:
+        ; Log unhandled high port reads
+        lda temp32
+        sta $8FD8               ; Last unhandled port lo
+        lda temp32+1
+        sta $8FD9               ; Last unhandled port hi
+        inc $8FDA               ; Count
         lda #$00
         rts
 
@@ -160,6 +167,21 @@ _i10t_bs:
 
 _i10_set_mode:
         ; AH=00: Set video mode (AL=mode)
+        ; Update BDA current video mode (40:49) with requested mode
+        lda reg_al
+        and #$7F                ; Strip bit 7 (no-clear flag on some BIOSes)
+        pha                     ; Save the mode value
+        lda #$49
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        pla                     ; Recover mode value
+        ldz #0
+        sta [temp_ptr],z        ; Write mode to BDA 40:49
         ; Clear screen and home cursor
         lda #$93                ; PETSCII clear screen
         jsr chrout_safe         ; chrout_safe handles scr_row/scr_col reset

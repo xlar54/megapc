@@ -209,12 +209,26 @@ mem_write8:
 ; Output: op_source+0/+1 = 16-bit word (little-endian)
 ;
 mem_read16:
+        ; Save original offset for segment wrap detection
+        lda temp32
+        sta $8F60
+        lda temp32+1
+        sta $8F61
+        stx $8F62               ; Save segment register offset
+
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         ldz #0
         lda [temp_ptr],z
         sta op_source
-        ; Check page boundary crossing
+
+        ; Check for segment wrap (offset was $FFFF)
+        lda $8F60
+        and $8F61
+        cmp #$FF
+        beq _mr16_seg_wrap
+
+        ; Check page boundary crossing (linear low byte = $FF)
         lda temp32
         cmp #$FF
         beq _mr16_cross
@@ -231,6 +245,18 @@ _mr16_cross:
         lda [temp_ptr],z
         sta op_source+1
         rts
+_mr16_seg_wrap:
+        ; Offset was $FFFF — wrap to $0000 in same segment
+        lda #0
+        sta temp32
+        sta temp32+1
+        ldx $8F62               ; Restore segment
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
+        sta op_source+1
+        rts
 
 ; ============================================================================
 ; mem_write16 — Write 16-bit word to segment:offset
@@ -240,6 +266,13 @@ _mr16_cross:
 ;         op_result+0/+1 = 16-bit word to write
 ;
 mem_write16:
+        ; Save original offset for segment wrap detection
+        lda temp32
+        sta $8F60
+        lda temp32+1
+        sta $8F61
+        stx $8F62               ; Save segment register offset
+
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         lda op_result
@@ -250,6 +283,12 @@ mem_write16:
         bne +
         jsr mark_cache_dirty
 +
+        ; Check for segment wrap (offset was $FFFF)
+        lda $8F60
+        and $8F61
+        cmp #$FF
+        beq _mw16_seg_wrap
+
         ; Check page boundary crossing
         lda temp32
         cmp #$FF
@@ -267,6 +306,22 @@ _mw16_cross:
         ldz #0
         sta [temp_ptr],z
         ; Mark second page dirty
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       rts
+_mw16_seg_wrap:
+        ; Offset was $FFFF — wrap to $0000 in same segment
+        lda #0
+        sta temp32
+        sta temp32+1
+        ldx $8F62               ; Restore segment
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark cache dirty
         lda temp_ptr+2
         bne +
         jsr mark_cache_dirty
@@ -306,9 +361,11 @@ fetch_byte:
         ldz #0
         lda [opcode_ptr],z
         inc reg_ip
-        bne +
+        bne _fb_no_wrap
         inc reg_ip+1
-+       ; Update opcode_ptr low bytes (fast path: just increment)
+        beq _fb_ip_wrapped      ; IP wrapped $FFFF→$0000: recompute opcode_ptr
+_fb_no_wrap:
+        ; Fast path: just increment opcode_ptr
         inc opcode_ptr
         bne +
         inc opcode_ptr+1
@@ -321,6 +378,13 @@ fetch_byte:
         lda #$04
         sta opcode_ptr+2
 +       rts
+
+_fb_ip_wrapped:
+        ; IP crossed segment boundary — must recompute opcode_ptr from cs_base + 0
+        pha
+        jsr update_opcode_ptr
+        pla
+        rts
 
 ; fetch_word — Read word at CS:IP, advance IP by 2
 ; Output: A = low byte, scratch_a = high byte
@@ -341,6 +405,7 @@ fetch_word:
         lda reg_ip+1
         adc #0
         sta reg_ip+1
+        bcs _fw_ip_wrapped      ; Carry = IP crossed $FFFF
 
         ; Advance opcode_ptr by 2
         clc
@@ -359,6 +424,12 @@ fetch_word:
         lda #$04
         sta opcode_ptr+2
 +
+        pla                     ; A = low byte
+        rts
+
+_fw_ip_wrapped:
+        ; IP crossed segment boundary — recompute opcode_ptr
+        jsr update_opcode_ptr
         pla                     ; A = low byte
         rts
 

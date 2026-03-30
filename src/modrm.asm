@@ -325,6 +325,13 @@ read_rm16:
         ldz #0
         lda [rm_addr],z
         sta op_source
+
+        ; Check for segment wrap: EA offset was $FFFF
+        lda ea_offset_lo
+        and ea_offset_hi
+        cmp #$FF
+        beq _rrm16_seg_wrap
+
         ; Check page boundary crossing
         lda temp32
         cmp #$FF
@@ -348,6 +355,31 @@ _rrm16_cross:
         lda [temp_ptr],z
         sta op_source+1
         ; Restore temp32 so write_rm16 sees original address
+        lda #$FF
+        sta temp32
+        lda scratch_a
+        sta temp32+1
+        lda scratch_b
+        sta temp32+2
+        rts
+_rrm16_seg_wrap:
+        ; EA offset was $FFFF — second byte wraps to offset $0000 in same segment
+        ; Save temp32 for restore
+        lda temp32+1
+        sta scratch_a
+        lda temp32+2
+        sta scratch_b
+        ; Resolve segment:$0000
+        lda #0
+        sta temp32
+        sta temp32+1
+        ldx #SEG_DS_OFS         ; Default segment (seg_ofs_to_linear handles override)
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
+        sta op_source+1
+        ; Restore temp32
         lda #$FF
         sta temp32
         lda scratch_a
@@ -408,6 +440,12 @@ write_rm16:
         sta cache_dirty,x
         jsr invalidate_code_cache_for_line
 +
+        ; Check for segment wrap: EA offset was $FFFF
+        lda ea_offset_lo
+        and ea_offset_hi
+        cmp #$FF
+        beq _wrm16_seg_wrap
+
         ; Check page boundary crossing
         lda temp32
         cmp #$FF
@@ -431,6 +469,33 @@ _wrm16_cross:
         ldz #0
         sta [temp_ptr],z
         ; Mark second page dirty
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       ; Restore temp32
+        lda #$FF
+        sta temp32
+        lda scratch_a
+        sta temp32+1
+        lda scratch_b
+        sta temp32+2
+        rts
+_wrm16_seg_wrap:
+        ; EA offset was $FFFF — second byte wraps to offset $0000 in same segment
+        lda temp32+1
+        sta scratch_a
+        lda temp32+2
+        sta scratch_b
+        lda #0
+        sta temp32
+        sta temp32+1
+        ldx #SEG_DS_OFS
+        jsr seg_ofs_to_linear
+        jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
+        ; Mark dirty
         lda temp_ptr+2
         bne +
         jsr mark_cache_dirty

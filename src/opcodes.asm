@@ -1265,6 +1265,7 @@ _msreg_to_sreg:
         sta regs,x
         lda op_source+1
         sta regs+1,x
+
         ; Mark appropriate segment dirty
         cpx #SEG_CS_OFS
         bne +
@@ -2567,9 +2568,62 @@ _ii_not0_count:
         beq _ii_int15
         cmp #$19
         beq _ii_int19
+        cmp #$21
+        beq _ii_int21
         ; Default: execute via IVT
         jsr do_sw_interrupt
         jsr compute_cs_base
+        jmp opcode_done
+
+_ii_int21:
+        ; INT 21h — intercept AH=09 (print string), pass rest to DOS
+        lda reg_ah
+        cmp #$09
+        beq _ii_int21_ah09
+        ; Not AH=09: let DOS handle via IVT
+        lda #$21
+        jsr do_sw_interrupt
+        jsr compute_cs_base
+        jmp opcode_done
+
+_ii_int21_ah09:
+        ; AH=09: Print string at DS:DX until '$'
+        ; Log: save last DX and DS, count calls
+        lda reg_dx
+        sta $8FE0
+        lda reg_dx+1
+        sta $8FE1
+        lda reg_ds
+        sta $8FE2
+        lda reg_ds+1
+        sta $8FE3
+        inc $8FE4               ; Count AH=09 calls
+
+        ; Use $8FD0/$8FD1 as 16-bit offset counter (safe from mem_read8)
+        lda reg_dx
+        sta $8FD0
+        lda reg_dx+1
+        sta $8FD1
+_i21_09_loop:
+        lda $8FD0
+        sta temp32
+        lda $8FD1
+        sta temp32+1
+        ldx #SEG_DS_OFS
+        jsr mem_read8           ; A = byte at DS:offset
+        cmp #'$'
+        beq _i21_09_done
+        ; Output via INT 10h AH=0E teletype path
+        sta reg_al
+        lda #$0E
+        sta reg_ah
+        jsr int10_handler
+        ; Advance offset counter
+        inc $8FD0
+        bne _i21_09_loop
+        inc $8FD1
+        bra _i21_09_loop
+_i21_09_done:
         jmp opcode_done
 
 _ii_int13:

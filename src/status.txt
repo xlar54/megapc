@@ -1,0 +1,144 @@
+MEGA8086 Emulator - Session Status
+===================================
+Last updated: 2026-03-30
+
+CONFIRMED FIXES (this session)
+==============================
+
+1. Bank 4 -> Bank 5 overflow (decode.asm)
+   - Root cause: When CS base is in bank 4 ($04xxxx) but CS:IP sum exceeds
+     $0FFFF, opcode_ptr overflowed into bank 5 ($05xxxx = BIOS ROM). The CPU
+     executed BIOS bytes instead of program code.
+   - Example: BASICA.EXE entry at CS=$03A2, IP=$C7D0 -> linear $101F0 (attic).
+     But update_opcode_ptr computed $04:3A20 + $C7D0 = $05:01F0 (BIOS).
+   - Fix: _ml_normal_ptr detects opcode_ptr overflow from bank 4 to bank 5,
+     sets cs_in_attic=1, and re-enters via code cache. _ml_exit_code_cache
+     handles the reverse (linear < $10000 -> direct bank 4).
+   - Status: CONFIRMED working. BASICA.EXE entry code now executes correctly.
+
+2. INT 10h AH=00 BDA video mode write (io.asm)
+   - Root cause: _i10_set_mode pushed $49 (the BDA address byte) instead of
+     the video mode from reg_al. Every INT 10h mode set wrote $49 to BDA 40:49.
+   - Fix: Corrected push/pop order so the actual mode value is written.
+   - Status: CONFIRMED. Was causing DOS boot hang.
+
+WORKAROUNDS (functional but not ideal)
+=======================================
+
+3. BDA repair after boot (decode.asm, main loop tick handler)
+   - Problem: IBMBIO.COM relocates itself with REP MOVSW of 8KB to segment
+     $00E0 (linear $0E00-$2DFF), overwriting BDA at $400+. Our init_guest_mem
+     sets BDA before boot, so it gets destroyed.
+   - Workaround: One-time BDA field repair after ~4096 tick counts. Rewrites
+     equipment word (40:10), video mode (40:49), columns (40:4A), memory
+     size (40:13). Uses flag at $8FEF (must be zeroed at startup).
+   - Proper fix would be: BIOS ROM code that sets BDA, or intercepting
+     IBMBIO's relocation, or not pre-initializing BDA fields that DOS
+     will overwrite.
+   - Status: WORKS but timing-dependent. If a program reads BDA before the
+     repair fires, it gets corrupted values.
+
+4. INT 21h AH=09 print string intercept (opcodes.asm)
+   - Problem: When DOS's own INT 21h AH=09 handler runs via IVT, its
+     character output doesn't appear on screen. Root cause unknown - possibly
+     DOS uses INT 29h or a different output path that doesn't reach our
+     INT 10h intercept properly on this DOS version.
+   - Workaround: We intercept INT 21h, and for AH=09 specifically, we read
+     the string ourselves from DS:DX (via mem_read8) and output each char
+     through int10_handler directly. Other INT 21h functions pass through
+     to DOS via IVT with correct A=$21.
+   - Uses $8FD0/$8FD1 as offset counter (safe from mem_read8 clobbering).
+   - Status: WORKS for AH=09. Other print functions (AH=02, AH=06, AH=40)
+     are not intercepted and may have the same issue.
+
+UNPROVEN CHANGES (applied but not confirmed to fix anything)
+=============================================================
+
+5. Segment wrapping (mem.asm, int.asm, modrm.asm)
+   - Added 16-bit offset wrap detection at $FFFF->$0000 boundary in:
+     fetch_byte, fetch_word, mem_read16, mem_write16, push_word, pop_word,
+     read_rm16, write_rm16.
+   - Theory: When a 16-bit offset is $FFFF, the second byte of a word access
+     should wrap to offset $0000 in the same segment, not advance to the
+     next linear address.
+   - ChatGPT suggested this as a fix for BASICA divide overflow. The real
+     fix turned out to be #1 (bank overflow), not segment wrapping.
+   - Status: Code is correct per 8086 spec but adds overhead to hot paths
+     for a case that rarely occurs. No bug has been confirmed to be caused
+     by missing wraps. Consider removing if performance is a concern.
+
+KNOWN BUGS (unfixed)
+====================
+
+6. BASICA hangs with DS=$0018 after init (VIDEO_MODE=3)
+   - BASICA runs past hardware check, sets video mode 3, enters init code.
+   - Eventually DS gets set to $0018 (IVT area) instead of the program
+     data segment. The command-line parser at CS:0D6A reads from DS:BX
+     which points to IVT memory full of spaces ($20 bytes), looping forever.
+   - NOT an attic cache issue (reproduces with RAM_KB=64).
+   - Only one unimplemented opcode hit (DF = x87 FPU ESC, handled correctly
+     with ModR/M consumption).
+   - The corruption source is unknown. DS is set once at CS:C5B1 (MOV DS, DX)
+     during init and should not change after that, yet something overwrites it.
+   - Possible causes to investigate:
+     a) Stack corruption: push/pop imbalance corrupting return addresses
+     b) INT 21h AH=26h (Create PSP) side effects modifying DS
+     c) An opcode handler that accidentally writes to ZP reg_ds ($18)
+        Note: reg_ds is at regs+22 = $02+22 = $18. If any code writes
+        to absolute address $18, it corrupts DS! This is suspicious.
+     d) Self-modifying code or indirect jumps landing in wrong place
+
+   NOTE ON (c): reg_ds = regs + 22 = $02 + $16 = $18 in zero page.
+   If ANY 45GS02 code does "sta $18" or "stx $18" without going through
+   the register file API, it would silently corrupt the 8086 DS register.
+   This is the most likely cause and should be investigated first.
+
+7. BASICA CGA output not visible (VIDEO_MODE=3)
+   - Even if DS bug is fixed, BASICA writes directly to CGA video RAM at
+     $B8000 (mapped to bank 2 $2A000). Nothing copies this to MEGA65
+     screen RAM at $0800.
+   - A CGA refresh routine exists in display.asm (refresh_cga) but:
+     a) It uses CHROUT (needs IRQs, can't run in emulation loop)
+     b) It's never called from the main loop
+   - Need a fast DMA-based or manual copy that extracts characters from
+     CGA char+attr pairs and writes screen codes to $0800.
+   - The ascii_to_screen conversion is partially written in display.asm
+     but untested.
+   - Also need to handle: cursor position from CGA CRTC registers,
+     attribute-to-color conversion for MEGA65 color RAM.
+
+DEBUG INSTRUMENTATION (left in code)
+=====================================
+- $8F00: Previous raw opcode (saved each instruction in main loop)
+- $8F14: Divide overflow counter
+- $8F50-$8F57: Ring buffer of last 8 chars printed via INT 10h AH=0E
+- $8F58: Ring buffer index
+- $8FC0-$8FCE: 64K-block snapshot (IP, CS, AX, ES, SI, DI, DS, counter)
+  - Written every 65536 instructions in main loop
+  - $8FCE = block counter
+- $8FD0-$8FD1: INT 21h AH=09 offset counter (used by print string handler)
+- $8FD6: Port $3DA read counter
+- $8FD8-$8FD9: Last unhandled high port number
+- $8FDA: Unhandled high port read counter
+- $8FE0-$8FE5: Last INT 21h AH=09 call info (DX, DS, CS)
+- $8FEF: BDA repair done flag (must be zeroed at startup)
+
+These can be removed once BASICA is working. They have negligible
+performance impact except for the 64K snapshot block.
+
+DISK IMAGE
+==========
+The active floppy image is at:
+  C:\Users\scott\AppData\Roaming\xemu-lgb\mega65\hdos\fd.img
+This is a 320KB PC-DOS 1.25 (CDP) disk with:
+  IBMBIO.COM, IBMDOS.COM, COMMAND.COM, BASICA.COM, BASICA.EXE,
+  BASIC86.COM, DEBUG.COM, EDLIN.COM, and various utilities.
+
+BASICA.COM is a 480-byte stub that loads BASICA.EXE (54KB MZ format)
+via INT 21h AH=27h (FCB random block read). The EXE entry point is
+CS:IP = 0000:C7D0 (relative to load segment). Entry code copies 256
+bytes of PSP to CS:0, then JMPs to CS:0100 -> CS:C5A0 (real init).
+
+FAT12 extraction note: This disk has non-standard layout:
+  1 boot sector + 2 FAT sectors + 7 root dir sectors = data at LBA 10
+  Sectors per cluster = 2

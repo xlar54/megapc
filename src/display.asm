@@ -19,40 +19,51 @@ init_display:
         rts
 
 ; ============================================================================
-; refresh_cga — Copy CGA text buffer to screen
+; refresh_cga — Copy CGA text buffer to MEGA65 screen RAM
 ; ============================================================================
 ; Reads 80×25 characters from CGA buffer at $02A000.
-; Writes to screen using CHROUT (slow but reliable for testing).
-;
 ; CGA format: char, attr, char, attr, ... (4000 bytes for 80×25)
+; MEGA65 screen at $0800: screen codes only (no attribute byte)
+;
+; Converts ASCII→screen codes inline. Runs with IRQs off (no CHROUT).
 ;
 refresh_cga:
-        ; Home cursor
-        lda #$13                ; PETSCII home
-        jsr CHROUT
-
-        ; Set up pointer to CGA buffer (bank 2 at $2A000)
+        ; Source: CGA buffer at bank 2, $2A000
         lda #$00
         sta temp_ptr
         lda #$A0
         sta temp_ptr+1
-        lda #$02                ; Bank 2
+        lda #$02
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
 
-        ldy #0                  ; Row counter
-_rc_row:
-        ldx #0                  ; Column counter
-_rc_col:
-        ; Read character (skip attribute)
+        ; Dest: screen RAM at $0800
+        lda #$00
+        sta temp_ptr2
+        lda #$08
+        sta temp_ptr2+1
+        lda #$00
+        sta temp_ptr2+2
+        sta temp_ptr2+3
+
+        ; 80×25 = 2000 characters
+        lda #<2000
+        sta $8FD4               ; Counter low
+        lda #>2000
+        sta $8FD5               ; Counter high
+
+_rc_loop:
+        ; Read ASCII char from CGA buffer (skip attribute at +1)
         ldz #0
         lda [temp_ptr],z
-        ; Convert ASCII to PETSCII (simplified)
-        jsr ascii_to_pet
-        jsr CHROUT
+        ; Convert ASCII to screen code
+        jsr ascii_to_screen
+        ; Write to MEGA65 screen RAM
+        ldz #0
+        sta [temp_ptr2],z
 
-        ; Advance pointer by 2 (char + attr)
+        ; Advance CGA pointer by 2 (char + attr pair)
         clc
         lda temp_ptr
         adc #2
@@ -60,17 +71,56 @@ _rc_col:
         bcc +
         inc temp_ptr+1
 +
-        inx
-        cpx #CGA_COLS
-        bne _rc_col
+        ; Advance screen pointer by 1
+        inc temp_ptr2
+        bne +
+        inc temp_ptr2+1
++
+        ; Decrement counter
+        lda $8FD4
+        bne +
+        dec $8FD5
++       dec $8FD4
+        lda $8FD4
+        ora $8FD5
+        bne _rc_loop
+        rts
 
-        ; Newline
-        lda #13
-        jsr CHROUT
-
-        iny
-        cpy #CGA_ROWS
-        bne _rc_row
+; ============================================================================
+; ascii_to_screen — Convert ASCII to MEGA65 screen code
+; ============================================================================
+; Input: A = ASCII character
+; Output: A = screen code for MEGA65 (lowercase charset mode)
+;
+ascii_to_screen:
+        cmp #$00
+        beq _ats_space          ; NUL → space
+        cmp #$20
+        bcc _ats_space          ; Control chars → space
+        cmp #$40
+        bcc _ats_done           ; $20-$3F: same as screen code
+        cmp #$60
+        bcc _ats_upper          ; $40-$5F: uppercase letters
+        cmp #$7B
+        bcc _ats_lower          ; $60-$7A: lowercase letters
+        cmp #$7F
+        bcc _ats_done           ; $7B-$7E: as-is
+_ats_space:
+        lda #$20                ; Space
+_ats_done:
+        rts
+_ats_upper:
+        ; ASCII $40-$5F → screen codes $00-$1F (uppercase in lowercase charset)
+        sec
+        sbc #$40
+        rts
+_ats_lower:
+        ; ASCII $60-$7A → screen codes $01-$1A? No.
+        ; In MEGA65 lowercase charset: lowercase a-z = screen codes $01-$1A
+        sec
+        sbc #$60
+        clc
+        adc #$01
         rts
 
 ; ============================================================================

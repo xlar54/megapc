@@ -122,11 +122,66 @@ _ml_cs_ok:
         adc #0
         sta [temp_ptr],z
 +
+        ; --- One-time BDA repair after DOS boot ---
+        ; IBMBIO.COM relocates itself with REP MOVSW that overwrites BDA.
+        ; Re-write critical BDA fields once after boot completes (~4096 ticks).
+        lda $8FEF               ; BDA repair done flag
+        bne _ml_no_tick
+        lda tick_counter+1
+        cmp #$10                ; Wait for tick_counter+1 >= $10 (~4096 ticks)
+        bcc _ml_no_tick
+        lda #1
+        sta $8FEF               ; Mark done — only run once
+        ; Equipment word at 40:10
+        lda #$10
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        ; temp_ptr+2/+3 still $04/$00 from tick counter above
+        lda #VIDEO_EQUIP
+        ldz #0
+        sta [temp_ptr],z
+        ; Video mode at 40:49
+        lda #$49
+        sta temp_ptr
+        lda #VIDEO_MODE
+        ldz #0
+        sta [temp_ptr],z
+        ; Columns at 40:4A
+        lda #$4A
+        sta temp_ptr
+        lda #80
+        ldz #0
+        sta [temp_ptr],z
+        ; Memory size at 40:13
+        lda #$13
+        sta temp_ptr
+        lda #RAM_KB_LO
+        ldz #0
+        sta [temp_ptr],z
+        lda #RAM_KB_HI
+        ldz #1
+        sta [temp_ptr],z
 _ml_no_tick:
 
         ; --- Code cache check (for attic-backed CS segments) ---
         lda cs_in_attic
         beq _ml_normal_ptr
+
+        ; CS is in attic mode — but verify current CS:IP is still >= $10000
+        ; (CS base may be < $10000 with only high IP values crossing the boundary)
+        lda cs_base_linear+2
+        bne _ml_attic_confirmed ; CS base >= $10000, definitely attic
+        ; CS base < $10000 — check if adding IP crosses $10000
+        clc
+        lda cs_base_linear
+        adc reg_ip
+        lda cs_base_linear+1
+        adc reg_ip+1
+        lda #0
+        adc #0                  ; = 1 if carry from byte 1 (crossed $10000)
+        beq _ml_exit_code_cache ; No carry: linear < $10000, use direct access
+_ml_attic_confirmed:
 
         ; CS is in attic — check if the right page is cached
         clc
@@ -231,9 +286,30 @@ _ml_code_hit:
         sta opcode_ptr+3
         bra _ml_ptr_done
 
+_ml_exit_code_cache:
+        ; Linear addr < $10000 — switch back to direct bank 4 access
+        lda #0
+        sta cs_in_attic
+        ; Fall through to normal path
+
 _ml_normal_ptr:
         ; --- Normal: update opcode_ptr from cs_base + IP ---
         jsr update_opcode_ptr
+        ; Detect bank 4 overflow: if cs_base is bank 4 but opcode_ptr
+        ; crossed into bank 5, the code is actually in attic (> $10000)
+        lda cs_base+2
+        cmp #$04
+        bne _ml_ptr_done        ; Not bank 4, no overflow possible
+        lda opcode_ptr+2
+        cmp #$05
+        bcc _ml_ptr_done        ; Still in bank 4, fine
+        ; Overflow! CS:IP crossed $10000. Switch to code cache.
+        lda #1
+        sta cs_in_attic
+        lda #CACHE_INVALID
+        sta code_cache_pg_lo
+        sta code_cache_pg_hi
+        jmp ml_next             ; Re-enter to use code cache path
 
 _ml_ptr_done:
 
@@ -241,7 +317,37 @@ _ml_ptr_done:
         inc inst_counter
         bne _ml_no_debug
         inc inst_counter+1
-        ; --- Debug: disabled ---
+        bne _ml_no_debug
+        ; Every 65536 instructions: save snapshot
+        lda reg_ip
+        sta $8FC0
+        lda reg_ip+1
+        sta $8FC1
+        lda reg_cs
+        sta $8FC2
+        lda reg_cs+1
+        sta $8FC3
+        lda reg_ax
+        sta $8FC4
+        lda reg_ax+1
+        sta $8FC5
+        lda reg_es
+        sta $8FC6
+        lda reg_es+1
+        sta $8FC7
+        lda reg_si
+        sta $8FC8
+        lda reg_si+1
+        sta $8FC9
+        lda reg_di
+        sta $8FCA
+        lda reg_di+1
+        sta $8FCB
+        lda reg_ds
+        sta $8FCC
+        lda reg_ds+1
+        sta $8FCD
+        inc $8FCE               ; 64K-block counter
 _ml_no_debug:
 
         ; --- Save IP for REP ---

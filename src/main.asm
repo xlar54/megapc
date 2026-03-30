@@ -218,6 +218,8 @@ entry:
         sta cs_dirty
         sta ss_dirty
         sta ds_dirty
+        lda #0
+        sta $8FEF               ; Clear BDA repair flag
 
         ; Clear screen before emulation
         lda #147

@@ -52,6 +52,12 @@ push_word:
         ldz #0
         sta [temp_ptr],z
 
+        ; Check for segment wrap: SP offset = $FFFF
+        lda reg_sp86
+        and reg_sp86+1
+        cmp #$FF
+        beq _pushw_seg_wrap
+
         ; Check if high byte crosses cache page boundary
         lda temp32
         cmp #$FF
@@ -82,6 +88,36 @@ _pushw_cross:
         ldz #0
         sta [temp_ptr],z
         ; Mark second page dirty if in cache
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       rts
+
+_pushw_seg_wrap:
+        ; SP was $FFFF — high byte wraps to SS:$0000
+        ; Mark first page dirty
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++
+        ; Resolve SS:$0000 for the second byte
+        lda #0
+        sta temp32
+        sta temp32+1
+        sta temp32+2
+        sta temp32+3
+        lda seg_override_en
+        pha
+        lda #0
+        sta seg_override_en
+        ldx #SEG_SS_OFS
+        jsr seg_ofs_to_linear
+        pla
+        sta seg_override_en
+        jsr linear_to_chip
+        lda op_result+1
+        ldz #0
+        sta [temp_ptr],z
         lda temp_ptr+2
         bne +
         jsr mark_cache_dirty
@@ -120,6 +156,12 @@ pop_word:
         lda [temp_ptr],z
         sta op_result
 
+        ; Check for segment wrap: SP offset = $FFFF
+        lda reg_sp86
+        and reg_sp86+1
+        cmp #$FF
+        beq _popw_seg_wrap
+
         ; Check if high byte crosses cache page boundary
         lda temp32
         cmp #$FF
@@ -137,6 +179,27 @@ _popw_cross:
         bne +
         inc temp32+2
 +       jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
+        sta op_result+1
+        bra _popw_sp
+
+_popw_seg_wrap:
+        ; SP was $FFFF — high byte wraps to SS:$0000
+        lda #0
+        sta temp32
+        sta temp32+1
+        sta temp32+2
+        sta temp32+3
+        lda seg_override_en
+        pha
+        lda #0
+        sta seg_override_en
+        ldx #SEG_SS_OFS
+        jsr seg_ofs_to_linear
+        pla
+        sta seg_override_en
+        jsr linear_to_chip
         ldz #0
         lda [temp_ptr],z
         sta op_result+1
