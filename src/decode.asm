@@ -357,8 +357,6 @@ _ml_normal_ptr:
         jsr update_opcode_ptr
         ; Detect bank 4 overflow: if cs_base is bank 4 but opcode_ptr
         ; crossed into bank 5, wrap back to bank 4.
-        ; This handles segments where CS base is in bank 4 but CS:IP
-        ; exceeds $10000. The code was loaded to bank 4 by the boot sector.
         lda cs_base+2
         cmp #$04
         bne _ml_ptr_done        ; Not bank 4, no overflow possible
@@ -368,8 +366,6 @@ _ml_normal_ptr:
         ; Overflow: wrap back to bank 4
         lda #$04
         sta opcode_ptr+2
-        ; Also need to handle fetch_byte/fetch_word wrapping
-        ; by re-entering the main loop to re-check on each instruction
 
 _ml_ptr_done:
 

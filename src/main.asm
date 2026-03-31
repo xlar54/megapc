@@ -108,7 +108,7 @@ CACHE_INVALID   = $FF           ; Sentinel: no page cached
 
 ; --- RAM size ---
 ; Conventional memory reported to DOS via INT 12h and BDA
-RAM_KB          = 640           ; 64 = 64KB (bank 4 only), 640 = full conventional
+RAM_KB          = 128           ; 64 = 64KB (bank 4 only), 640 = full conventional
 RAM_KB_LO       = <RAM_KB       ; Low byte for registers
 RAM_KB_HI       = >RAM_KB       ; High byte for registers
 
