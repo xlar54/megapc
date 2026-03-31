@@ -82,7 +82,18 @@ ml_next:
         jmp *                   ; Halt silently
 _ml_cs_ok:
 
-        ; (bad-jump trap now in check_bad_jump, called from control-flow handlers)
+        ; --- DEBUG: IP ring buffer (last 16 IP values) ---
+        lda $8F30               ; Ring index (0-30, step 2)
+        tax
+        lda reg_ip
+        sta $8F80,x
+        lda reg_ip+1
+        sta $8F81,x
+        inx
+        inx
+        txa
+        and #$1F                ; Wrap at 32 (16 entries × 2 bytes)
+        sta $8F30
 
         ; --- Timer tick (INT 8 emulation) ---
         ; Every ~256 instructions: increment BDA timer counter
@@ -640,6 +651,7 @@ _od_no_rep:
         beq +
         lda #0
         sta int8_asap
+        inc $8FD2               ; Count INT 8 deliveries
         lda #8
         jsr do_sw_interrupt
         jsr compute_cs_base

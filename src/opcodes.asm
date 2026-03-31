@@ -2698,6 +2698,12 @@ _ii_int16:
 _ii_int29:
         ; INT 29h — Fast console output (used by FreeDOS printf)
         ; AL = character to print
+        ; DEBUG: count and log INT 29h calls
+        inc $8FD4               ; Count INT 29h calls (lo)
+        bne +
+        inc $8FD5               ; Count INT 29h calls (hi)
++       lda reg_al
+        sta $8FD6               ; Last char output via INT 29h
         lda reg_al
         cmp #$0A
         beq _i29_done           ; Ignore LF — CR already does newline on MEGA65
