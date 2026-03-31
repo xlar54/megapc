@@ -82,6 +82,8 @@ ml_next:
         jmp *                   ; Halt silently
 _ml_cs_ok:
 
+        ; (bad-jump trap now in check_bad_jump, called from control-flow handlers)
+
         ; --- Timer tick (INT 8 emulation) ---
         ; Every ~256 instructions: increment BDA timer counter
         inc tick_counter
