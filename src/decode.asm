@@ -86,6 +86,7 @@ _ml_cs_ok:
         ; Every ~256 instructions: increment BDA timer counter
         inc tick_counter
         bne _ml_no_tick
+        inc tick_counter+1
 
         ; Increment 32-bit BDA tick counter at $0040:006C (bank 4 $4046C)
         lda #$6C
@@ -158,6 +159,18 @@ _ml_cs_ok:
         ldz #1
         sta [temp_ptr],z
 _ml_no_tick:
+
+        ; --- Signal INT 8 every ~4096 instructions after boot ---
+        lda tick_counter
+        bne _ml_no_int8
+        lda tick_counter+1
+        and #$0F
+        bne _ml_no_int8
+        lda $8FEF               ; BDA repair done?
+        beq _ml_no_int8
+        lda #1
+        sta int8_asap
+_ml_no_int8:
 
         ; --- Code cache check (for attic-backed CS segments) ---
         lda cs_in_attic
@@ -610,6 +623,17 @@ _od_no_rep:
         beq +
         lda #1
         jsr do_sw_interrupt     ; INT 1 (single step)
+        jsr compute_cs_base
++
+        ; --- Deliver INT 8 if pending (after instruction is fully complete) ---
+        lda int8_asap
+        beq +
+        lda flag_if
+        beq +
+        lda #0
+        sta int8_asap
+        lda #8
+        jsr do_sw_interrupt
         jsr compute_cs_base
 +
         ; Continue main loop

@@ -2584,11 +2584,48 @@ _ii_not0_count:
         jmp opcode_done
 
 _ii_int21:
-        ; INT 21h — intercept AH=09 (print string), pass rest to DOS
+        ; INT 21h — intercept console output functions, pass rest to DOS
         lda reg_ah
         cmp #$09
         beq _ii_int21_ah09
-        ; Not AH=09: let DOS handle via IVT
+        cmp #$02
+        beq _ii_int21_ah02
+        cmp #$06
+        beq _ii_int21_ah06
+        ; All other functions: let DOS handle via IVT
+        lda #$21
+        jsr do_sw_interrupt
+        jsr compute_cs_base
+        jmp opcode_done
+
+_ii_int21_ah02:
+        ; AH=02: Write character in DL to stdout
+        lda reg_dl
+        sta reg_al
+        lda #$0E
+        sta reg_ah
+        jsr int10_handler
+        ; Restore AH (DOS returns AL = last char)
+        lda reg_dl
+        sta reg_al
+        jmp opcode_done
+
+_ii_int21_ah06:
+        ; AH=06: Direct console I/O
+        ; DL=FF: input (check keyboard) — pass to DOS
+        lda reg_dl
+        cmp #$FF
+        beq _ii_int21_passthru
+        ; DL != FF: output character
+        sta reg_al
+        lda #$0E
+        sta reg_ah
+        jsr int10_handler
+        lda reg_dl
+        sta reg_al
+        jmp opcode_done
+
+_ii_int21_passthru:
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -3318,13 +3355,13 @@ _gf_imul:
         jsr read_rm16
         ; Detect signs
         lda #0
-        sta $8F52               ; Sign flag: 0=positive, 1=negative result
+        sta $8F72               ; Sign flag: 0=positive, 1=negative result
         lda reg_ax+1
         bpl _gfim_w_src
         ; Negate AX
         lda #1
-        eor $8F52
-        sta $8F52
+        eor $8F72
+        sta $8F72
         sec
         lda #0
         sbc reg_ax
@@ -3337,8 +3374,8 @@ _gfim_w_src:
         bpl _gfim_w_do
         ; Negate source
         lda #1
-        eor $8F52
-        sta $8F52
+        eor $8F72
+        sta $8F72
         sec
         lda #0
         sbc op_source
@@ -3365,7 +3402,7 @@ _gfim_w_do:
         lda $D77B
         sta reg_dx+1
         ; Apply sign to DX:AX if needed
-        lda $8F52
+        lda $8F72
         beq _gfim_w_flags
         ; Negate DX:AX
         sec
@@ -3412,11 +3449,11 @@ _gfim_byte:
         jsr read_rm8
         sta op_source
         lda #0
-        sta $8F52
+        sta $8F72
         lda reg_al
         bpl _gfim_b_src
         lda #1
-        sta $8F52
+        sta $8F72
         ; Negate AL
         sec
         lda #0
@@ -3426,8 +3463,8 @@ _gfim_b_src:
         lda op_source
         bpl _gfim_b_do
         lda #1
-        eor $8F52
-        sta $8F52
+        eor $8F72
+        sta $8F72
         sec
         lda #0
         sbc op_source
@@ -3447,7 +3484,7 @@ _gfim_b_do:
         lda $D779
         sta reg_ah
         ; Apply sign
-        lda $8F52
+        lda $8F72
         beq _gfim_b_flags
         sec
         lda #0
@@ -3562,16 +3599,16 @@ _gf_idiv:
         beq _gfd_div0           ; Divide by zero
 
         lda #0
-        sta $8F52               ; Quotient sign
-        sta $8F53               ; Remainder sign (= dividend sign)
+        sta $8F72               ; Quotient sign
+        sta $8F73               ; Remainder sign (= dividend sign)
 
         ; Check dividend sign (DX:AX)
         lda reg_dx+1
         bpl _gfid_w_divsrc
         ; Negate DX:AX
         lda #1
-        sta $8F52
-        sta $8F53
+        sta $8F72
+        sta $8F73
         sec
         lda #0
         sbc reg_ax
@@ -3592,8 +3629,8 @@ _gfid_w_divsrc:
         bpl _gfid_w_do
         ; Negate divisor
         lda #1
-        eor $8F52
-        sta $8F52               ; Flip quotient sign
+        eor $8F72
+        sta $8F72               ; Flip quotient sign
         sec
         lda #0
         sbc op_source
@@ -3622,7 +3659,7 @@ _gfid_w_do:
         lda div_quotient+2
         ora div_quotient+3
         bne _gfd_div0           ; Absolute quotient > 16 bits
-        lda $8F52
+        lda $8F72
         beq _gfid_w_posq
         ; Negative quotient: max absolute value is 32768 ($8000)
         lda div_quotient+1
@@ -3645,7 +3682,7 @@ _gfid_w_apply:
         sta reg_ax
         lda div_quotient+1
         sta reg_ax+1
-        lda $8F52
+        lda $8F72
         beq _gfid_w_rem
         ; Negate quotient
         sec
@@ -3662,7 +3699,7 @@ _gfid_w_rem:
         sta reg_dx
         lda div_remainder+1
         sta reg_dx+1
-        lda $8F53
+        lda $8F73
         beq _gfid_w_done
         sec
         lda #0
@@ -3681,15 +3718,15 @@ _gfid_byte:
         sta op_source
 
         lda #0
-        sta $8F52               ; Quotient sign
-        sta $8F53               ; Remainder sign
+        sta $8F72               ; Quotient sign
+        sta $8F73               ; Remainder sign
 
         ; Check dividend sign (AX)
         lda reg_ah
         bpl _gfid_b_divsrc
         lda #1
-        sta $8F52
-        sta $8F53
+        sta $8F72
+        sta $8F73
         ; Negate AX
         sec
         lda #0
@@ -3703,8 +3740,8 @@ _gfid_b_divsrc:
         lda op_source
         bpl _gfid_b_do
         lda #1
-        eor $8F52
-        sta $8F52
+        eor $8F72
+        sta $8F72
         sec
         lda #0
         sbc op_source
@@ -3727,7 +3764,7 @@ _gfid_b_do:
         ; Signed overflow: quotient must fit -128..127
         lda div_quotient+1
         bne _gfd_div0           ; > 8 bits
-        lda $8F52
+        lda $8F72
         beq _gfid_b_posq
         ; Negative: max absolute is 128 ($80)
         lda div_quotient
@@ -3742,7 +3779,7 @@ _gfid_b_posq:
 _gfid_b_apply:
         lda div_quotient
         sta reg_al
-        lda $8F52
+        lda $8F72
         beq _gfid_b_rem
         sec
         lda #0
@@ -3751,7 +3788,7 @@ _gfid_b_apply:
 _gfid_b_rem:
         lda div_remainder
         sta reg_ah
-        lda $8F53
+        lda $8F73
         beq _gfid_b_done
         sec
         lda #0

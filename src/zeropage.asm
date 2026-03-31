@@ -157,7 +157,7 @@ floppy_cyls     = $8F42         ; Number of cylinders
 floppy_type     = $8F43         ; BIOS drive type ($01=360K,$02=1.2M,$03=720K,$04=1.44M)
 
 ; PUSHA saved SP (2 bytes) — in non-ZP RAM to avoid KERNAL conflicts
-pusha_saved_sp  = $8F50         ; 2 bytes (moved from $8F00 which is used for prev opcode)
+pusha_saved_sp  = $8F70         ; 2 bytes: saved SP for PUSHA instruction
 
 ; Division working variables — in non-ZP RAM to avoid KERNAL conflicts
 ; (KERNAL uses $C1-$CE for screen/keyboard during CHROUT)
@@ -165,4 +165,6 @@ div_dividend    = $8F02         ; 4 bytes
 div_divisor     = $8F06         ; 2 bytes
 div_quotient    = $8F08         ; 4 bytes
 div_remainder   = $8F0C         ; 2 bytes
-; $B7–$BF availableSTACK_TEMP      = $8FE8         ; 2 bytes: temp buffer for attic stack DMA
+; $B7–$BF available
+; IDIV/IMUL sign flags at $8F72-$8F73
+; Debug teletype ring at $8F74-$8F7B (index at $8F7C)

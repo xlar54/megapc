@@ -60,18 +60,33 @@ _i13_verify:
 _i13_get_type:
         ; AH=15: Get disk type
         ; DL=0 (floppy): return AH=01 (floppy without change-line)
+        ; DL>=80 (hard disk): return AH=03 (fixed disk)
         lda reg_dl
-        bne _i13_get_type_none
-        lda #$01
+        beq _i13_gt_floppy
+        bmi _i13_gt_harddisk    ; DL >= $80
+        ; Floppy drive > 0: no drive
+        lda #$00
+        sta reg_ah
+        lda #1
+        sta flag_cf
+        rts
+_i13_gt_floppy:
+        lda #$01                ; Floppy without change-line
         sta reg_ah
         lda #0
         sta flag_cf
         rts
-_i13_get_type_none:
-        lda #$00                ; No drive
+_i13_gt_harddisk:
+        lda #$03                ; Fixed disk present
         sta reg_ah
-        lda #1
+        lda #0
         sta flag_cf
+        ; CX:DX = number of 512-byte sectors (return 0 = unknown)
+        lda #0
+        sta reg_cx
+        sta reg_cx+1
+        sta reg_dx
+        sta reg_dx+1
         rts
 
 _i13_reset:
@@ -381,7 +396,11 @@ _i13_read_loop:
         ; Attic destination: DMA 512 bytes from SECTOR_BUF to attic directly
         ; This bypasses the cache entirely — much faster and avoids cache bugs
         jsr cache_flush_all     ; Flush any dirty cache data first
-        jsr cache_invalidate_all ; Invalidate cache (we're writing attic directly)
+        jsr cache_invalidate_all ; Invalidate data cache (we're writing attic directly)
+        ; Also invalidate code cache — attic DMA may overwrite code pages
+        lda #CACHE_INVALID
+        sta code_cache_pg_lo
+        sta code_cache_pg_hi
         ; Source: SECTOR_BUF in chip RAM
         lda #<SECTOR_BUF
         sta dma_src_lo

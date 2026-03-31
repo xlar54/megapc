@@ -96,11 +96,12 @@ linear_to_chip:
         bcs _ltc_f_seg
         cmp #$0B
         bne _ltc_not_b
-        ; Check if $B8000-$BFFFF (CGA) or $B0000-$B7FFF (MDA/other)
+        ; $B0000-$B7FFF (MDA) and $B8000-$BFFFF (CGA) both map to video buffer
         lda temp32+1
         cmp #$80
         bcs _ltc_cga            ; $B8xxx+ → CGA buffer
-        bra _ltc_attic          ; $B0xxx-$B7xxx → attic
+        ; $B0xxx-$B7xxx → MDA buffer (same bank 2 location, offset from $B0000)
+        bra _ltc_mda
 _ltc_not_b:
         cmp #$01
         bcs _ltc_attic          ; $10000-$EFFFF → attic DMA
@@ -116,13 +117,29 @@ _ltc_not_b:
         sta temp_ptr+3
         rts
 
+_ltc_mda:
+        ; --- $B0000–$B7FFF: Map to bank 2 at $2A000 ---
+        ; MDA uses same physical buffer as CGA
+        ; $B0000 + offset → $02:A000 + offset
+        lda temp32
+        sta temp_ptr
+        lda temp32+1
+        clc
+        adc #$A0                ; $00 + $A0 = $A0 → $2A000
+        sta temp_ptr+1
+        lda #$02
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        rts
+
 _ltc_cga:
         ; --- $B8000–$BFFFF: Map to bank 2 at $2A000 ---
         lda temp32
         sta temp_ptr
         lda temp32+1
         clc
-        adc #$20
+        adc #$20                ; $80 + $20 = $A0 → $2A000
         sta temp_ptr+1
         lda #$02
         sta temp_ptr+2

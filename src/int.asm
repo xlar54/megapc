@@ -8,7 +8,7 @@
 ; INT pushes FLAGS, CS, IP then jumps to IVT[n].
 ; IVT is at 8086 linear $00000 (bank 4 $40000), 256 entries × 4 bytes.
 
-STACK_TEMP      = $8FE8         ; 2 bytes: temp buffer for attic stack DMA
+; STACK_TEMP was at $8FE8 but is unused — removed to avoid collision with debug counters
 
 ; ============================================================================
 ; push_word — Push 16-bit value onto 8086 stack
