@@ -192,16 +192,23 @@ _ml_no_int8:
 _ml_attic_confirmed:
 
         ; CS is in attic — check if the right page is cached
+        ; Compute page address first, THEN compare (CMP clobbers carry)
         clc
         lda cs_base_linear
         adc reg_ip
         ; byte 0 not needed for page check
         lda cs_base_linear+1
         adc reg_ip+1
+        sta scratch_a           ; computed page lo
+        lda cs_base_linear+2
+        adc #0                  ; carry from the addition, not from CMP
+        and #$0F
+        sta scratch_b           ; computed page hi
+        ; Now compare against cached page
+        lda scratch_a
         cmp code_cache_pg_lo
         bne _ml_code_miss
-        lda cs_base_linear+2
-        adc #0
+        lda scratch_b
         cmp code_cache_pg_hi
         beq _ml_code_hit
 
@@ -243,7 +250,7 @@ _ml_code_miss:
         bra _ml_ccache_do_dma
 
 _ml_ccache_from_attic:
-        ; --- Source is attic (linear >= $10000) ---
+        ; --- Source is attic (linear >= $20000) ---
         lda temp32+2
         sta _dma_ccache_src_bank
         lda temp32+1
@@ -349,20 +356,20 @@ _ml_normal_ptr:
         ; --- Normal: update opcode_ptr from cs_base + IP ---
         jsr update_opcode_ptr
         ; Detect bank 4 overflow: if cs_base is bank 4 but opcode_ptr
-        ; crossed into bank 5, the code is actually in attic (> $10000)
+        ; crossed into bank 5, wrap back to bank 4.
+        ; This handles segments where CS base is in bank 4 but CS:IP
+        ; exceeds $10000. The code was loaded to bank 4 by the boot sector.
         lda cs_base+2
         cmp #$04
         bne _ml_ptr_done        ; Not bank 4, no overflow possible
         lda opcode_ptr+2
         cmp #$05
         bcc _ml_ptr_done        ; Still in bank 4, fine
-        ; Overflow! CS:IP crossed $10000. Switch to code cache.
-        lda #1
-        sta cs_in_attic
-        lda #CACHE_INVALID
-        sta code_cache_pg_lo
-        sta code_cache_pg_hi
-        jmp ml_next             ; Re-enter to use code cache path
+        ; Overflow: wrap back to bank 4
+        lda #$04
+        sta opcode_ptr+2
+        ; Also need to handle fetch_byte/fetch_word wrapping
+        ; by re-entering the main loop to re-check on each instruction
 
 _ml_ptr_done:
 

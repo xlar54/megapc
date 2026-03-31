@@ -377,7 +377,6 @@ update_opcode_ptr:
         ; A20 wrap: if bank > $05 (past F-segment), wrap to bank 4
         cmp #$06
         bcc +
-        ; Wrapped past 1MB — map to bank 4 (segment 0)
         lda #$04
 +       sta opcode_ptr+2
         lda #$00
@@ -402,8 +401,19 @@ _fb_no_wrap:
         inc opcode_ptr+2
         ; A20 wrap check
         lda opcode_ptr+2
-        cmp #$06
+        cmp #$05
         bcc +
+        cmp #$06
+        bcs _fb_a20_wrap
+        ; Bank 5: wrap to bank 4 (only if cs_base is bank 4)
+        lda cs_base+2
+        cmp #$04
+        bne +
+        lda #$04
+        sta opcode_ptr+2
+        bra +
+_fb_a20_wrap:
+        ; Bank 6+: A20 wrap
         lda #$04
         sta opcode_ptr+2
 +       rts
@@ -446,10 +456,20 @@ fetch_word:
         sta opcode_ptr+1
         bcc +
         inc opcode_ptr+2
-        ; A20 wrap check (same as fetch_byte)
+        ; Bank wrap check (same as fetch_byte)
         lda opcode_ptr+2
-        cmp #$06
+        cmp #$05
         bcc +
+        cmp #$06
+        bcs _fw_a20_wrap
+        ; Bank 5: wrap to bank 4 only if cs_base is bank 4
+        lda cs_base+2
+        cmp #$04
+        bne +
+        lda #$04
+        sta opcode_ptr+2
+        bra +
+_fw_a20_wrap:
         lda #$04
         sta opcode_ptr+2
 +
