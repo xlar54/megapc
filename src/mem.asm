@@ -362,25 +362,56 @@ _mw16_rom:
 ; These use the pre-computed cs_base for speed.
 ; CS:IP → opcode_ptr is kept up-to-date.
 
-; update_opcode_ptr — Recompute opcode_ptr = cs_base + IP
-; Called when CS or IP changes.
+; update_opcode_ptr — Recompute opcode_ptr from full linear CS:IP
+; Called when CS or IP changes. Classifies the linear address into
+; bank 4 (<$10000), code cache ($10000-$EFFFF), or bank 5 (>=$F0000).
+;
 update_opcode_ptr:
+        ; Compute 20-bit linear address
         clc
-        lda cs_base
+        lda cs_base_linear
         adc reg_ip
-        sta opcode_ptr
-        lda cs_base+1
+        sta opcode_ptr          ; Also low byte of linear addr
+        lda cs_base_linear+1
         adc reg_ip+1
         sta opcode_ptr+1
-        lda cs_base+2
+        lda cs_base_linear+2
         adc #0
-        ; A20 wrap: if bank >= $06 (past F-segment), wrap to bank 4
-        cmp #$06
-        bcc +
+        and #$0F                ; 20-bit mask
+        ; Classify: which region?
+        cmp #$0F
+        bcs _uop_bank5          ; >= $F0000 → bank 5
+        cmp #$01
+        bcs _uop_attic          ; >= $10000 → attic (code cache)
+        ; < $10000 → bank 4 direct
         lda #$04
-+       sta opcode_ptr+2
+        sta opcode_ptr+2
         lda #$00
-        sta opcode_ptr+3        ; NOT stz
+        sta opcode_ptr+3
+        lda #0
+        sta cs_in_attic
+        rts
+_uop_bank5:
+        lda #$05
+        sta opcode_ptr+2
+        lda #$00
+        sta opcode_ptr+3
+        lda #0
+        sta cs_in_attic
+        rts
+_uop_attic:
+        ; Mark as attic — main loop will use code cache
+        lda #1
+        sta cs_in_attic
+        ; Invalidate code cache so it reloads
+        lda #CACHE_INVALID
+        sta code_cache_pg_lo
+        sta code_cache_pg_hi
+        ; Set opcode_ptr to a placeholder (code cache will override)
+        lda #$04
+        sta opcode_ptr+2
+        lda #$00
+        sta opcode_ptr+3
         rts
 
 ; fetch_byte — Read byte at CS:IP, advance IP by 1
@@ -391,7 +422,7 @@ fetch_byte:
         inc reg_ip
         bne _fb_no_wrap
         inc reg_ip+1
-        beq _fb_ip_wrapped      ; IP wrapped $FFFF→$0000: recompute opcode_ptr
+        beq _fb_ip_resync       ; IP wrapped $FFFF→$0000: full resync
 _fb_no_wrap:
         ; Fast path: just increment opcode_ptr
         inc opcode_ptr
@@ -399,27 +430,24 @@ _fb_no_wrap:
         inc opcode_ptr+1
         bne +
         inc opcode_ptr+2
-        ; A20 wrap check
+        ; Check if we crossed a region boundary (bank change)
+        pha
         lda opcode_ptr+2
         cmp #$05
-        bcc +
-        ; Wrap bank 5+ to bank 4 (if cs_base is bank 4) or A20
-        lda cs_base+2
-        cmp #$04
-        bne _fb_check_a20
-        lda #$04
-        sta opcode_ptr+2
-        bra +
-_fb_check_a20:
-        lda opcode_ptr+2
+        beq _fb_boundary        ; Bank 4→5 boundary
         cmp #$06
-        bcc +
-        lda #$04
-        sta opcode_ptr+2
+        bcs _fb_boundary        ; Bank 5→6 (A20 wrap)
+        pla
 +       rts
 
-_fb_ip_wrapped:
-        ; IP crossed segment boundary — must recompute opcode_ptr from cs_base + 0
+_fb_boundary:
+        ; Crossed a region boundary — full resync from linear CS:IP
+        jsr update_opcode_ptr
+        pla
+        rts
+
+_fb_ip_resync:
+        ; IP wrapped or region changed — full resync
         pha
         jsr update_opcode_ptr
         pla
@@ -428,57 +456,12 @@ _fb_ip_wrapped:
 ; fetch_word — Read word at CS:IP, advance IP by 2
 ; Output: A = low byte, scratch_a = high byte
 ;         (Also stored in i_data0 by most callers)
+; Uses two fetch_byte calls for correct boundary handling.
 fetch_word:
-        ldz #0
-        lda [opcode_ptr],z
-        pha
-        ldz #1
-        lda [opcode_ptr],z
-        sta scratch_a
-
-        ; Advance IP by 2
-        clc
-        lda reg_ip
-        adc #2
-        sta reg_ip
-        lda reg_ip+1
-        adc #0
-        sta reg_ip+1
-        bcs _fw_ip_wrapped      ; Carry = IP crossed $FFFF
-
-        ; Advance opcode_ptr by 2
-        clc
-        lda opcode_ptr
-        adc #2
-        sta opcode_ptr
-        lda opcode_ptr+1
-        adc #0
-        sta opcode_ptr+1
-        bcc +
-        inc opcode_ptr+2
-        ; Bank wrap check (same as fetch_byte)
-        lda opcode_ptr+2
-        cmp #$05
-        bcc +
-        lda cs_base+2
-        cmp #$04
-        bne _fw_check_a20
-        lda #$04
-        sta opcode_ptr+2
-        bra +
-_fw_check_a20:
-        lda opcode_ptr+2
-        cmp #$06
-        bcc +
-        lda #$04
-        sta opcode_ptr+2
-+
-        pla                     ; A = low byte
-        rts
-
-_fw_ip_wrapped:
-        ; IP crossed segment boundary — recompute opcode_ptr
-        jsr update_opcode_ptr
+        jsr fetch_byte          ; A = low byte, IP advanced by 1
+        pha                     ; Save low byte on stack
+        jsr fetch_byte          ; A = high byte, IP advanced by 1
+        sta scratch_a           ; scratch_a = high byte
         pla                     ; A = low byte
         rts
 
@@ -541,9 +524,9 @@ compute_cs_base:
         sta cs_base+2
         lda #$00
         sta cs_base+3
-        sta cs_in_attic
         lda #0
         sta cs_dirty
+        ; update_opcode_ptr will set cs_in_attic based on full CS:IP
         jsr update_opcode_ptr
         rts
 
@@ -557,19 +540,13 @@ _ccb_f_seg:
         sta cs_base+2
         lda #$00
         sta cs_base+3
-        sta cs_in_attic
         lda #0
         sta cs_dirty
         jsr update_opcode_ptr
         rts
 
 _ccb_attic:
-        ; $1xxxx–$Exxxx → attic, use code cache
-        lda #$01
-        sta cs_in_attic
-        ; cs_base is not meaningful for direct chip access, but set it
-        ; to something that won't crash. The main loop will override
-        ; opcode_ptr from the code cache.
+        ; $1xxxx–$Exxxx → CS base itself is in attic
         lda cs_base_linear
         sta cs_base
         lda cs_base_linear+1
@@ -579,7 +556,8 @@ _ccb_attic:
         lda #$00
         sta cs_base+3
         sta cs_dirty
-        ; Don't call update_opcode_ptr — main loop handles it via code cache
+        ; update_opcode_ptr will set cs_in_attic=1
+        jsr update_opcode_ptr
 _ccb_done:
         rts
 

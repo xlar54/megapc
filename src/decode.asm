@@ -291,8 +291,16 @@ _dma_ccache_src_bank:
 
         ; Determine source MB for spill page
         lda _dma_ccache_spill_temp
-        bne _ml_spill_from_attic
+        beq _ml_spill_from_bank4
+        cmp #$0F
+        bcs _ml_spill_from_bank5
+        ; $01-$0E: attic
+        sta _dma_ccache_spill_bank
+        lda #$80
+        sta _dma_ccache_spill_mb
+        bra _ml_spill_do_dma
 
+_ml_spill_from_bank4:
         ; Spill from bank 4
         lda #$04
         sta _dma_ccache_spill_bank
@@ -300,10 +308,11 @@ _dma_ccache_src_bank:
         sta _dma_ccache_spill_mb
         bra _ml_spill_do_dma
 
-_ml_spill_from_attic:
-        lda _dma_ccache_spill_temp
+_ml_spill_from_bank5:
+        ; Spill from bank 5 (BIOS ROM)
+        lda #$05
         sta _dma_ccache_spill_bank
-        lda #$80
+        lda #$00
         sta _dma_ccache_spill_mb
 
 _ml_spill_do_dma:
@@ -353,19 +362,13 @@ _ml_exit_code_cache:
         ; Fall through to normal path
 
 _ml_normal_ptr:
-        ; --- Normal: update opcode_ptr from cs_base + IP ---
+        ; --- Normal: update opcode_ptr from full linear CS:IP ---
+        ; update_opcode_ptr now classifies by full linear address
+        ; and may set cs_in_attic=1 if we crossed into attic range.
+        ; If so, re-enter main loop to use code cache path.
         jsr update_opcode_ptr
-        ; Detect bank 4 overflow: if cs_base is bank 4 but opcode_ptr
-        ; crossed into bank 5, wrap back to bank 4.
-        lda cs_base+2
-        cmp #$04
-        bne _ml_ptr_done        ; Not bank 4, no overflow possible
-        lda opcode_ptr+2
-        cmp #$05
-        bcc _ml_ptr_done        ; Still in bank 4, fine
-        ; Overflow: wrap back to bank 4
-        lda #$04
-        sta opcode_ptr+2
+        lda cs_in_attic
+        bne ml_next             ; Switched to attic — re-enter for code cache
 
 _ml_ptr_done:
 

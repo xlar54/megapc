@@ -184,6 +184,15 @@ _i13_hd_read:
         ; AH=02 for hard disk: return a blank sector (all zeros)
         ; This makes FreeDOS read it and find "illegal partition table"
         ; instead of "no hard disks", taking the same code path as real PC
+        ; Zero SECTOR_BUF first, then use the safe copy path
+        ldy #0
+        lda #$00
+_i13_hd_zero:
+        sta SECTOR_BUF,y
+        sta SECTOR_BUF+256,y
+        iny
+        bne _i13_hd_zero
+        ; Set up destination address
         lda reg_bx
         sta temp32
         lda reg_bx+1
@@ -195,26 +204,47 @@ _i13_hd_read:
         lda #0
         sta seg_override_en
         jsr seg_ofs_to_linear
+        ; Use the same safe copy path as floppy reads
+        ldy #0
+_i13_hd_copy:
+        lda SECTOR_BUF,y
+        sta scratch_d
+        phy
         jsr linear_to_chip
-        ; Fill 512 bytes with zeros at ES:BX
-        lda #$00
-        ldy #0
-_i13_hd_fill:
-        tya
-        taz
-        lda #$00
+        lda scratch_d
+        ldz #0
         sta [temp_ptr],z
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
         iny
-        bne _i13_hd_fill
-        inc temp_ptr+1
+        bne _i13_hd_copy
         ldy #0
-_i13_hd_fill2:
-        tya
-        taz
-        lda #$00
+_i13_hd_copy2:
+        lda SECTOR_BUF+256,y
+        sta scratch_d
+        phy
+        jsr linear_to_chip
+        lda scratch_d
+        ldz #0
         sta [temp_ptr],z
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
         iny
-        bne _i13_hd_fill2
+        bne _i13_hd_copy2
         ; Return success
         lda #$00
         sta reg_ah
@@ -390,64 +420,53 @@ _i13_read_loop:
         jsr seg_ofs_to_linear
         ; temp32 now has 20-bit linear address
 
-        ; Check if destination is in attic (>= $10000)
-        lda temp32+2
-        beq _i13_copy_bank4
-        ; Attic destination: DMA 512 bytes from SECTOR_BUF to attic directly
-        ; This bypasses the cache entirely — much faster and avoids cache bugs
-        jsr cache_flush_all     ; Flush any dirty cache data first
-        jsr cache_invalidate_all ; Invalidate data cache (we're writing attic directly)
-        ; Also invalidate code cache — attic DMA may overwrite code pages
-        lda #CACHE_INVALID
-        sta code_cache_pg_lo
-        sta code_cache_pg_hi
-        ; Source: SECTOR_BUF in chip RAM
-        lda #<SECTOR_BUF
-        sta dma_src_lo
-        lda #>SECTOR_BUF
-        sta dma_src_hi
-        lda #$00
-        sta dma_src_bank
-        ; Dest: attic at linear temp32
-        lda temp32
-        sta dma_dst_lo
-        lda temp32+1
-        sta dma_dst_hi
-        lda temp32+2
-        sta dma_dst_bank
-        ; Count: 512 bytes
-        lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi
-        jsr do_dma_to_attic
-        bra _i13_copy_done
-
-_i13_copy_bank4:
-        ; Bank 4 destination: copy byte by byte (handles < $10000)
-        ; Use [temp_ptr],z for direct bank 4 writes
-        jsr linear_to_chip      ; Map first byte address
+        ; Copy 512 bytes from SECTOR_BUF to ES:BX in guest memory
+        ; Safe path: re-resolve linear_to_chip for each byte
+        ; Handles bank 4, attic, CGA, and boundary crossings correctly
         ldy #0
 _i13_copy_loop:
         lda SECTOR_BUF,y
+        sta scratch_d
+        phy
+        jsr linear_to_chip
+        lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        ; Advance pointer
-        inc temp_ptr
+        ; Mark cache dirty if write went to cache buffer
+        lda temp_ptr+2
         bne +
-        inc temp_ptr+1
-+       iny
+        jsr mark_cache_dirty
++
+        ; Advance linear address
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
+        iny
         bne _i13_copy_loop
         ; Second 256 bytes
         ldy #0
 _i13_copy_loop2:
         lda SECTOR_BUF+256,y
+        sta scratch_d
+        phy
+        jsr linear_to_chip
+        lda scratch_d
         ldz #0
         sta [temp_ptr],z
-        inc temp_ptr
+        lda temp_ptr+2
         bne +
-        inc temp_ptr+1
-+       iny
+        jsr mark_cache_dirty
++
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       ply
+        iny
         bne _i13_copy_loop2
 _i13_copy_done:
 
@@ -642,25 +661,37 @@ _i13_write_loop:
         bra _i13w_do_write
 
 _i13w_bank4_read:
-        ; Bank 4 source: copy 512 bytes via [ptr],z
-        jsr linear_to_chip
+        ; Safe read: re-resolve linear_to_chip for each byte
+        ; Handles boundary crossings correctly
         ldy #0
 _i13w_rd_loop:
-        tya
-        taz
+        phy
+        jsr linear_to_chip
+        ldz #0
         lda [temp_ptr],z
+        ply
         sta SECTOR_BUF,y
-        iny
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       iny
         bne _i13w_rd_loop
-        ; Advance temp_ptr by 256 for second half
-        inc temp_ptr+1
         ldy #0
 _i13w_rd_loop2:
-        tya
-        taz
+        phy
+        jsr linear_to_chip
+        ldz #0
         lda [temp_ptr],z
+        ply
         sta SECTOR_BUF+256,y
-        iny
+        inc temp32
+        bne +
+        inc temp32+1
+        bne +
+        inc temp32+2
++       iny
         bne _i13w_rd_loop2
 
 _i13w_do_write:
