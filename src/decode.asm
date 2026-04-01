@@ -82,6 +82,29 @@ ml_next:
         jmp *                   ; Halt silently
 _ml_cs_ok:
 
+        ; --- DEBUG: trace after first REP MOVSW completion ---
+        lda $9EE1               ; Trace active?
+        beq _ml_no_trace
+        ; Trace ALL instructions (any CS), 5 bytes each
+        ldx $9EE2               ; Trace index
+        cpx #100                ; 20 entries × 5 bytes
+        bcs _ml_no_trace
+        lda raw_opcode
+        sta $9EE3,x
+        lda reg_ip
+        sta $9EE4,x
+        lda reg_ip+1
+        sta $9EE5,x
+        lda reg_cs
+        sta $9EE6,x
+        lda reg_cs+1
+        sta $9EE7,x
+        txa
+        clc
+        adc #5
+        sta $9EE2
+_ml_no_trace:
+
         ; --- DEBUG: IP ring buffer (last 16 IP values) ---
         lda $8F30               ; Ring index (0-30, step 2)
         tax
@@ -650,6 +673,11 @@ _od_clear_rep:
         beq _od_rep_trap_second
         bra _od_rep_no_trap
 _od_rep_trap_first:
+        ; Activate instruction trace
+        lda #1
+        sta $9EE1               ; Enable trace
+        lda #0
+        sta $9EE2               ; Reset trace index
         ldx #$00                ; Store at $9EA0
         bra _od_rep_save
 _od_rep_trap_second:
@@ -720,6 +748,14 @@ _od_no_rep:
         beq +
         lda flag_if
         beq +
+        ; Skip INT 8 during early kernel init (CS=$0060)
+        ; INT 8 at this phase can disrupt the kernel relocation
+        lda reg_cs+1
+        bne _od_int8_ok
+        lda reg_cs
+        cmp #$60
+        beq +                   ; Skip INT 8 while CS=$0060
+_od_int8_ok:
         lda #0
         sta int8_asap
         inc $8FD2               ; Count INT 8 deliveries
