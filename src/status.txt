@@ -1,171 +1,127 @@
-MEGA8086 Emulator - Session Status
-===================================
-Last updated: 2026-03-30 (session 2)
+MEGA8086 Emulator — Investigation Status
+==========================================
+Last updated: 2026-04-01
 
-CURRENT STATE
-=============
-- PC-DOS 1.25 (CDP 320KB): Boots to A: prompt, keyboard works, DIR works
-- FreeDOS 1.44MB: Boots through kernel, prints InitDisk + partition table
-  messages with clean text, then hangs after printing "sector" (needs INT 8
-  during mid-boot, before BDA repair fires)
-- BASICA (VIDEO_MODE=7): Correctly shows "HARDWARE INCOMPATIBLE" error
-- BASICA (VIDEO_MODE=3): Hangs with DS=$0018 corruption (separate bug)
+FREEDOS "SECTOR" HANG — WHAT WE KNOW
+======================================
 
-CONFIRMED FIXES (this session)
-==============================
+1. FreeDOS boots through kernel init, prints "InitDisk",
+   "illegal partition table - drive 00 sector" and then hangs.
+   It never prints the sector number "0" or continues.
 
-1. Bank 4 -> Bank 5 overflow (decode.asm)
-   CS:IP crossing $10000 from bank 4 into bank 5 (BIOS ROM).
-   Fixed: detect overflow, switch to attic code cache.
+2. The hang is a loop in valid kernel code at CS=$0F75, IP in
+   the $FC00-$FD00 range. The code cache loads real (non-zero)
+   instructions from attic for those pages. The CPU is executing
+   real code, not zeros.
 
-2. INT 10h AH=00 BDA write bug (io.asm)
-   Was writing $49 to BDA instead of video mode value.
+3. The loop is in the FreeDOS printf engine. It processes the
+   "%lu" format specifier for the sector number. The format
+   dispatcher uses:
+   - DS:[BX+$1095] to look up format character indices
+   - CS:[BX+$F219] as a jump table to dispatch format handlers
 
-3. BDA repair after boot (decode.asm)
-   IBMBIO.COM REP MOVSW overwrites BDA. One-time repair fires at
-   tick_counter+1 >= $10. Must clear $8FEF at startup.
-   IMPORTANT: tick_counter+1 must be incremented or repair never fires.
+4. At hang time, DS=$9DCA (not $0F75). DS=$9DCA equals SS.
+   On the working emulator at the A:> prompt, DS=CS=$2902.
 
-4. INT 21h AH=09/02/06 intercept (opcodes.asm)
-   DOS output path doesn't reach screen via IVT. We intercept:
-   - AH=09: Print $ terminated string from DS:DX
-   - AH=02: Write character in DL
-   - AH=06: Direct console I/O (output when DL != FF)
-   Uses $8FD0/$8FD1 as offset counter for AH=09.
+5. The CS-based jump table at CS:$F219 reads as all zeros through
+   the emulated memory path. On the working emulator, CS:$F219
+   has non-zero data.
 
-5. POP r/m16 opcode $8F (opcodes.asm, tables.asm, decode.asm)
-   Standard 8086 opcode was missing. FreeDOS kernel uses it.
+6. DS=$0F75 (correct) at the moment CS first becomes $0F75.
+   CS enters $0F75 exactly once and never leaves.
+   No MOV sreg, POP DS, or LDS instruction changes DS while
+   CS=$0F75 (logged and confirmed).
 
-6. ROM write protection (mem.asm, modrm.asm)
-   Guest code was overwriting BIOS ROM (bank 5). Writes to $F0000+
-   are now silently discarded in mem_write8, mem_write16, write_rm8,
-   write_rm16.
+7. DS changes from $0F75 to $9DCA without any tracked 8086
+   instruction causing the change. All tracked write paths to
+   reg_ds (MOV sreg, POP seg, LDS, write_rm8, write_rm16)
+   were monitored and none fired for DS while CS=$0F75.
 
-7. MDA support (mem.asm, io.asm)
-   - $B0000-$B7FFF now maps to same bank 2 buffer as CGA ($2A000)
-   - Port $3BA (MDA status) returns toggling retrace bits like $3DA
+8. The mark_cache_dirty function was confirmed to corrupt ZP
+   via cache_dirty,x with out-of-range X during early boot
+   (before CS=$0F75 was entered). Specifically, sta $98,x with
+   X=$80 wraps in ZP and writes to $18 (reg_ds). This was caught
+   by a targeted trap ($9B6A=$A2 after FLAGS push in
+   do_sw_interrupt).
 
-8. INT 13h AH=03 write sectors (disk.asm)
-   Writes guest memory to floppy image in attic via DMA.
+9. Adding bounds checks to mark_cache_dirty prevented the early
+   corruption but did NOT fix the "sector" hang. DS still ends
+   up as $9DCA at hang time, suggesting a second corruption
+   source exists.
 
-9. INT 13h AH=04/15 and hard disk stub (disk.asm)
-   - AH=04: Verify sectors (always succeeds)
-   - AH=15: Get disk type (consistent with AH=08 for HD)
-   - Hard disk (DL >= $80): AH=08 returns 1 drive, AH=02 returns
-     blank sector so FreeDOS gets "illegal partition table" path
+10. The corruption is not detected by watchpoints at:
+    - Top of main loop (every iteration)
+    - opcode_done (after every instruction)
+    - REP loop iterations
+    - do_sw_interrupt entry and after each push_word
+    - write_rm8/write_rm16 register paths
+    This suggests the corruption occurs within instruction
+    execution or helper functions called during instruction
+    execution, but after all current check points.
 
-10. Code cache bank 4 vs attic source (decode.asm)
-    When code cache loads a page, detect whether linear address is
-    in bank 4 (< $10000, MB $00) or attic (>= $10000, MB $80).
-    Fixes segments straddling the $10000 boundary.
+11. The working emulator (IBM PC AT 5170 with same FreeDOS disk)
+    boots to A:\> successfully. It uses CS=$2902 (different from
+    our CS=$0F75 due to different memory size/layout).
 
-11. Code cache invalidation on attic DMA (disk.asm)
-    When INT 13h DMAs directly to attic, invalidate code cache
-    to prevent stale code execution.
+KERNEL BOOT SEQUENCE (confirmed)
+=================================
 
-12. Variable collision fixes (zeropage.asm, opcodes.asm, io.asm, int.asm)
-    - pusha_saved_sp: $8F50 -> $8F70
-    - IDIV sign flags: $8F52/$8F53 -> $8F72/$8F73
-    - Teletype debug ring: $8F50-$8F57 -> $8F74-$8F7B (idx $8F7C)
-    - Removed unused STACK_TEMP ($8FE8)
-    The IDIV/debug ring collision was a REAL BUG that could corrupt
-    division results when printing happened during IDIV.
+- Boot sector loads KERNEL.SYS to ES=$1FE0 (linear $1FE00)
+- UPX decompressor runs at CS=$0060, decompresses kernel in-place
+  (~57KB of decompressed data in bank 4 at $0600-$FFFF)
+- Kernel Phase 1 relocation runs at CS=$0256:
+  - First REP MOVSW (backward, DF=1): copies INIT segment to
+    ES=$9A04 (near top of 640KB)
+  - Second REP MOVSW (backward, DF=1): copies HMA_TEXT to
+    ES=$9001
+  - Both complete successfully (confirmed by completion counter)
+- Total of 22 REP MOVSW and 170+ REP MOVSB completions during boot
+- Later MoveKernel() copies relocate the resident kernel to
+  CS=$0F75 (base $F750)
 
-13. INT 8 timer delivery (decode.asm)
-    - int8_asap flag set every ~4096 instructions after BDA repair
-    - Delivery in opcode_done (after instruction completes, correct
-      8086 interrupt timing)
-    - check_hw_interrupts checks flag_if before firing
-    NOTE: Higher INT 8 frequency (~256 instructions) causes garbled
-    text output. Root cause unknown. Kept at ~4096 for stability.
+WHAT IS NOT THE CAUSE
+======================
 
-14. Segment wrapping (mem.asm, int.asm, modrm.asm)
-    Offset $FFFF->$0000 wrap detection. Unproven but correct per spec.
+- Cache flush mechanism (verified working via DEBUG test)
+- Cache capacity (4 and 8 lines produce same result)
+- INT 8 timer delivery (suppressing it doesn't fix the hang)
+- Missing 8086 opcodes (unimpl_count=2, both FPU ESC)
+- Divide overflow (counter stays at 0)
+- Port polling ($3DA/$3BA read counter = 0)
+- Code fetch from wrong bank (full-linear fetch fix applied)
+- INT 13h sector copy boundary crossing (safe copy path applied)
 
-15. INT 13h direct DMA to attic (disk.asm)
-    For destinations >= $10000, DMA directly from SECTOR_BUF to attic
-    instead of byte-by-byte cache writes. Flushes and invalidates
-    data and code caches before DMA.
+REMAINING CONFIRMED BUGS
+==========================
 
-KNOWN BUGS
-==========
+- mark_cache_dirty can write to arbitrary ZP via cache_dirty,x
+  when X is out of range (0-3 expected). This is because
+  temp_ptr+1 can be outside the CACHE_BUF range ($92-$95),
+  causing the subtraction temp_ptr+1 - $92 to produce a
+  large X value that wraps in ZP indexed addressing.
+  This bug was confirmed to corrupt reg_ds during early boot.
+  A second instance of this or similar corruption likely exists
+  but has not been identified.
 
-1. FreeDOS hangs after "sector" during InitDisk
-   - Kernel needs INT 8 timer delivery during mid-boot
-   - INT 8 is gated by BDA repair flag ($8FEF), which fires at
-     tick_counter+1 >= $10 (~1M instructions)
-   - The "sector" hang happens BEFORE the BDA repair fires
-   - Enabling INT 8 earlier causes boot hang (freezes at "FreeDOS")
-   - Root cause of early INT 8 hang is unknown
-   - Possible fix: find a better gate than BDA repair flag
+- CS jump table at CS:$F219 contains zeros on our emulator but
+  real data on the working emulator. Whether this is caused by
+  the DS corruption (wrong data reads) or by missing data
+  population has not been determined.
 
-2. INT 8 at high frequency garbles text
-   - At ~256 instruction interval, output text gets corrupted
-   - At ~4096 interval, text is clean
-   - Root cause unknown — possibly do_sw_interrupt clobbers state
-     used by chrout_safe or the INT 29h handler
-   - Needs investigation: which ZP variables are shared
+PC-DOS 1.25 STATUS
+===================
 
-3. BASICA DS=$0018 corruption (VIDEO_MODE=3)
-   - See previous session notes
-   - reg_ds is at ZP $18 — something may write to that address
+- Boots to A: prompt
+- DIR works
+- Keyboard input works
+- BASICA shows "HARDWARE INCOMPATIBLE" error in VIDEO_MODE=7
+- EDLIN can create files but write may have issues
 
-4. Attic cache data loss (general)
-   - Cache flush/verify passes isolated test
-   - During emulation, data written through cache sometimes lost
-   - Partially mitigated by direct DMA in INT 13h
-   - May be related to bug #2 (state clobbering)
+CONFIGURATION
+==============
 
-5. EDLIN file write bug
-   - Creates file in directory but writes empty content
-   - INT 13h AH=03 is implemented but may have issues
-   - Needs investigation
-
-MEMORY MAP ($8Fxx non-ZP variables)
-====================================
-$8F00         Previous raw opcode
-$8F02-$8F0D   Division: dividend(4), divisor(2), quotient(4), remainder(2)
-$8F0E         Division 17th bit overflow
-$8F14         Divide overflow counter (INT 0)
-$8F20         INT 13h read counter
-$8F40-$8F43   Floppy geometry: SPT, heads, cyls, type
-$8F48         attic_access flag
-$8F60-$8F62   mem_read16/write16 offset save
-$8F70-$8F71   pusha_saved_sp
-$8F72-$8F73   IDIV/IMUL sign flags (quotient, remainder)
-$8F74-$8F7B   Teletype debug ring (8 chars)
-$8F7C         Teletype ring index
-$8FA0-$8FAF   Debug snapshot area (reusable)
-$8FC0-$8FCE   64K-block snapshot (IP, CS, AX, ES, SI, DI, DS, counter)
-$8FD0-$8FD1   INT 21h AH=09 offset counter
-$8FD2-$8FD3   Unsupported INT 13h: last AH, count
-$8FD4-$8FD5   CGA refresh counter (display.asm)
-$8FD6         Port $3DA/$3BA read counter
-$8FD8-$8FDA   Last unhandled high port (lo, hi, count)
-$8FE0-$8FE4   Last INT 21h AH=09 info (DX, DS, count)
-$8FE8-$8FEB   Cache flush debug (count, last page_lo/hi, line)
-$8FEF         BDA repair done flag (MUST be zeroed at startup)
-$8FF0         INT 13h saved sector count
-$8FF2-$8FF3   INT 13h saved BX
-
-DISK IMAGES
-============
-FreeDOS 1.44MB (currently active):
-  C:\Users\scott\AppData\Roaming\xemu-lgb\mega65\hdos\FD.IMG
-
-PC-DOS 1.25 (CDP) 320KB:
-  Swap FD.IMG to test. Non-standard FAT layout: data at LBA 10, SPC=2.
-
-IMPLEMENTATION STATUS
-=====================
-All standard 8086 opcodes implemented except:
-  $9B (WAIT) — NOP, harmless
-  $D8-$DF (FPU ESC) — NOP with ModR/M consumed, correct
-
-80186 opcodes:
-  $60/$61 (PUSHA/POPA) — implemented
-  $68/$6A (PUSH imm16/imm8) — implemented
-  $C0/$C1 (shift imm8) — implemented
-  $69/$6B (3-operand IMUL) — NOT implemented, would desync IP
-  $62 (BOUND) — NOT implemented
-  $C8/$C9 (ENTER/LEAVE) — ENTER skips 3 bytes, LEAVE is NOP
+- RAM_KB = 640
+- VIDEO_MODE = 7
+- CACHE_LINES = 4
+- SECTOR_BUF = $9800
+- Floppy image: C:\Users\scott\AppData\Roaming\xemu-lgb\mega65\hdos\FD.IMG

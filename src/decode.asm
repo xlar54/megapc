@@ -46,78 +46,6 @@ ml_next:
         lda raw_opcode
         sta $8F00
 
-        ; Trap CS in CGA range ($B000-$BFFF)
-        lda reg_cs+1
-        cmp #$B0
-        bcc _ml_cs_ok
-        cmp #$C0
-        bcs _ml_cs_ok
-        ; Bad CS in CGA range! Save state and halt
-        lda reg_cs
-        sta $8FC0
-        lda reg_cs+1
-        sta $8FC1
-        lda reg_ip
-        sta $8FC2
-        lda reg_ip+1
-        sta $8FC3
-        lda $8F00               ; prev opcode
-        sta $8FC4
-        lda reg_sp86
-        sta $8FC5
-        lda reg_sp86+1
-        sta $8FC6
-        lda reg_ss
-        sta $8FC7
-        lda reg_ss+1
-        sta $8FC8
-        lda reg_ds
-        sta $8FC9
-        lda reg_ds+1
-        sta $8FCA
-        lda reg_es
-        sta $8FCB
-        lda reg_es+1
-        sta $8FCC
-        jmp *                   ; Halt silently
-_ml_cs_ok:
-
-        ; --- DEBUG: trace after first REP MOVSW completion ---
-        lda $9EE1               ; Trace active?
-        beq _ml_no_trace
-        ; Trace ALL instructions (any CS), 5 bytes each
-        ldx $9EE2               ; Trace index
-        cpx #100                ; 20 entries × 5 bytes
-        bcs _ml_no_trace
-        lda raw_opcode
-        sta $9EE3,x
-        lda reg_ip
-        sta $9EE4,x
-        lda reg_ip+1
-        sta $9EE5,x
-        lda reg_cs
-        sta $9EE6,x
-        lda reg_cs+1
-        sta $9EE7,x
-        txa
-        clc
-        adc #5
-        sta $9EE2
-_ml_no_trace:
-
-        ; --- DEBUG: IP ring buffer (last 16 IP values) ---
-        lda $8F30               ; Ring index (0-30, step 2)
-        tax
-        lda reg_ip
-        sta $8F80,x
-        lda reg_ip+1
-        sta $8F81,x
-        inx
-        inx
-        txa
-        and #$1F                ; Wrap at 32 (16 entries × 2 bytes)
-        sta $8F30
-
         ; --- Timer tick (INT 8 emulation) ---
         ; Every ~256 instructions: increment BDA timer counter
         inc tick_counter
@@ -410,40 +338,9 @@ _ml_ptr_done:
 
         ; --- Increment instruction counter ---
         inc inst_counter
-        bne _ml_no_debug
+        bne +
         inc inst_counter+1
-        bne _ml_no_debug
-        ; Every 65536 instructions: save snapshot
-        lda reg_ip
-        sta $8FC0
-        lda reg_ip+1
-        sta $8FC1
-        lda reg_cs
-        sta $8FC2
-        lda reg_cs+1
-        sta $8FC3
-        lda reg_ax
-        sta $8FC4
-        lda reg_ax+1
-        sta $8FC5
-        lda reg_es
-        sta $8FC6
-        lda reg_es+1
-        sta $8FC7
-        lda reg_si
-        sta $8FC8
-        lda reg_si+1
-        sta $8FC9
-        lda reg_di
-        sta $8FCA
-        lda reg_di+1
-        sta $8FCB
-        lda reg_ds
-        sta $8FCC
-        lda reg_ds+1
-        sta $8FCD
-        inc $8FCE               ; 64K-block counter
-_ml_no_debug:
++
 
         ; --- Save IP for REP ---
         lda reg_ip
@@ -654,82 +551,6 @@ _od_rep_again:
 _od_clear_rep:
         lda #0
         sta rep_override_en
-        ; --- DEBUG: trap when REP MOVSW completes from CS=$0060 ---
-        lda raw_opcode
-        cmp #$A5                ; MOVSW?
-        bne _od_rep_no_trap
-        lda reg_cs+1
-        bne _od_rep_no_trap
-        lda reg_cs
-        cmp #$60
-        bne _od_rep_no_trap
-        ; REP MOVSW from CS=$0060 completed! Save state.
-        ; Use $9EA0 for first completion, $9EC0 for second
-        ldx $9EE0               ; Completion counter
-        inc $9EE0
-        cpx #0
-        beq _od_rep_trap_first
-        cpx #1
-        beq _od_rep_trap_second
-        bra _od_rep_no_trap
-_od_rep_trap_first:
-        ; Activate instruction trace
-        lda #1
-        sta $9EE1               ; Enable trace
-        lda #0
-        sta $9EE2               ; Reset trace index
-        ldx #$00                ; Store at $9EA0
-        bra _od_rep_save
-_od_rep_trap_second:
-        ldx #$20                ; Store at $9EC0
-_od_rep_save:
-        lda reg_ip
-        sta $9EA0,x
-        lda reg_ip+1
-        sta $9EA1,x
-        lda reg_cs
-        sta $9EA2,x
-        lda reg_cs+1
-        sta $9EA3,x
-        lda reg_es
-        sta $9EA4,x
-        lda reg_es+1
-        sta $9EA5,x
-        lda reg_di
-        sta $9EA6,x
-        lda reg_di+1
-        sta $9EA7,x
-        lda reg_ds
-        sta $9EA8,x
-        lda reg_ds+1
-        sta $9EA9,x
-        lda reg_si
-        sta $9EAA,x
-        lda reg_si+1
-        sta $9EAB,x
-        lda reg_sp86
-        sta $9EAC,x
-        lda reg_sp86+1
-        sta $9EAD,x
-        lda reg_ss
-        sta $9EAE,x
-        lda reg_ss+1
-        sta $9EAF,x
-        lda reg_ax
-        sta $9EB0,x
-        lda reg_ax+1
-        sta $9EB1,x
-        lda reg_bx
-        sta $9EB2,x
-        lda reg_bx+1
-        sta $9EB3,x
-        lda reg_dx
-        sta $9EB4,x
-        lda reg_dx+1
-        sta $9EB5,x
-        lda flag_df
-        sta $9EB6,x
-_od_rep_no_trap:
 
 _od_no_rep:
         ; Clear segment override for next instruction
@@ -758,7 +579,6 @@ _od_no_rep:
 _od_int8_ok:
         lda #0
         sta int8_asap
-        inc $8FD2               ; Count INT 8 deliveries
         lda #8
         jsr do_sw_interrupt
         jsr compute_cs_base

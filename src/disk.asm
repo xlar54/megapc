@@ -77,11 +77,10 @@ _i13_gt_floppy:
         sta flag_cf
         rts
 _i13_gt_harddisk:
-        lda #$03                ; Fixed disk present
+        lda #$00                ; No drive
         sta reg_ah
-        lda #0
-        sta flag_cf
-        ; CX:DX = number of 512-byte sectors (return 0 = unknown)
+        lda #1
+        sta flag_cf             ; CF=1 = no drive
         lda #0
         sta reg_cx
         sta reg_cx+1
@@ -148,110 +147,17 @@ _i13_no_drive:
         rts
 
 _i13_hard_disk:
-        ; Hard disk (DL >= $80): check function
-        lda reg_ah
-        cmp #$02
-        beq _i13_hd_read
-        cmp #$08
-        beq _i13_hd_params
-        ; All other functions: return error
-        lda #$01
+        ; Hard disk (DL >= $80): no hard drives present
+        ; Return error for all functions
+        lda #$01                ; Invalid function / no drive
         sta reg_ah
         lda #0
         sta reg_dl              ; 0 hard drives
         lda #1
-        sta flag_cf
+        sta flag_cf             ; CF=1 = error
         rts
 
-_i13_hd_params:
-        ; AH=08 for hard disk: return 1 drive with minimal geometry
-        ; This makes FreeDOS try to read the partition table (gets zeros = invalid)
-        ; which matches the reference emulator behavior ("illegal partition table")
-        lda #$00
-        sta reg_ah              ; Status OK
-        lda #$01
-        sta reg_dl              ; 1 hard drive
-        lda #$01
-        sta reg_cl              ; 1 sector per track
-        lda #$00
-        sta reg_ch              ; 0 cylinders (max)
-        sta reg_dh              ; 0 heads (max)
-        lda #0
-        sta flag_cf             ; CF=0 = success
-        rts
-
-_i13_hd_read:
-        ; AH=02 for hard disk: return a blank sector (all zeros)
-        ; This makes FreeDOS read it and find "illegal partition table"
-        ; instead of "no hard disks", taking the same code path as real PC
-        ; Zero SECTOR_BUF first, then use the safe copy path
-        ldy #0
-        lda #$00
-_i13_hd_zero:
-        sta SECTOR_BUF,y
-        sta SECTOR_BUF+256,y
-        iny
-        bne _i13_hd_zero
-        ; Set up destination address
-        lda reg_bx
-        sta temp32
-        lda reg_bx+1
-        sta temp32+1
-        lda #0
-        sta temp32+2
-        sta temp32+3
-        ldx #SEG_ES_OFS
-        lda #0
-        sta seg_override_en
-        jsr seg_ofs_to_linear
-        ; Use the same safe copy path as floppy reads
-        ldy #0
-_i13_hd_copy:
-        lda SECTOR_BUF,y
-        sta scratch_d
-        phy
-        jsr linear_to_chip
-        lda scratch_d
-        ldz #0
-        sta [temp_ptr],z
-        lda temp_ptr+2
-        bne +
-        jsr mark_cache_dirty
-+       inc temp32
-        bne +
-        inc temp32+1
-        bne +
-        inc temp32+2
-+       ply
-        iny
-        bne _i13_hd_copy
-        ldy #0
-_i13_hd_copy2:
-        lda SECTOR_BUF+256,y
-        sta scratch_d
-        phy
-        jsr linear_to_chip
-        lda scratch_d
-        ldz #0
-        sta [temp_ptr],z
-        lda temp_ptr+2
-        bne +
-        jsr mark_cache_dirty
-+       inc temp32
-        bne +
-        inc temp32+1
-        bne +
-        inc temp32+2
-+       ply
-        iny
-        bne _i13_hd_copy2
-        ; Return success
-        lda #$00
-        sta reg_ah
-        lda reg_al              ; Sectors requested = sectors read
-        lda #0
-        sta flag_cf
-        rts
+        ; (_i13_hd_read removed — no hard drives emulated)
 
 ; ============================================================================
 ; _i13_read — Read sectors from floppy image
@@ -267,8 +173,6 @@ _i13_hd_copy2:
 _i13_read:
         lda reg_dl
         bne _i13_no_drive       ; Only drive 0
-        ; Debug: count reads
-        inc $8F20
 
         ; Check if floppy image is loaded
         lda floppy_loaded
@@ -509,25 +413,6 @@ _i13_read_done:
         sta reg_al              ; AL = sectors actually read
         lda #0
         sta flag_cf
-        ; Debug: save state snapshot at $8FA0 (overwritten each call)
-        lda reg_es
-        sta $8FA0
-        lda reg_es+1
-        sta $8FA1
-        lda reg_bx
-        sta $8FA2
-        lda reg_bx+1
-        sta $8FA3
-        lda reg_di
-        sta $8FA4
-        lda reg_di+1
-        sta $8FA5
-        lda reg_ds
-        sta $8FA6
-        lda reg_ds+1
-        sta $8FA7
-        lda flag_cf
-        sta $8FA8
         rts
 
 ; ============================================================================

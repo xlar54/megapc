@@ -167,4 +167,3 @@ div_quotient    = $8F08         ; 4 bytes
 div_remainder   = $8F0C         ; 2 bytes
 ; $B7–$BF available
 ; IDIV/IMUL sign flags at $8F72-$8F73
-; Debug teletype ring at $8F74-$8F7B (index at $8F7C)

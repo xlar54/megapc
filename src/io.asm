@@ -85,18 +85,11 @@ _irp_cga_range:
 
 _irp_retrace:
         ; Toggle bit 0 (hsync) and bit 3 (vsync) for timing loops
-        inc $8FD6               ; Count status port reads
         lda inst_counter
         and #$09                ; Bits 0 and 3 toggle
         rts
 
 _irp_cga_other:
-        ; Log unhandled high port reads
-        lda temp32
-        sta $8FD8               ; Last unhandled port lo
-        lda temp32+1
-        sta $8FD9               ; Last unhandled port hi
-        inc $8FDA               ; Count
         lda #$00
         rts
 
@@ -138,14 +131,6 @@ int10_handler:
 
 _i10_teletype:
         ; AH=0E: Teletype output — write character AL to screen
-        ; Debug: save last 8 chars printed to $8F74-$8F7B
-        lda $8F7C               ; ring index
-        and #$07
-        tax
-        lda reg_al
-        sta $8F74,x
-        inx
-        stx $8F7C
         lda reg_al
         cmp #$0A
         beq _i10t_done          ; Ignore LF — CR already does newline on MEGA65

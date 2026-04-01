@@ -415,34 +415,10 @@ write_rm8:
         sec
         sbc #>CACHE_BUF
         tax
+        cpx #CACHE_LINES
+        bcs +                   ; X out of range — skip
         lda #1
         sta cache_dirty,x
-        ; --- DEBUG: track rm writes to $01:xx pages ---
-        lda cache_page_hi,x
-        cmp #$01
-        bne _wrm8_no_track
-        phx
-        lda cache_page_lo,x
-        pha
-        lsr
-        lsr
-        lsr
-        tay
-        pla
-        and #$07
-        tax
-        lda #$01
-_wrm8_shift:
-        cpx #0
-        beq _wrm8_set
-        asl
-        dex
-        bra _wrm8_shift
-_wrm8_set:
-        ora $9E40,y
-        sta $9E40,y
-        plx
-_wrm8_no_track:
         jsr invalidate_code_cache_for_line
 +       rts
 _wrm8_rom:
@@ -473,34 +449,10 @@ write_rm16:
         sec
         sbc #>CACHE_BUF
         tax
+        cpx #CACHE_LINES
+        bcs +                   ; X out of range — skip
         lda #1
         sta cache_dirty,x
-        ; --- DEBUG: track rm16 writes to $01:xx pages ---
-        lda cache_page_hi,x
-        cmp #$01
-        bne _wrm16_no_track
-        phx
-        lda cache_page_lo,x
-        pha
-        lsr
-        lsr
-        lsr
-        tay
-        pla
-        and #$07
-        tax
-        lda #$01
-_wrm16_shift:
-        cpx #0
-        beq _wrm16_set
-        asl
-        dex
-        bra _wrm16_shift
-_wrm16_set:
-        ora $9E40,y
-        sta $9E40,y
-        plx
-_wrm16_no_track:
         jsr invalidate_code_cache_for_line
 +
         ; Check for segment wrap: EA offset was $FFFF

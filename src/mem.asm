@@ -178,125 +178,12 @@ mark_cache_dirty:
         sec
         sbc #>CACHE_BUF
         tax
+        cpx #CACHE_LINES
+        bcs _mcd_bad_line       ; X out of range — skip dirty marking
         lda #1
         sta cache_dirty,x
-        ; --- DEBUG: track unique pages written in $01:xx range ---
-        lda cache_page_hi,x
-        cmp #$01
-        bne _mcd_no_track
-        ; Check if this page was already seen (bitmap at $9E00)
-        lda cache_page_lo,x
-        pha
-        lsr
-        lsr
-        lsr                     ; byte index = page_lo / 8
-        tay
-        pla
-        pha                     ; save page_lo
-        and #$07                ; bit index = page_lo & 7
-        tax
-        lda #$01
-_mcd_shift:
-        cpx #0
-        beq _mcd_check
-        asl
-        dex
-        bra _mcd_shift
-_mcd_check:
-        ; A = bit mask for this page
-        sta $8FD7               ; Save mask temporarily
-        and $9E00,y             ; Is bit already set?
-        bne _mcd_already_seen   ; Yes: skip
-        ; First time seeing this page — set bitmap
-        lda $8FD7
-        ora $9E00,y
-        sta $9E00,y
-        inc $9E75               ; Count new pages
-        ; Check if this is page $25 or $F2 — capture state
-        pla                     ; Recover page_lo
-        pha
-        cmp #$25
-        beq _mcd_trap_25
-        cmp #$F2
-        beq _mcd_trap_f2
-        ; Also trap any page >= $26 (unexpected higher writes)
-        cmp #$26
-        bcs _mcd_trap_high
-        bra _mcd_track_done
-
-_mcd_trap_25:
-        ; Save state at $9E60 (page $25 = top of backward REP MOVSW)
-        ldx #$00
-        bra _mcd_save_state
-_mcd_trap_f2:
-        ; Save state at $9E80 (page $F2 = where CS:FB8D lives)
-        ; This is the critical missing page
-        ldx #$20
-        bra _mcd_save_state
-_mcd_trap_high:
-        ; Save state at $9E80 for any page >= $26
-        ; (overwritten by each new high page — captures the LAST one)
-        ldx #$20
-_mcd_save_state:
-        lda raw_opcode
-        sta $9E60,x
-        lda reg_cs
-        sta $9E61,x
-        lda reg_cs+1
-        sta $9E62,x
-        lda decode_ip_start
-        sta $9E63,x
-        lda decode_ip_start+1
-        sta $9E64,x
-        lda reg_es
-        sta $9E65,x
-        lda reg_es+1
-        sta $9E66,x
-        lda reg_di
-        sta $9E67,x
-        lda reg_di+1
-        sta $9E68,x
-        lda reg_ds
-        sta $9E69,x
-        lda reg_ds+1
-        sta $9E6A,x
-        lda reg_si
-        sta $9E6B,x
-        lda reg_si+1
-        sta $9E6C,x
-        lda reg_cx
-        sta $9E6D,x
-        lda reg_cx+1
-        sta $9E6E,x
-        lda flag_df
-        sta $9E6F,x
-        lda rep_override_en
-        sta $9E70,x
-        lda rep_mode
-        sta $9E71,x
-        lda reg_ax
-        sta $9E72,x
-        lda reg_ax+1
-        sta $9E73,x
-        lda reg_sp86
-        sta $9E74,x
-        lda reg_sp86+1
-        sta $9E75,x
-        lda reg_ss
-        sta $9E76,x
-        lda reg_ss+1
-        sta $9E77,x
-        lda reg_bx
-        sta $9E78,x
-        lda reg_bx+1
-        sta $9E79,x
-        bra _mcd_track_done
-
-_mcd_already_seen:
-_mcd_track_done:
-        pla                     ; Discard saved page_lo
-_mcd_no_track:
         jsr invalidate_code_cache_for_line
+_mcd_bad_line:
         rts
 
 ; ============================================================================
@@ -679,7 +566,7 @@ fetch_word:
 compute_cs_base:
         lda cs_dirty
         beq _ccb_done
-        ; First compute the raw 20-bit linear CS base (before chip mapping)
+        ; Compute the raw 20-bit linear CS base (before chip mapping)
         ldx #SEG_CS_OFS
         ; Inline seg << 4 to get the unmapped 20-bit address
         lda regs,x

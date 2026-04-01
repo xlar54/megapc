@@ -104,13 +104,16 @@ cache_evict_load:
         jsr cache_flush_line    ; Flush line X back to attic
 _cel_no_flush:
 
-        ; Record new page
+        ; Record new page (with bounds check)
+        cpx #CACHE_LINES
+        bcs _cel_skip_record
         lda temp32+1
         sta cache_page_lo,x
         lda temp32+2
         sta cache_page_hi,x
         lda #0
         sta cache_dirty,x
+_cel_skip_record:
 
         ; DMA load 256 bytes from attic to cache buffer
         jsr cache_dma_load
@@ -128,10 +131,12 @@ _cel_no_flush:
 ; ============================================================================
 ; Input: X = cache line index
 cache_mark_dirty:
+        cpx #CACHE_LINES
+        bcs +
         lda #1
         sta cache_dirty,x
         jsr invalidate_code_cache_for_line
-        rts
++       rts
 
 ; ============================================================================
 ; invalidate_code_cache_for_line — Invalidate code cache if line X overlaps it
@@ -185,39 +190,6 @@ _iccf_done:
 ; Input: X = cache line to flush
 ;
 cache_flush_line:
-        inc $8FE8               ; Count cache flushes
-        ; --- DEBUG: track unique pages flushed in $01:xx range ---
-        lda cache_page_hi,x
-        cmp #$01
-        bne _cfl_no_track
-        phx
-        lda cache_page_lo,x
-        pha
-        lsr
-        lsr
-        lsr                     ; byte index = page_lo / 8
-        tay
-        pla
-        and #$07
-        tax
-        lda #$01
-_cfl_shift:
-        cpx #0
-        beq _cfl_set
-        asl
-        dex
-        bra _cfl_shift
-_cfl_set:
-        ora $9E20,y             ; Set bit in flushed bitmap
-        sta $9E20,y
-        plx
-_cfl_no_track:
-        ; Save last flush info for debug
-        lda cache_page_lo,x
-        sta $8FE9               ; Last flushed page_lo
-        lda cache_page_hi,x
-        sta $8FEA               ; Last flushed page_hi
-        stx $8FEB               ; Last flushed line index
         ; Source: CACHE_BUF + (X * 256) in chip RAM
         ; Dest:   attic at $8000000 + (page_hi:page_lo:00)
 
@@ -251,9 +223,11 @@ _cfl_no_track:
         jsr do_dma_to_attic
 
         ; Clear dirty
+        cpx #CACHE_LINES
+        bcs +
         lda #0
         sta cache_dirty,x
-        rts
++       rts
 
 ; ============================================================================
 ; cache_dma_load — DMA 256 bytes from attic to cache line X

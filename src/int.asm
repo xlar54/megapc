@@ -8,7 +8,7 @@
 ; INT pushes FLAGS, CS, IP then jumps to IVT[n].
 ; IVT is at 8086 linear $00000 (bank 4 $40000), 256 entries × 4 bytes.
 
-; STACK_TEMP was at $8FE8 but is unused — removed to avoid collision with debug counters
+; STACK_TEMP was at $8FE8 but is unused — removed
 
 ; ============================================================================
 ; push_word — Push 16-bit value onto 8086 stack
@@ -247,6 +247,7 @@ do_sw_interrupt:
         lda reg_ip+1
         sta op_result+1
         jsr push_word
+_dsi_ok4:
 
         ; Load new CS:IP from IVT
         ; IVT entry = int_num × 4 at linear address $00000

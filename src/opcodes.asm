@@ -40,7 +40,6 @@ op_cond_jump:
         adc i_data0+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
 _cj_no_jump:
         jmp opcode_done
 
@@ -201,12 +200,6 @@ _mri_high:
 ; $02 — INC/DEC r16 (40–4F)
 ; ============================================================================
 op_inc_dec_r16:
-        ; Count DEC DI specifically ($4F)
-        lda raw_opcode
-        cmp #$4F
-        bne +
-        inc $8F16
-+
         lda raw_opcode
         and #$07
         asl
@@ -581,7 +574,6 @@ _ret_done:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _ret_far:
@@ -605,7 +597,6 @@ _ret_far:
 
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 ; ============================================================================
@@ -636,7 +627,6 @@ op_int_ret:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 ; ============================================================================
@@ -691,7 +681,6 @@ _jc_jmp_near16:
         adc i_data0+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _jc_jmp_short:
@@ -711,7 +700,6 @@ _jc_jmp_short:
         adc i_data0+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _jc_jmp_far:
@@ -732,7 +720,6 @@ _jc_jmp_far:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 ; ============================================================================
@@ -776,7 +763,6 @@ op_call_far:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 ; ============================================================================
@@ -1677,7 +1663,6 @@ _loop_take:
         adc i_data0+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
 _loop_no_jump:
         jmp opcode_done
 
@@ -2552,18 +2537,7 @@ op_int3:
 ; ============================================================================
 op_int_imm:
         jsr fetch_byte
-        ; === DEBUG: write INT number to $8F10 counter, $8F11 last INT ===
-        inc $8F10
-        sta $8F11
-        ; Count INT 13h calls specifically (all AH values)
-        cmp #$13
-        bne _ii_not13_count
-        inc $8F12               ; total INT 13h calls
-        lda reg_ah
-        sta $8F13               ; last AH for INT 13h
-_ii_not13_count:
-        lda $8F11               ; reload INT number
-        ; Count INT 0 (divide error)
+        ; Count INT 0 (divide overflow)
         cmp #$00
         bne _ii_not0_count
         inc $8F14
@@ -2593,48 +2567,11 @@ _ii_not0_count:
         jmp opcode_done
 
 _ii_int21:
-        ; INT 21h — intercept console output functions, pass rest to DOS
+        ; INT 21h — intercept AH=09 (print string), pass rest to DOS
         lda reg_ah
         cmp #$09
         beq _ii_int21_ah09
-        cmp #$02
-        beq _ii_int21_ah02
-        cmp #$06
-        beq _ii_int21_ah06
         ; All other functions: let DOS handle via IVT
-        lda #$21
-        jsr do_sw_interrupt
-        jsr compute_cs_base
-        jmp opcode_done
-
-_ii_int21_ah02:
-        ; AH=02: Write character in DL to stdout
-        lda reg_dl
-        sta reg_al
-        lda #$0E
-        sta reg_ah
-        jsr int10_handler
-        ; Restore AH (DOS returns AL = last char)
-        lda reg_dl
-        sta reg_al
-        jmp opcode_done
-
-_ii_int21_ah06:
-        ; AH=06: Direct console I/O
-        ; DL=FF: input (check keyboard) — pass to DOS
-        lda reg_dl
-        cmp #$FF
-        beq _ii_int21_passthru
-        ; DL != FF: output character
-        sta reg_al
-        lda #$0E
-        sta reg_ah
-        jsr int10_handler
-        lda reg_dl
-        sta reg_al
-        jmp opcode_done
-
-_ii_int21_passthru:
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -2642,17 +2579,6 @@ _ii_int21_passthru:
 
 _ii_int21_ah09:
         ; AH=09: Print string at DS:DX until '$'
-        ; Log: save last DX and DS, count calls
-        lda reg_dx
-        sta $8FE0
-        lda reg_dx+1
-        sta $8FE1
-        lda reg_ds
-        sta $8FE2
-        lda reg_ds+1
-        sta $8FE3
-        inc $8FE4               ; Count AH=09 calls
-
         ; Use $8FD0/$8FD1 as 16-bit offset counter (safe from mem_read8)
         lda reg_dx
         sta $8FD0
@@ -2698,12 +2624,6 @@ _ii_int16:
 _ii_int29:
         ; INT 29h — Fast console output (used by FreeDOS printf)
         ; AL = character to print
-        ; DEBUG: count and log INT 29h calls
-        inc $8FD4               ; Count INT 29h calls (lo)
-        bne +
-        inc $8FD5               ; Count INT 29h calls (hi)
-+       lda reg_al
-        sta $8FD6               ; Last char output via INT 29h
         lda reg_al
         cmp #$0A
         beq _i29_done           ; Ignore LF — CR already does newline on MEGA65
@@ -2760,27 +2680,6 @@ _ii_int11:
         jmp opcode_done
 
 _ii_int19:
-        ; Debug: save state at reboot
-        lda reg_cs
-        sta $8F30
-        lda reg_cs+1
-        sta $8F31
-        lda reg_ip
-        sta $8F32
-        lda reg_ip+1
-        sta $8F33
-        lda reg_ss
-        sta $8F34
-        lda reg_ss+1
-        sta $8F35
-        lda reg_ds
-        sta $8F36
-        lda reg_ds+1
-        sta $8F37
-        lda reg_ax
-        sta $8F38
-        lda reg_ax+1
-        sta $8F39
         ; INT 19h — reboot. Print message and halt.
         lda #$0D
         jsr chrout_safe
@@ -2792,7 +2691,7 @@ _ii_int19:
         plx
         inx
         bra -
-+       jmp *                   ; Halt
++       jmp _ii_int19           ; Loop forever (reboot requested)
 _reboot_msg:
         .text "INT 19H: REBOOT REQUESTED", $0D, 0
 
@@ -3074,7 +2973,6 @@ _idr_call_ind:
         lda op_source+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _idr_jmp_ind:
@@ -3085,7 +2983,6 @@ _idr_jmp_ind:
         lda op_source+1
         sta reg_ip+1
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _idr_call_far_ind:
@@ -3149,7 +3046,6 @@ _idr_call_far_ind:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 _idr_jmp_far_ind:
@@ -3196,7 +3092,6 @@ _idr_jmp_far_ind:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
-        ; jsr check_bad_jump     ; DEBUG trap removed
         jmp opcode_done
 
 ; ============================================================================
@@ -3571,7 +3466,6 @@ _gf_div:
         sta reg_dx+1
         jmp opcode_done
 _gfd_byte:
-        inc $8F15               ; Count byte DIV operations
         jsr read_rm8
         beq _gfd_div0
         sta div_divisor
@@ -3599,9 +3493,6 @@ _gfd_div0:
         jsr do_sw_interrupt     ; INT 0
         jsr compute_cs_base
         jmp opcode_done
-
-; Also track: at _gf_div entry, count byte DIV operations
-_gf_div_count = $8F15           ; counter for DIV BYTE ops
 
 _gf_idiv:
         ; Signed divide: AX / r/m8 → AL=quot, AH=rem
@@ -3921,132 +3812,3 @@ _d16_no_sub:
         bne _d16_loop
         rts
 
-; ============================================================================
-; DEBUG: Trap bad control transfer in FreeDOS kernel
-; ============================================================================
-; Call AFTER reg_ip and reg_cs have been updated with the new target.
-; Only fires when CS=$0F75 and IP >= $2EB0.
-;
-check_bad_jump:
-        lda reg_cs+1
-        cmp #$0F
-        bne _cbj_ok
-        lda reg_cs
-        cmp #$75
-        bne _cbj_ok
-        lda reg_ip+1
-        cmp #$2E
-        bcc _cbj_ok
-        beq _cbj_check_lo
-        bra _cbj_fire
-_cbj_check_lo:
-        lda reg_ip
-        cmp #$B0
-        bcc _cbj_ok
-_cbj_fire:
-        ; Save: source IP (decode_ip_start), target IP, raw opcode,
-        ; SS:SP, top of stack, DS, ES, AX, BX
-        lda decode_ip_start
-        sta $8FA0               ; Source IP lo
-        lda decode_ip_start+1
-        sta $8FA1               ; Source IP hi
-        lda reg_ip
-        sta $8FA2               ; Target IP lo
-        lda reg_ip+1
-        sta $8FA3               ; Target IP hi
-        lda raw_opcode
-        sta $8FA4               ; Opcode that caused the transfer
-        lda reg_cs
-        sta $8FA5               ; CS lo
-        lda reg_cs+1
-        sta $8FA6               ; CS hi
-        lda reg_sp86
-        sta $8FA7               ; SP lo
-        lda reg_sp86+1
-        sta $8FA8               ; SP hi
-        lda reg_ss
-        sta $8FA9               ; SS lo
-        lda reg_ss+1
-        sta $8FAA               ; SS hi
-        ; Read top 6 bytes of stack
-        lda reg_sp86
-        sta temp32
-        lda reg_sp86+1
-        sta temp32+1
-        lda #0
-        sta temp32+2
-        sta temp32+3
-        sta seg_override_en
-        ldx #SEG_SS_OFS
-        jsr seg_ofs_to_linear
-        jsr linear_to_chip
-        ldz #0
-        lda [temp_ptr],z
-        sta $8FAB               ; Stack[0]
-        ldz #1
-        lda [temp_ptr],z
-        sta $8FAC               ; Stack[1]
-        ldz #2
-        lda [temp_ptr],z
-        sta $8FAD               ; Stack[2]
-        ldz #3
-        lda [temp_ptr],z
-        sta $8FAE               ; Stack[3]
-        ldz #4
-        lda [temp_ptr],z
-        sta $8FAF               ; Stack[4]
-        ldz #5
-        lda [temp_ptr],z
-        sta $8FB0               ; Stack[5]
-        lda reg_ds
-        sta $8FB1
-        lda reg_ds+1
-        sta $8FB2
-        lda reg_es
-        sta $8FB3
-        lda reg_es+1
-        sta $8FB4
-        lda reg_ax
-        sta $8FB5
-        lda reg_ax+1
-        sta $8FB6
-        lda reg_bx
-        sta $8FB7
-        lda reg_bx+1
-        sta $8FB8
-        ; Save code cache state and instruction data
-        lda code_cache_pg_lo
-        sta $8FB9
-        lda code_cache_pg_hi
-        sta $8FBA
-        lda cs_in_attic
-        sta $8FBB
-        ; Save the CALL/JMP displacement (i_data0) — these are the
-        ; actual fetched operand bytes before any cache invalidation
-        lda i_data0
-        sta $8FBC
-        lda i_data0+1
-        sta $8FBD
-        ; Verify: recompute target from source IP + 3 + displacement
-        ; Source IP = decode_ip_start, CALL is 3 bytes (E8 lo hi)
-        ; Expected target = decode_ip_start + 3 + i_data0
-        clc
-        lda decode_ip_start
-        adc #3
-        sta $8FBE               ; Source IP + 3 (lo)
-        lda decode_ip_start+1
-        adc #0
-        sta $8FBF               ; Source IP + 3 (hi)
-        ; Now add displacement
-        clc
-        lda $8FBE
-        adc i_data0
-        sta $8FC0               ; Computed target lo
-        lda $8FBF
-        adc i_data0+1
-        sta $8FC1               ; Computed target hi
-        ; $8FC0/$8FC1 should match $8FA2/$8FA3 (target IP)
-        jmp *                   ; HALT — check $8FA0-$8FC1
-_cbj_ok:
-        rts
-        rts
