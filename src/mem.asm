@@ -403,14 +403,100 @@ _uop_attic:
         ; Mark as attic — main loop will use code cache
         lda #1
         sta cs_in_attic
-        ; Invalidate code cache so it reloads
+        ; Invalidate code cache so it reloads on next main loop check
         lda #CACHE_INVALID
         sta code_cache_pg_lo
         sta code_cache_pg_hi
-        ; Set opcode_ptr to a placeholder (code cache will override)
-        lda #$04
-        sta opcode_ptr+2
+        ; IMPORTANT: Set opcode_ptr to point into CODE_CACHE_BUF
+        ; immediately, because fetch_byte/fetch_word may be called
+        ; again within the current instruction (for ModR/M, displacement,
+        ; immediates). We must flush the data cache and load the code
+        ; cache page right now.
+        jsr cache_flush_all     ; Flush dirty data to attic first
+        ; Compute the page address from full linear CS:IP
+        clc
+        lda cs_base_linear
+        adc reg_ip
+        sta temp32              ; offset within page
+        lda cs_base_linear+1
+        adc reg_ip+1
+        sta temp32+1            ; page lo
+        sta code_cache_pg_lo
+        lda cs_base_linear+2
+        adc #0
+        and #$0F
+        sta temp32+2            ; page hi
+        sta code_cache_pg_hi
+        ; DMA from attic to CODE_CACHE_BUF
+        lda temp32+2
+        sta _uop_cc_src_bank
+        lda temp32+1
+        sta _uop_cc_src+1
         lda #$00
+        sta _uop_cc_src
+        lda #$00
+        sta $D707
+        .byte $80, $80          ; src MB = $80 (attic)
+        .byte $81, $00          ; dst MB = $00 (chip)
+        .byte $00               ; end options
+        .byte $00               ; copy
+        .word $0100             ; 256 bytes
+_uop_cc_src:
+        .word $0000             ; src addr (patched)
+_uop_cc_src_bank:
+        .byte $00               ; src bank (patched)
+        .word CODE_CACHE_BUF    ; dst addr
+        .byte $00               ; dst bank
+        .byte $00
+        .word $0000
+        ; Also load spill page
+        clc
+        lda temp32+1
+        adc #1
+        sta _uop_cc_spill+1
+        lda temp32+2
+        adc #0
+        cmp #$0F
+        bcs _uop_spill_bank5
+        sta _uop_cc_spill_bank
+        lda #$80
+        sta _uop_cc_spill_mb
+        bra _uop_spill_go
+_uop_spill_bank5:
+        lda #$05
+        sta _uop_cc_spill_bank
+        lda #$00
+        sta _uop_cc_spill_mb
+_uop_spill_go:
+        lda #$00
+        sta _uop_cc_spill
+        lda #$00
+        sta $D707
+        .byte $80
+_uop_cc_spill_mb:
+        .byte $80
+        .byte $81, $00
+        .byte $00
+        .byte $00
+        .word $0100
+_uop_cc_spill:
+        .word $0000
+_uop_cc_spill_bank:
+        .byte $00
+        .word CODE_CACHE_SPILL
+        .byte $00
+        .byte $00
+        .word $0000
+        ; Set opcode_ptr to CODE_CACHE_BUF + (offset within page)
+        lda temp32              ; low byte = offset within page
+        clc
+        adc #<CODE_CACHE_BUF
+        sta opcode_ptr
+        lda #>CODE_CACHE_BUF
+        adc #0
+        sta opcode_ptr+1
+        lda #$00
+        sta opcode_ptr+2
         sta opcode_ptr+3
         rts
 
