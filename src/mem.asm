@@ -207,30 +207,56 @@ _mcd_check:
         sta $8FD7               ; Save mask temporarily
         and $9E00,y             ; Is bit already set?
         bne _mcd_already_seen   ; Yes: skip logging
-        ; First time seeing this page — log CS:IP and page_lo
+        ; First time seeing this page — set bitmap and save full state
         lda $8FD7
         ora $9E00,y             ; Set bit in written bitmap
         sta $9E00,y
-        ; Log to ring at $9E60: each entry = 5 bytes (CS_lo, CS_hi, IP_lo, IP_hi, page_lo)
+        ; Save full register state for EVERY new page (overwrites previous)
+        ; This captures the state at the LAST new page touch
         pla                     ; Recover page_lo
         pha
-        ldx $9E90               ; Ring index (0-79, step 5)
-        sta $9E60,x             ; page_lo
+        sta $9E60               ; page_lo
+        lda raw_opcode
+        sta $9E61               ; opcode
         lda reg_cs
-        sta $9E61,x             ; CS lo
+        sta $9E62
         lda reg_cs+1
-        sta $9E62,x             ; CS hi
+        sta $9E63               ; CS
         lda decode_ip_start
-        sta $9E63,x             ; IP lo
+        sta $9E64
         lda decode_ip_start+1
-        sta $9E64,x             ; IP hi
-        txa
-        clc
-        adc #5
-        cmp #80                 ; 16 entries × 5 bytes
-        bcc +
-        lda #0                  ; Wrap
-+       sta $9E90
+        sta $9E65               ; IP
+        lda reg_es
+        sta $9E66
+        lda reg_es+1
+        sta $9E67               ; ES
+        lda reg_di
+        sta $9E68
+        lda reg_di+1
+        sta $9E69               ; DI
+        lda reg_ds
+        sta $9E6A
+        lda reg_ds+1
+        sta $9E6B               ; DS
+        lda reg_si
+        sta $9E6C
+        lda reg_si+1
+        sta $9E6D               ; SI
+        lda reg_cx
+        sta $9E6E
+        lda reg_cx+1
+        sta $9E6F               ; CX
+        lda flag_df
+        sta $9E70               ; DF
+        lda rep_override_en
+        sta $9E71               ; REP active?
+        lda rep_mode
+        sta $9E72               ; REP mode
+        lda reg_ax
+        sta $9E73
+        lda reg_ax+1
+        sta $9E74               ; AX
+        inc $9E75               ; Count of new pages seen
         bra _mcd_track_done
 _mcd_already_seen:
 _mcd_track_done:
