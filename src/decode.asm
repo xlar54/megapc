@@ -631,6 +631,77 @@ _od_rep_again:
 _od_clear_rep:
         lda #0
         sta rep_override_en
+        ; --- DEBUG: trap when REP MOVSW completes from CS=$0060 ---
+        lda raw_opcode
+        cmp #$A5                ; MOVSW?
+        bne _od_rep_no_trap
+        lda reg_cs+1
+        bne _od_rep_no_trap
+        lda reg_cs
+        cmp #$60
+        bne _od_rep_no_trap
+        ; REP MOVSW from CS=$0060 completed! Save state.
+        ; Use $9EA0 for first completion, $9EC0 for second
+        ldx $9EE0               ; Completion counter
+        inc $9EE0
+        cpx #0
+        beq _od_rep_trap_first
+        cpx #1
+        beq _od_rep_trap_second
+        bra _od_rep_no_trap
+_od_rep_trap_first:
+        ldx #$00                ; Store at $9EA0
+        bra _od_rep_save
+_od_rep_trap_second:
+        ldx #$20                ; Store at $9EC0
+_od_rep_save:
+        lda reg_ip
+        sta $9EA0,x
+        lda reg_ip+1
+        sta $9EA1,x
+        lda reg_cs
+        sta $9EA2,x
+        lda reg_cs+1
+        sta $9EA3,x
+        lda reg_es
+        sta $9EA4,x
+        lda reg_es+1
+        sta $9EA5,x
+        lda reg_di
+        sta $9EA6,x
+        lda reg_di+1
+        sta $9EA7,x
+        lda reg_ds
+        sta $9EA8,x
+        lda reg_ds+1
+        sta $9EA9,x
+        lda reg_si
+        sta $9EAA,x
+        lda reg_si+1
+        sta $9EAB,x
+        lda reg_sp86
+        sta $9EAC,x
+        lda reg_sp86+1
+        sta $9EAD,x
+        lda reg_ss
+        sta $9EAE,x
+        lda reg_ss+1
+        sta $9EAF,x
+        lda reg_ax
+        sta $9EB0,x
+        lda reg_ax+1
+        sta $9EB1,x
+        lda reg_bx
+        sta $9EB2,x
+        lda reg_bx+1
+        sta $9EB3,x
+        lda reg_dx
+        sta $9EB4,x
+        lda reg_dx+1
+        sta $9EB5,x
+        lda flag_df
+        sta $9EB6,x
+_od_rep_no_trap:
 
 _od_no_rep:
         ; Clear segment override for next instruction

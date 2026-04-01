@@ -221,14 +221,13 @@ entry:
         sta ds_dirty
         lda #0
         sta $8FEF               ; Clear BDA repair flag
-        ; Clear debug bitmaps and ring buffer
+        ; Clear debug bitmaps, ring buffer, and REP traps
         ldx #0
         lda #0
 _clr_bitmaps:
         sta $9E00,x
         inx
-        cpx #$91                ; Clear $9E00-$9E90
-        bne _clr_bitmaps
+        bne _clr_bitmaps        ; Clear $9E00-$9EFF
 
         ; Clear screen before emulation
         lda #147
