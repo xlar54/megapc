@@ -186,6 +186,32 @@ _iccf_done:
 ;
 cache_flush_line:
         inc $8FE8               ; Count cache flushes
+        ; --- DEBUG: track unique pages flushed in $01:xx range ---
+        lda cache_page_hi,x
+        cmp #$01
+        bne _cfl_no_track
+        phx
+        lda cache_page_lo,x
+        pha
+        lsr
+        lsr
+        lsr                     ; byte index = page_lo / 8
+        tay
+        pla
+        and #$07
+        tax
+        lda #$01
+_cfl_shift:
+        cpx #0
+        beq _cfl_set
+        asl
+        dex
+        bra _cfl_shift
+_cfl_set:
+        ora $9E20,y             ; Set bit in flushed bitmap
+        sta $9E20,y
+        plx
+_cfl_no_track:
         ; Save last flush info for debug
         lda cache_page_lo,x
         sta $8FE9               ; Last flushed page_lo

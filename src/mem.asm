@@ -180,6 +180,62 @@ mark_cache_dirty:
         tax
         lda #1
         sta cache_dirty,x
+        ; --- DEBUG: track unique pages written in $01:xx range ---
+        lda cache_page_hi,x
+        cmp #$01
+        bne _mcd_no_track
+        ; Check if this page was already seen (bitmap at $9E00)
+        lda cache_page_lo,x
+        pha
+        lsr
+        lsr
+        lsr                     ; byte index = page_lo / 8
+        tay
+        pla
+        pha                     ; save page_lo
+        and #$07                ; bit index = page_lo & 7
+        tax
+        lda #$01
+_mcd_shift:
+        cpx #0
+        beq _mcd_check
+        asl
+        dex
+        bra _mcd_shift
+_mcd_check:
+        ; A = bit mask for this page
+        sta $8FD7               ; Save mask temporarily
+        and $9E00,y             ; Is bit already set?
+        bne _mcd_already_seen   ; Yes: skip logging
+        ; First time seeing this page — log CS:IP and page_lo
+        lda $8FD7
+        ora $9E00,y             ; Set bit in written bitmap
+        sta $9E00,y
+        ; Log to ring at $9E60: each entry = 5 bytes (CS_lo, CS_hi, IP_lo, IP_hi, page_lo)
+        pla                     ; Recover page_lo
+        pha
+        ldx $9E90               ; Ring index (0-79, step 5)
+        sta $9E60,x             ; page_lo
+        lda reg_cs
+        sta $9E61,x             ; CS lo
+        lda reg_cs+1
+        sta $9E62,x             ; CS hi
+        lda decode_ip_start
+        sta $9E63,x             ; IP lo
+        lda decode_ip_start+1
+        sta $9E64,x             ; IP hi
+        txa
+        clc
+        adc #5
+        cmp #80                 ; 16 entries × 5 bytes
+        bcc +
+        lda #0                  ; Wrap
++       sta $9E90
+        bra _mcd_track_done
+_mcd_already_seen:
+_mcd_track_done:
+        pla                     ; Discard saved page_lo
+_mcd_no_track:
         jsr invalidate_code_cache_for_line
         rts
 
