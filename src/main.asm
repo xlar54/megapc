@@ -95,7 +95,9 @@ TBL_BIOS_19     = TBL_BASE + (19 * 256)
 
 ; --- Attic addresses ---
 ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
-FLOPPY_ATTIC    = $8100000      ; Floppy image in attic (1.44MB at +1MB)
+FLOPPY_A_ATTIC  = $8100000      ; Floppy A image in attic (1.44MB at +1MB)
+FLOPPY_B_ATTIC  = $8200000      ; Floppy B image in attic (1.44MB at +2MB)
+SCREEN_SAVE_ATTIC = $8300000    ; Screen save area in attic (for TAB menu)
 
 ; --- Cache constants ---
 CACHE_LINES     = 4             ; Number of cache lines
@@ -184,22 +186,38 @@ entry:
         lda #$0E
         jsr CHROUT
 
-        ; Print banner
-        ldx #0
--       lda banner_msg,x
-        beq +
-        jsr CHROUT
-        inx
-        bne -
 +
-        ; Initialize emulator subsystems (IRQs still enabled for CHROUT)
-        jsr init_tables         ; Load BIOS, extract decode tables
-        jsr load_floppy         ; Load floppy image to attic via Hyppo
-        jsr detect_floppy_geom  ; Auto-detect disk geometry from BPB
-        jsr init_guest_mem      ; Clear guest RAM, set up IVT/BDA
-        jsr init_cache          ; Initialize attic cache
-        jsr init_regs           ; Set 8086 registers to power-on state
-        jsr init_display        ; Set up CGA display
+        ; Clear drive loaded flags
+        lda #0
+        sta floppy_a_loaded
+        sta floppy_b_loaded
+
+        ; Initialize BIOS tables
+        jsr init_tables
+
+        ; Show the disk mount menu (user mounts disks, then selects Start)
+        jmp show_menu
+
+; ============================================================================
+; start_emulation — Called from menu when user selects "Start Emulation"
+; ============================================================================
+start_emulation:
+        ; Re-unlock VIC-IV (CINT/CHROUT may have re-locked it)
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031               ; 40MHz
+        lda #$80
+        tsb VIC_HOTREGS
+
+        jsr init_guest_mem
+        jsr init_cache
+        jsr init_regs
+
+        ; Geometry already detected in load_floppy_drive
+        jsr init_display
 
         ; Print ready message
         ldx #0
@@ -212,39 +230,75 @@ entry:
         ; Now disable IRQs for emulation loop
         sei
 
-        ; Re-init cache & segment state — KERNAL IRQs during CHROUT
-        ; may have trashed ZP $90–$9F
+        ; Re-init cache & segment state
         jsr init_cache
         lda #1
         sta cs_dirty
         sta ss_dirty
         sta ds_dirty
         lda #0
-        sta $8FEF               ; Clear BDA repair flag
+        sta $8FEF
 
         ; Clear screen before emulation
         lda #147
         jsr CHROUT
 
-        ; Set text color based on video mode
 .if VIDEO_MODE == 7
-        lda #30                 ; PETSCII green (monochrome phosphor)
+        lda #30
 .else
-        lda #15                 ; PETSCII light grey (CGA white)
+        lda #15
 .endif
         jsr CHROUT
-        lda #147                ; PETSCII clear screen
+        lda #147
         jsr CHROUT
 
         ; Enter main emulation loop
         jmp main_loop
 
-banner_msg:
-        .text 13, "MEGA8086 - 8086 EMULATOR FOR MEGA65", 13
-        .text "CLEAN BRANCH V0.1", 13, 0
-
 ready_msg:
         .text "READY. STARTING EMULATION...", 13, 0
+
+; ============================================================================
+; resume_emulation — Called from menu when returning to running emulation
+; ============================================================================
+resume_emulation:
+        ; Disable IRQs FIRST to stop KERNAL from trashing ZP
+        sei
+
+        ; Restore ZP state from $7F00
+        ldx #0
+_resume_restore_zp:
+        lda $7F00,x
+        sta $00,x
+        inx
+        bne _resume_restore_zp
+
+        ; Re-unlock VIC-IV
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031
+        lda #$80
+        tsb VIC_HOTREGS
+
+        ; Re-detect geometry (user may have changed disks in menu)
+        lda floppy_a_loaded
+        beq +
+        lda #0
+        jsr detect_floppy_geom_drive
++
+        ; Restore screen from attic
+        jsr menu_restore_screen
+
+        ; Invalidate code cache (menu may have used DMA that changed state)
+        lda #CACHE_INVALID
+        sta code_cache_pg_lo
+        sta code_cache_pg_hi
+
+        ; Resume main loop (segment bases intact from ZP restore)
+        jmp main_loop
 
 ; ============================================================================
 ; emulator_exit — Return to MEGA65 prompt
@@ -271,4 +325,5 @@ emulator_exit:
         .include "disk.asm"     ; Disk I/O (INT 13h, floppy via attic)
         .include "display.asm"  ; CGA refresh, screen output
         .include "init.asm"     ; Initialization (tables, guest mem, regs)
+        .include "menu.asm"     ; Disk mount menu system
         .include "tables.asm"   ; Dispatch table, extra_field, parity, etc.

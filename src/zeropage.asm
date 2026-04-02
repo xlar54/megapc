@@ -138,7 +138,6 @@ scratch_c       = $B2
 scratch_d       = $B3
 ea_offset_lo    = $B4           ; Saved 16-bit EA offset (pre-segment mapping)
 ea_offset_hi    = $B5           ; Used by LEA instruction
-floppy_loaded   = $B6           ; 1 = floppy image loaded in attic, 0 = not
 
 ; Code cache variables (for executing from attic-backed segments)
 cs_in_attic     = $B7           ; Non-zero = CS is in attic range, use code cache
@@ -148,13 +147,6 @@ code_cache_pg_hi = $BD          ; Cached code page identifier (bits 16-19 of lin
 
 ; Floppy byte offset for multi-sector disk reads (3 bytes)
 floppy_ofs      = $BE           ; 3 bytes: $BE-$C0
-
-; Floppy geometry (detected from BPB at boot) — in non-ZP RAM
-; to avoid KERNAL IRQ corruption during init CHROUT calls
-floppy_spt      = $8F40         ; Sectors per track
-floppy_heads    = $8F41         ; Number of heads
-floppy_cyls     = $8F42         ; Number of cylinders
-floppy_type     = $8F43         ; BIOS drive type ($01=360K,$02=1.2M,$03=720K,$04=1.44M)
 
 ; PUSHA saved SP (2 bytes) — in non-ZP RAM to avoid KERNAL conflicts
 pusha_saved_sp  = $8F70         ; 2 bytes: saved SP for PUSHA instruction

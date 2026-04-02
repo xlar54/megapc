@@ -42,6 +42,14 @@ main_loop:
         jsr compute_ds_base
 
 ml_next:
+        ; --- Check for TAB key (return to menu) ---
+        lda $D610
+        cmp #$09                ; TAB key
+        bne _ml_no_tab
+        sta $D610               ; Dequeue the TAB keypress
+        jmp menu_tab_handler    ; Save screen and show menu
+_ml_no_tab:
+
         ; --- Save previous raw_opcode to fixed RAM ---
         lda raw_opcode
         sta $8F00

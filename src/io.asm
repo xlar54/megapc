@@ -262,7 +262,11 @@ _i16_wait_key:
         ; No KERNAL needed — no IRQs, no ZP save/restore!
 -       lda $D610               ; Read ASCII key from hardware queue
         beq -                   ; $00 = queue empty, keep polling
-        sta $D610               ; Dequeue the event (write any value)
+        cmp #$09                ; TAB key? (reserved for menu)
+        bne +
+        sta $D610               ; Dequeue the TAB
+        jmp menu_tab_handler    ; Go to menu
++       sta $D610               ; Dequeue the event (write any value)
         ; Map MEGA65 key codes to IBM PC codes
         cmp #$14                ; MEGA65 DELETE/backspace (PETSCII DEL)
         beq _i16_bs
@@ -285,6 +289,8 @@ _i16_check_key:
         ; Peek at hardware typing queue — don't dequeue
         lda $D610               ; Read ASCII key from hardware queue
         beq _i16_no_key         ; $00 = no key
+        cmp #$09                ; TAB key? (reserved for menu)
+        beq _i16_no_key         ; Hide TAB from guest
         ; Map MEGA65 key codes
         cmp #$14                ; MEGA65 DELETE/backspace
         bne +

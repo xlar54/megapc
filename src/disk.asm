@@ -3,7 +3,7 @@
 ; ============================================================================
 ;
 ; Handles BIOS INT 13h disk services.
-; Floppy image is stored in attic RAM at FLOPPY_ATTIC ($8100000).
+; Floppy image is stored in attic RAM at FLOPPY_A_ATTIC ($8100000).
 ;
 ; Supported functions:
 ;   AH=00: Reset disk
@@ -16,7 +16,7 @@
 ;
 ; For 1.44MB floppy: 80 cylinders, 2 heads, 18 sectors/track
 
-; Floppy geometry is now auto-detected — see floppy_spt/heads/cyls in zeropage.asm
+; Floppy geometry is now auto-detected — see floppy_a_spt/heads/cyls in zeropage.asm
 FLOPPY_SECTOR_SZ = 512
 
 ; ============================================================================
@@ -104,19 +104,19 @@ _i13_get_params:
         ; Return parameters for detected floppy geometry
         lda #$00
         sta reg_ah              ; Status = OK
-        lda floppy_spt
+        lda floppy_a_spt
         sta reg_cl              ; Sectors per track in CL bits 0–5
-        lda floppy_cyls
+        lda floppy_a_cyls
         sec
         sbc #1
         sta reg_ch              ; Max cylinder (cyls - 1)
-        lda floppy_heads
+        lda floppy_a_heads
         sec
         sbc #1
         sta reg_dh              ; Max head (heads - 1)
         lda #$01
         sta reg_dl              ; Number of drives
-        lda floppy_type
+        lda floppy_a_type
         sta reg_bl              ; Drive type
         ; ES:DI = pointer to disk parameter table at F000:F000
         lda #$00
@@ -175,7 +175,7 @@ _i13_read:
         bne _i13_no_drive       ; Only drive 0
 
         ; Check if floppy image is loaded
-        lda floppy_loaded
+        lda floppy_a_loaded
         beq _i13_no_drive       ; No floppy → error
 
         ; Save sector count
@@ -197,7 +197,7 @@ _i13_read:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_heads
+        lda floppy_a_heads
         sta $D774
         lda #0
         sta $D775
@@ -213,7 +213,7 @@ _i13_read:
         sta $D770               ; Multiplier input A (low)
         lda #0
         sta $D771               ; Multiplier input A (high)
-        lda floppy_spt
+        lda floppy_a_spt
         sta $D774               ; Multiplier input B (low)
         lda #0
         sta $D775               ; Multiplier input B (high)
@@ -267,7 +267,7 @@ _i13_read:
         ; temp32 = byte offset in floppy image (up to 20 bits)
 
         ; Now DMA each sector from attic to guest RAM (ES:BX)
-        ; Source: FLOPPY_ATTIC + byte_offset
+        ; Source: FLOPPY_A_ATTIC + byte_offset
         ; Dest: ES:BX mapped to chip RAM
 
         ; Save floppy byte offset to dedicated variable (temp32 gets clobbered)
@@ -286,7 +286,7 @@ _i13_read_loop:
         ; DMA 512 bytes from floppy attic to SECTOR_BUF
         clc
         lda floppy_ofs+2
-        adc #$10                ; Add $100000 offset (FLOPPY_ATTIC - $8000000 = $100000)
+        adc #$10                ; Add $100000 offset (FLOPPY_A_ATTIC - $8000000 = $100000)
         sta dma_src_bank
         lda floppy_ofs
         sta dma_src_lo
@@ -425,7 +425,7 @@ _i13_write:
         lda reg_dl
         bne _i13_no_drive       ; Only drive 0
 
-        lda floppy_loaded
+        lda floppy_a_loaded
         beq _i13_no_drive
 
         ; Save sector count and BX
@@ -442,7 +442,7 @@ _i13_write:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_heads
+        lda floppy_a_heads
         sta $D774
         lda #0
         sta $D775
@@ -455,7 +455,7 @@ _i13_write:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_spt
+        lda floppy_a_spt
         sta $D774
         lda #0
         sta $D775
@@ -666,7 +666,7 @@ _i13_write_dpt:
         lda #$02                ; Byte 3: Bytes per sector (2 = 512 bytes)
         sta [temp_ptr],z
         ldz #4
-        lda floppy_spt          ; Byte 4: Sectors per track
+        lda floppy_a_spt          ; Byte 4: Sectors per track
         sta [temp_ptr],z
         ldz #5
         lda #$2A                ; Byte 5: Gap length
@@ -687,3 +687,516 @@ _i13_write_dpt:
         lda #$08                ; Byte 10: Motor start time (1/8 sec)
         sta [temp_ptr],z
         rts
+
+; ============================================================================
+; load_floppy_drive — Load floppy disk image to attic RAM via Hyppo
+; ============================================================================
+; Uses Hyppo trap $2E (setname) and $3E (loadfile_attic).
+; Loads fd.img from SD card FAT32 to attic at FLOPPY_A_ATTIC ($8100000).
+;
+; Hyppo setname: Y = high byte of page-aligned filename, A=$2E, sta $D640, clv
+; Hyppo loadfile_attic: X=addr low, Y=addr mid, Z=addr high byte
+;   Address is 28-bit: $08ZZYYXX (the $08 prefix means attic)
+;   For FLOPPY_A_ATTIC=$8100000: ZZ=$10, YY=$00, XX=$00
+;
+; Input:  A = drive number (0=A, 1=B)
+;         floppy_fname_page = filename (page-aligned, null-terminated)
+; Output: carry set = success, carry clear = failure
+;         floppy_a_loaded or floppy_b_loaded set on success
+; No UI output — caller handles messages.
+;
+load_floppy_drive:
+        pha                     ; Save drive number
+
+        ; Set Hyppo filename from floppy_fname_page
+        ldy #>floppy_fname_page
+        lda #$2E                ; hyppo_setname
+        sta $D640
+        clv
+        bcc _lfd_fail
+
+        ; Load to attic: Drive A=$8100000 (ZZ=$10), Drive B=$8200000 (ZZ=$20)
+        pla                     ; Recover drive number
+        pha
+        beq _lfd_drive_a
+        ldz #$20                ; Drive B
+        bra _lfd_load
+_lfd_drive_a:
+        ldz #$10                ; Drive A
+_lfd_load:
+        ldy #$00
+        ldx #$00
+        lda #$3E                ; hyppo_loadfile_attic
+        sta $D640
+        clv
+
+        bcc _lfd_fail
+
+        ; Success — set loaded flag and detect geometry
+        pla                     ; Drive number
+        beq _lfd_ok_a
+        lda #1
+        sta floppy_b_loaded
+        lda #1
+        jsr detect_floppy_geom_drive
+        sec
+        rts
+_lfd_ok_a:
+        lda #1
+        sta floppy_a_loaded
+        lda #0
+        jsr detect_floppy_geom_drive
+        sec
+        rts
+
+_lfd_fail:
+        pla                     ; Discard drive number
+        clc
+        rts
+
+; ============================================================================
+; detect_floppy_geom_drive — Auto-detect floppy geometry from BPB
+; ============================================================================
+; Reads total sectors from sector 0 of the loaded floppy image.
+; Matches against known formats to set geometry variables.
+; Must be called after load_floppy_drive and before init_guest_mem.
+;
+dfg_drive       .byte 0         ; 0=A, 1=B
+
+detect_floppy_geom_drive:
+        sta dfg_drive
+
+        ; Set defaults (1.44MB) in case detection fails
+        lda #18
+        jsr _dfg_store_spt
+        lda #2
+        jsr _dfg_store_heads
+        lda #80
+        jsr _dfg_store_cyls
+        lda #$04
+        jsr _dfg_store_type
+
+        ; Skip if no floppy loaded
+        lda dfg_drive
+        bne _dfg_check_b
+        lda floppy_a_loaded
+        beq _dfg_done
+        bra _dfg_do_detect
+_dfg_check_b:
+        lda floppy_b_loaded
+        beq _dfg_done
+
+_dfg_do_detect:
+        ; DMA 512 bytes from floppy attic to SECTOR_BUF
+        ; Drive A = attic bank $10, Drive B = attic bank $20
+        lda #$00
+        sta dma_src_lo
+        sta dma_src_hi
+        lda dfg_drive
+        bne _dfg_bank_b
+        lda #$10                ; Drive A
+        bra _dfg_bank_set
+_dfg_bank_b:
+        lda #$20                ; Drive B
+_dfg_bank_set:
+        sta dma_src_bank
+        lda #<SECTOR_BUF
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        lda #$00
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi        ; 512 bytes
+        jsr do_dma_from_attic
+
+        ; Check if BPB is valid: bytes per sector at offset $0B should be $0200
+        lda SECTOR_BUF+$0B
+        cmp #$00
+        bne _dfg_try_media      ; Not $00 in low byte → invalid BPB
+        lda SECTOR_BUF+$0C
+        cmp #$02
+        bne _dfg_try_media      ; Not $02 in high byte → invalid BPB
+
+        ; --- Valid BPB: use total sectors field ---
+        lda SECTOR_BUF+$13
+        sta scratch_a           ; Total sectors low
+        lda SECTOR_BUF+$14
+        sta scratch_b           ; Total sectors high
+        jmp _dfg_match_sectors
+
+_dfg_try_media:
+        ; --- No valid BPB: read FAT media descriptor from sector 1 ---
+        ; DMA sector 1 from floppy attic
+        lda #$00
+        sta dma_src_lo
+        lda #$02
+        sta dma_src_hi          ; Sector 1 = offset $200
+        lda dfg_drive
+        bne _dfg_media_b
+        lda #$10
+        bra _dfg_media_set
+_dfg_media_b:
+        lda #$20
+_dfg_media_set:
+        sta dma_src_bank
+        lda #<SECTOR_BUF
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        sta dma_count_lo
+        lda #$02
+        sta dma_count_hi
+        jsr do_dma_from_attic
+
+        ; Media descriptor is first byte of FAT
+        lda SECTOR_BUF
+        ; $FE = 160K, $FF = 320K, $FC = 180K, $FD = 360K
+        ; $F9 = 720K or 1.2MB, $F0 = 1.44MB
+        cmp #$FF
+        beq _dfg_320k
+        cmp #$FE
+        beq _dfg_160k
+        cmp #$FD
+        beq _dfg_360k
+        cmp #$FC
+        beq _dfg_180k
+        cmp #$F9
+        beq _dfg_720k           ; Could also be 1.2MB, assume 720K
+        ; Default: keep 1.44MB
+        bra _dfg_print
+
+_dfg_160k:
+        lda #8
+        jsr _dfg_store_spt
+        lda #1
+        jsr _dfg_store_heads
+        lda #40
+        jsr _dfg_store_cyls
+        lda #$01
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_180k:
+        lda #9
+        jsr _dfg_store_spt
+        lda #1
+        jsr _dfg_store_heads
+        lda #40
+        jsr _dfg_store_cyls
+        lda #$01
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_320k:
+        lda #8
+        jsr _dfg_store_spt
+        lda #2
+        jsr _dfg_store_heads
+        lda #40
+        jsr _dfg_store_cyls
+        lda #$01
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_match_sectors:
+        ; Match total sectors against known formats
+        ; 360K: 720 sectors ($02D0)
+        lda scratch_b
+        cmp #$02
+        bne _dfg_ns_not_360
+        lda scratch_a
+        cmp #$D0
+        bne _dfg_ns_not_360
+_dfg_360k:
+        lda #9
+        jsr _dfg_store_spt
+        lda #2
+        jsr _dfg_store_heads
+        lda #40
+        jsr _dfg_store_cyls
+        lda #$01
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_ns_not_360:
+        ; 720K: 1440 sectors ($05A0)
+        lda scratch_b
+        cmp #$05
+        bne _dfg_ns_not_720
+        lda scratch_a
+        cmp #$A0
+        bne _dfg_ns_not_720
+_dfg_720k:
+        lda #9
+        jsr _dfg_store_spt
+        lda #2
+        jsr _dfg_store_heads
+        lda #80
+        jsr _dfg_store_cyls
+        lda #$03
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_ns_not_720:
+        ; 1.2MB: 2400 sectors ($0960)
+        lda scratch_b
+        cmp #$09
+        bne _dfg_ns_not_12
+        lda scratch_a
+        cmp #$60
+        bne _dfg_ns_not_12
+        lda #15
+        jsr _dfg_store_spt
+        lda #2
+        jsr _dfg_store_heads
+        lda #80
+        jsr _dfg_store_cyls
+        lda #$02
+        jsr _dfg_store_type
+        bra _dfg_print
+
+_dfg_ns_not_12:
+        ; 2880 sectors ($0B40) = 1.44MB (already set as default)
+        ; Fall through to print
+
+_dfg_print:
+        ; Update DPT at F000:F000 with detected SPT
+        lda #$00
+        sta temp_ptr
+        lda #$F0
+        sta temp_ptr+1
+        lda #$05
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        jsr _dfg_read_spt
+        ldz #4                  ; Byte 4 = sectors per track
+        sta [temp_ptr],z
+
+        ; Print detected format
+        ldx #0
+-       lda _dfg_msg,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        ; Print SPT value
+        jsr _dfg_read_spt
+        jsr _dfg_print_dec
+        lda #'/'
+        jsr CHROUT
+        ; Print heads
+        jsr _dfg_read_heads
+        jsr _dfg_print_dec
+        lda #'/'
+        jsr CHROUT
+        ; Print cylinders
+        jsr _dfg_read_cyls
+        jsr _dfg_print_dec
+        lda #' '
+        jsr CHROUT
+        lda #'('
+        jsr CHROUT
+
+        ; Print format name based on type
+        jsr _dfg_read_type
+        cmp #$01
+        beq _dfg_p360
+        cmp #$02
+        beq _dfg_p12
+        cmp #$03
+        beq _dfg_p720
+        ; Default: 1.44MB
+        ldx #0
+-       lda _dfg_144,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p360:
+        ldx #0
+-       lda _dfg_360,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p12:
+        ldx #0
+-       lda _dfg_12m,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p720:
+        ldx #0
+-       lda _dfg_720,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+
+_dfg_close:
+        lda #')'
+        jsr CHROUT
+        lda #$0D
+        jsr CHROUT
+_dfg_done:
+        rts
+
+; Print A as 1-3 digit decimal number
+_dfg_print_dec:
+        ldx #0                  ; Suppress leading zeros
+        ; Hundreds
+        ldy #0
+-       cmp #100
+        bcc _dfg_tens
+        sbc #100
+        iny
+        bra -
+_dfg_tens:
+        pha
+        tya
+        beq _dfg_skip_h         ; Skip leading zero
+        ora #$30
+        jsr CHROUT
+        ldx #1                  ; No longer suppress
+_dfg_skip_h:
+        pla
+        ; Tens
+        ldy #0
+-       cmp #10
+        bcc _dfg_ones
+        sbc #10
+        iny
+        bra -
+_dfg_ones:
+        pha
+        tya
+        bne _dfg_do_tens
+        cpx #0
+        beq _dfg_skip_t         ; Skip leading zero
+_dfg_do_tens:
+        ora #$30
+        jsr CHROUT
+_dfg_skip_t:
+        pla
+        ; Ones (always print)
+        ora #$30
+        jsr CHROUT
+        rts
+
+; --- Helpers: store/read geometry for current drive ---
+_dfg_store_spt:
+        ldx dfg_drive
+        bne +
+        sta floppy_a_spt
+        rts
++       sta floppy_b_spt
+        rts
+
+_dfg_store_heads:
+        ldx dfg_drive
+        bne +
+        sta floppy_a_heads
+        rts
++       sta floppy_b_heads
+        rts
+
+_dfg_store_cyls:
+        ldx dfg_drive
+        bne +
+        sta floppy_a_cyls
+        rts
++       sta floppy_b_cyls
+        rts
+
+_dfg_store_type:
+        ldx dfg_drive
+        bne +
+        sta floppy_a_type
+        rts
++       sta floppy_b_type
+        rts
+
+_dfg_read_spt:
+        ldx dfg_drive
+        bne +
+        lda floppy_a_spt
+        rts
++       lda floppy_b_spt
+        rts
+
+_dfg_read_heads:
+        ldx dfg_drive
+        bne +
+        lda floppy_a_heads
+        rts
++       lda floppy_b_heads
+        rts
+
+_dfg_read_cyls:
+        ldx dfg_drive
+        bne +
+        lda floppy_a_cyls
+        rts
++       lda floppy_b_cyls
+        rts
+
+_dfg_read_type:
+        ldx dfg_drive
+        bne +
+        lda floppy_a_type
+        rts
++       lda floppy_b_type
+        rts
+
+_dfg_msg:
+        .text "FLOPPY: ", 0
+_dfg_360:
+        .text "360K", 0
+_dfg_720:
+        .text "720K", 0
+_dfg_12m:
+        .text "1.2MB", 0
+_dfg_144:
+        .text "1.44MB", 0
+
+; Floppy geometry (detected from BPB at boot) — in non-ZP RAM
+; to avoid KERNAL IRQ corruption during init CHROUT calls
+floppy_a_spt:
+        .byte 0
+floppy_a_heads:
+        .byte 0
+floppy_a_cyls:
+        .byte 0
+floppy_a_type:
+        .byte 0
+floppy_a_loaded:
+        .byte 0
+floppy_b_spt:
+        .byte 0
+floppy_b_heads:
+        .byte 0
+floppy_b_cyls:
+        .byte 0
+floppy_b_type:
+        .byte 0
+floppy_b_loaded:
+        .byte 0
+
+; Page-aligned filename for Hyppo setname
+; Must be at a $xx00 address, null-terminated
+        .align 256
+floppy_fname_page:
+        .fill 63,0 
+        ; setnam must be less than 63 bytes
+        ; Pad rest of page is automatic from .align
