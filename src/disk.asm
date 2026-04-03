@@ -124,12 +124,9 @@ _i13_get_params:
         sec
         sbc #1
         sta reg_dh              ; Max head (heads - 1)
-        ; Number of floppy drives present
-        lda #$01
-        ldx floppy_b_loaded
-        beq +
+        ; Always report 2 floppy drives
         lda #$02
-+       sta reg_dl
+        sta reg_dl
         lda i13_cur_type
         sta reg_bl              ; Drive type
         ; ES:DI = pointer to disk parameter table at F000:F000
@@ -150,12 +147,9 @@ _i13_gp_nodrive:
         sta reg_ah
         lda #0
         sta reg_al
-        ; Still report number of floppy drives
-        lda #$01
-        ldx floppy_b_loaded
-        beq +
+        ; Always report 2 floppy drives
         lda #$02
-+       sta reg_dl
+        sta reg_dl
         lda #1
         sta flag_cf
         rts

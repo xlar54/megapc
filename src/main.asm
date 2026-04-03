@@ -119,10 +119,10 @@ RAM_KB_HI       = >RAM_KB       ; High byte for registers
 ; All other constants derive automatically
 VIDEO_MODE      = 7             ; 3 = 80x25 color (CGA), 7 = 80x25 mono (MDA)
 .if VIDEO_MODE == 3
-VIDEO_EQUIP     = $21           ; Floppy + 80-col CGA
+VIDEO_EQUIP     = $61           ; 2 floppies + 80-col CGA
 CRTC_PORT       = $03D4         ; CGA CRTC base port
 .elsif VIDEO_MODE == 7
-VIDEO_EQUIP     = $31           ; Floppy + 80-col monochrome
+VIDEO_EQUIP     = $71           ; 2 floppies + 80-col monochrome
 CRTC_PORT       = $03B4         ; MDA CRTC base port
 .endif
 
