@@ -2652,10 +2652,24 @@ _ii_int15:
         sta flag_cf             ; CF=0 success
         jmp opcode_done
 _i15_not88:
-        lda #$86                ; Unsupported function
+        lda reg_ah
+        cmp #$90
+        beq _i15_device_wait    ; AH=90: Device busy (wait)
+        cmp #$91
+        beq _i15_device_wait    ; AH=91: Interrupt complete
+        ; All others: return CF=1, AH=86 (unsupported)
+        lda #$86
         sta reg_ah
         lda #1
         sta flag_cf             ; CF=1 error
+        jmp opcode_done
+
+_i15_device_wait:
+        ; AH=90/91: Real BIOS returns CF=0 as a no-op
+        ; Keyboard wait (INT 16h AH=00) calls INT 15h AH=90
+        ; to allow multitasking hooks. Must succeed or callers hang.
+        lda #0
+        sta flag_cf             ; CF=0 success
         jmp opcode_done
 
 _ii_int12:

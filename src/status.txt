@@ -117,6 +117,60 @@ PC-DOS 1.25 STATUS
 - BASICA shows "HARDWARE INCOMPATIBLE" error in VIDEO_MODE=7
 - EDLIN can create files but write may have issues
 
+BIOS INTERRUPT IMPLEMENTATION STATUS (vs IBM PC XT BIOS v3)
+=============================================================
+Last compared: 2026-04-03
+
+INT 10h (Video):
+  AH=00 Set video mode              IMPLEMENTED
+  AH=01 Set cursor type             NOT IMPLEMENTED (cosmetic)
+  AH=02 Set cursor position         IMPLEMENTED
+  AH=03 Read cursor position        IMPLEMENTED
+  AH=05 Set active display page     NOT IMPLEMENTED
+  AH=06 Scroll up                   PARTIAL (AL=0 clears; AL>0 only adjusts row)
+  AH=07 Scroll down                 NOT IMPLEMENTED
+  AH=08 Read char/attr at cursor    NOT IMPLEMENTED (screen read)
+  AH=09 Write char/attr at cursor   IMPLEMENTED
+  AH=0A Write char only at cursor   IMPLEMENTED (same as 09)
+  AH=0E Teletype output             IMPLEMENTED
+  AH=0F Get video state             IMPLEMENTED
+  AH=13 Write string (AT)           NOT IMPLEMENTED
+
+INT 13h (Disk):
+  AH=00 Reset                       IMPLEMENTED
+  AH=01 Read status                 NOT IMPLEMENTED (last error code)
+  AH=02 Read sectors                IMPLEMENTED (dual drive)
+  AH=03 Write sectors               IMPLEMENTED (dual drive)
+  AH=04 Verify                      IMPLEMENTED (always succeeds)
+  AH=08 Get drive params            IMPLEMENTED (detected geometry)
+  AH=15 Get DASD type               IMPLEMENTED
+
+INT 15h (System Services):
+  AH=88 Extended memory size        IMPLEMENTED (returns 0)
+  AH=90 Device busy                 IMPLEMENTED (returns CF=0)
+  AH=91 Interrupt complete          IMPLEMENTED (returns CF=0)
+  AH=C0 Get config table            NOT IMPLEMENTED (returns CF=1)
+
+INT 16h (Keyboard):
+  AH=00 Read key (wait)             IMPLEMENTED
+  AH=01 Check key (no wait)         IMPLEMENTED
+  AH=02 Get shift status            NOT IMPLEMENTED
+
+INT 11h Equipment list               IMPLEMENTED
+INT 12h Memory size                   IMPLEMENTED
+INT 14h Serial port                   NOT IMPLEMENTED (not needed)
+INT 17h Printer                       NOT IMPLEMENTED (not needed)
+INT 19h Reboot                        IMPLEMENTED (halts with message)
+INT 21h AH=09 Print string            INTERCEPTED (fast output)
+INT 29h Fast console output           INTERCEPTED (fast output)
+
+KNOWN OUTPUT ISSUE:
+  COMMAND.COM internal commands (ECHO, DIR filenames) use
+  PUSHF/CALL FAR to BIOS INT 10h handler, bypassing INT
+  instruction interception. Characters reach INT 29h for some
+  output (prompt, volume label) but not for ECHO text or
+  filenames. Root cause not yet resolved.
+
 CONFIGURATION
 ==============
 
