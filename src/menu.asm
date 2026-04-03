@@ -15,6 +15,15 @@ menu_emu_started .byte 0
 ; show_menu — Display the main menu and handle input
 ; ============================================================================
 show_menu:
+        ; Reset charset to default before enabling IRQs
+        ; (VIC-IV charset registers are not behind the unlock gate)
+        lda #$00
+        sta $D068
+        lda #$10
+        sta $D069
+        lda #$00
+        sta $D06A
+
         ; Enable IRQs for CHROUT
         cli
 
@@ -42,17 +51,17 @@ show_menu:
         lda #$80
         tsb VIC_HOTREGS
 
- ;       jsr $FF81               ; CINT — second pass
+        jsr $FF81               ; CINT — second pass
 
         ; Re-unlock VIC-IV again (CINT may reset it)
- ;       lda #$47
- ;       sta VIC_KEY
- ;       lda #$53
- ;       sta VIC_KEY
- ;       lda #$40
- ;       tsb $D031
- ;       lda #$80
- ;       tsb VIC_HOTREGS
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031
+        lda #$80
+        tsb VIC_HOTREGS
 
         ; Clear screen
         lda #147
@@ -66,6 +75,8 @@ show_menu:
         ; Switch to lowercase character set
         lda #$0E
         jsr CHROUT
+
+        ; CINT + CHROUT $0E above restore the default PETSCII charset
 
         ; Print menu header
         ldx #0

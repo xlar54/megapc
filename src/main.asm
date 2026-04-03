@@ -252,6 +252,16 @@ start_emulation:
         lda #147
         jsr CHROUT
 
+        ; Select character set B lowercase half at $03D800
+        ; Upper half ($3D000) has uppercase at $01-$1A, graphics at $41-$5A
+        ; Lower half ($3D800) has lowercase at $01-$1A, uppercase at $41-$5A
+        lda #$00
+        sta $D068
+        lda #$D8
+        sta $D069
+        lda #$03
+        sta $D06A
+
         ; Enter main emulation loop
         jmp main_loop
 
@@ -296,6 +306,14 @@ _resume_restore_zp:
         lda #CACHE_INVALID
         sta code_cache_pg_lo
         sta code_cache_pg_hi
+
+        ; Restore ASCII charset B lowercase half at $03D800
+        lda #$00
+        sta $D068
+        lda #$D8
+        sta $D069
+        lda #$03
+        sta $D06A
 
         ; Resume main loop (segment bases intact from ZP restore)
         jmp main_loop
