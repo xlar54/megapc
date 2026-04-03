@@ -111,7 +111,11 @@ _ats_done:
         rts
 _ats_upper:
         ; ASCII $40-$5F → screen codes $00-$1F (uppercase in lowercase charset)
-        sec
+        cmp #$5C
+        bne +
+        lda #$2F                ; Backslash -> forward slash (no \ in C64 charset)
+        rts
++       sec
         sbc #$40
         rts
 _ats_lower:
@@ -143,8 +147,11 @@ _atp_ctrl:
         lda #$20
         rts
 _atp_upper:
-        ; $20–$5F: mostly the same in PETSCII
-        rts
+        ; $20-$5F: mostly the same in PETSCII
+        cmp #$5C
+        bne +
+        lda #$2F                ; Backslash -> forward slash (no \ in C64 charset)
++       rts
 _atp_lower:
         ; $61–$7A: lowercase a–z → PETSCII $C1–$DA
         clc

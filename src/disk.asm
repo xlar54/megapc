@@ -16,8 +16,15 @@
 ;
 ; For 1.44MB floppy: 80 cylinders, 2 heads, 18 sectors/track
 
-; Floppy geometry is now auto-detected — see floppy_a_spt/heads/cyls in zeropage.asm
+; Floppy geometry is now auto-detected — see floppy_a_spt/heads/cyls in disk.asm
 FLOPPY_SECTOR_SZ = 512
+
+; Active drive geometry (set by _i13_select_drive for current INT 13h call)
+i13_cur_spt     = $8FE0
+i13_cur_heads   = $8FE1
+i13_cur_cyls    = $8FE2
+i13_cur_type    = $8FE3
+i13_cur_bank    = $8FE4           ; Attic bank offset ($10=A, $20=B)
 
 ; ============================================================================
 ; int13_handler — BIOS INT 13h dispatch
@@ -59,12 +66,13 @@ _i13_verify:
 
 _i13_get_type:
         ; AH=15: Get disk type
-        ; DL=0 (floppy): return AH=01 (floppy without change-line)
-        ; DL>=80 (hard disk): return AH=03 (fixed disk)
+        ; DL=0/1 (floppy): return AH=01 (floppy without change-line)
+        ; DL>=80 (hard disk): no hard drives
         lda reg_dl
-        beq _i13_gt_floppy
         bmi _i13_gt_harddisk    ; DL >= $80
-        ; Floppy drive > 0: no drive
+        cmp #2
+        bcc _i13_gt_floppy      ; DL = 0 or 1
+        ; Floppy drive >= 2: no drive
         lda #$00
         sta reg_ah
         lda #1
@@ -98,25 +106,31 @@ _i13_reset:
 
 _i13_get_params:
         ; AH=08: Get drive parameters
-        ; DL = drive (0 = floppy A:)
+        ; DL = drive (0=A, 1=B)
         lda reg_dl
-        bne _i13_no_drive
+        bmi _i13_hard_disk      ; DL >= $80
+        jsr _i13_select_drive
+        bcc _i13_gp_nodrive
         ; Return parameters for detected floppy geometry
         lda #$00
         sta reg_ah              ; Status = OK
-        lda floppy_a_spt
+        lda i13_cur_spt
         sta reg_cl              ; Sectors per track in CL bits 0–5
-        lda floppy_a_cyls
+        lda i13_cur_cyls
         sec
         sbc #1
         sta reg_ch              ; Max cylinder (cyls - 1)
-        lda floppy_a_heads
+        lda i13_cur_heads
         sec
         sbc #1
         sta reg_dh              ; Max head (heads - 1)
+        ; Number of floppy drives present
         lda #$01
-        sta reg_dl              ; Number of drives
-        lda floppy_a_type
+        ldx floppy_b_loaded
+        beq +
+        lda #$02
++       sta reg_dl
+        lda i13_cur_type
         sta reg_bl              ; Drive type
         ; ES:DI = pointer to disk parameter table at F000:F000
         lda #$00
@@ -128,6 +142,21 @@ _i13_get_params:
         ; Write disk parameter table to $5F000 (F000:F000)
         jsr _i13_write_dpt
         lda #0
+        sta flag_cf
+        rts
+
+_i13_gp_nodrive:
+        lda #$80                ; Timeout / not ready
+        sta reg_ah
+        lda #0
+        sta reg_al
+        ; Still report number of floppy drives
+        lda #$01
+        ldx floppy_b_loaded
+        beq +
+        lda #$02
++       sta reg_dl
+        lda #1
         sta flag_cf
         rts
 
@@ -171,12 +200,8 @@ _i13_hard_disk:
 ;   ES:BX = destination buffer
 ;
 _i13_read:
-        lda reg_dl
-        bne _i13_no_drive       ; Only drive 0
-
-        ; Check if floppy image is loaded
-        lda floppy_a_loaded
-        beq _i13_no_drive       ; No floppy → error
+        jsr _i13_select_drive
+        bcc _i13_no_drive       ; Invalid drive or not loaded
 
         ; Save sector count
         lda reg_al
@@ -197,7 +222,7 @@ _i13_read:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_a_heads
+        lda i13_cur_heads
         sta $D774
         lda #0
         sta $D775
@@ -213,7 +238,7 @@ _i13_read:
         sta $D770               ; Multiplier input A (low)
         lda #0
         sta $D771               ; Multiplier input A (high)
-        lda floppy_a_spt
+        lda i13_cur_spt
         sta $D774               ; Multiplier input B (low)
         lda #0
         sta $D775               ; Multiplier input B (high)
@@ -286,7 +311,7 @@ _i13_read_loop:
         ; DMA 512 bytes from floppy attic to SECTOR_BUF
         clc
         lda floppy_ofs+2
-        adc #$10                ; Add $100000 offset (FLOPPY_A_ATTIC - $8000000 = $100000)
+        adc i13_cur_bank        ; Add attic offset ($10=A, $20=B)
         sta dma_src_bank
         lda floppy_ofs
         sta dma_src_lo
@@ -422,11 +447,8 @@ _i13_read_done:
 ; Reads data from ES:BX, writes to floppy image in attic.
 ;
 _i13_write:
-        lda reg_dl
-        bne _i13_no_drive       ; Only drive 0
-
-        lda floppy_a_loaded
-        beq _i13_no_drive
+        jsr _i13_select_drive
+        bcc _i13_no_drive       ; Invalid drive or not loaded
 
         ; Save sector count and BX
         lda reg_al
@@ -442,7 +464,7 @@ _i13_write:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_a_heads
+        lda i13_cur_heads
         sta $D774
         lda #0
         sta $D775
@@ -455,7 +477,7 @@ _i13_write:
         sta $D770
         lda #0
         sta $D771
-        lda floppy_a_spt
+        lda i13_cur_spt
         sta $D774
         lda #0
         sta $D775
@@ -589,7 +611,7 @@ _i13w_do_write:
         sta dma_src_bank
         clc
         lda floppy_ofs+2
-        adc #$10
+        adc i13_cur_bank        ; Attic offset ($10=A, $20=B)
         sta dma_dst_bank
         lda floppy_ofs
         sta dma_dst_lo
@@ -640,6 +662,53 @@ _i13_write_done:
         rts
 
 ; ============================================================================
+; _i13_select_drive — Set up active drive geometry for INT 13h
+; ============================================================================
+; Input:  reg_dl = drive number (0=A, 1=B)
+; Output: carry set = OK (i13_cur_* filled), carry clear = error
+;
+_i13_select_drive:
+        lda reg_dl
+        bmi _i13sd_fail         ; DL >= $80: not a floppy
+        beq _i13sd_a
+        cmp #1
+        beq _i13sd_b
+        bra _i13sd_fail         ; DL >= 2: no drive
+_i13sd_a:
+        lda floppy_a_loaded
+        beq _i13sd_fail
+        lda floppy_a_spt
+        sta i13_cur_spt
+        lda floppy_a_heads
+        sta i13_cur_heads
+        lda floppy_a_cyls
+        sta i13_cur_cyls
+        lda floppy_a_type
+        sta i13_cur_type
+        lda #$10
+        sta i13_cur_bank
+        sec
+        rts
+_i13sd_b:
+        lda floppy_b_loaded
+        beq _i13sd_fail
+        lda floppy_b_spt
+        sta i13_cur_spt
+        lda floppy_b_heads
+        sta i13_cur_heads
+        lda floppy_b_cyls
+        sta i13_cur_cyls
+        lda floppy_b_type
+        sta i13_cur_type
+        lda #$20
+        sta i13_cur_bank
+        sec
+        rts
+_i13sd_fail:
+        clc
+        rts
+
+; ============================================================================
 ; _i13_write_dpt — Write disk parameter table to F000:F000
 ; ============================================================================
 ; Standard 11-byte disk parameter table for INT 1Eh / AH=08
@@ -666,7 +735,7 @@ _i13_write_dpt:
         lda #$02                ; Byte 3: Bytes per sector (2 = 512 bytes)
         sta [temp_ptr],z
         ldz #4
-        lda floppy_a_spt          ; Byte 4: Sectors per track
+        lda i13_cur_spt           ; Byte 4: Sectors per track
         sta [temp_ptr],z
         ldz #5
         lda #$2A                ; Byte 5: Gap length
