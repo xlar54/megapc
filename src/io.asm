@@ -124,6 +124,8 @@ int10_handler:
         beq _i10_scroll_up
         cmp #$09
         beq _i10_write_char_attr
+        cmp #$0A
+        beq _i10_write_char_attr  ; AH=0A: same as 09 (we ignore attributes anyway)
         cmp #$0F
         beq _i10_get_mode
         ; Unsupported: return silently
@@ -223,10 +225,45 @@ _i10su_scroll:
         rts
 
 _i10_write_char_attr:
-        ; AH=09: Write character + attribute at cursor position
-        ; On real PC this writes to CGA buffer WITHOUT advancing cursor.
-        ; We can't do in-place writes via CHROUT, so just NOP.
-        ; Real text output uses AH=0E (teletype) which we handle.
+        ; AH=09/0A: Write character at cursor, CX times, no cursor advance
+        lda reg_al
+        jsr ascii_to_pet
+        jsr pet_to_screen
+        sta scratch_d
+        ; Save cursor position
+        lda scr_row
+        pha
+        lda scr_col
+        pha
+        ; Get repeat count (cap at 255)
+        lda reg_cx+1
+        bne _i10wa_cap
+        lda reg_cx
+        beq _i10wa_restore
+        bra _i10wa_go
+_i10wa_cap:
+        lda #255
+_i10wa_go:
+        tax
+_i10wa_loop:
+        jsr calc_scr_ptr
+        lda scratch_d
+        ldz #0
+        sta [temp_ptr],z
+        inc scr_col
+        lda scr_col
+        cmp #SCR_COLS
+        bcc +
+        lda #0
+        sta scr_col
+        inc scr_row
++       dex
+        bne _i10wa_loop
+_i10wa_restore:
+        pla
+        sta scr_col
+        pla
+        sta scr_row
         rts
 
 _i10_get_mode:
