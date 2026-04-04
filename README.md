@@ -18,6 +18,9 @@ Known issues:
 
 Due to bios implementations, some dos disks may work, others - especially OEM versions - may not.
 
+**Building**
+I use 64TASS - a terrific cross platform assembler.  Just copy down the repo, run build.bat from the command line and it should generate a d81 in the target folder.
+
 
 
 
