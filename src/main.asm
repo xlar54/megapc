@@ -219,6 +219,50 @@ start_emulation:
         ; Geometry already detected in load_floppy_drive
         jsr init_display
 
+        ; POST beep — short ~1kHz tone via SID
+        ; Clear SID registers first
+        ldx #$18
+_sid_clr:
+        lda #0
+        sta $D400,x
+        dex
+        bpl _sid_clr
+        ; Set up voice 1
+        lda #$0F
+        sta $D418               ; Master volume = 15
+        lda #$08
+        sta $D402               ; Pulse width low
+        lda #$08
+        sta $D403               ; Pulse width high
+        lda #$00
+        sta $D405               ; Attack=0, Decay=0
+        lda #$F0
+        sta $D406               ; Sustain=15, Release=0
+        lda #$6E
+        sta $D400               ; Frequency low (~2kHz)
+        lda #$38
+        sta $D401               ; Frequency high
+        lda #$41                ; Gate on + pulse waveform
+        sta $D404
+        ; Wait ~200ms (busy loop, 40MHz = ~40M cycles/sec)
+        ldx #0
+        ldy #0
+        ldz #0
+_beep_wait:
+        inz
+        bne _beep_wait
+        iny
+        bne _beep_wait
+        inx
+        cpx #$0C
+        bne _beep_wait
+        ; Gate off
+        lda #$40                ; Gate off, pulse waveform
+        sta $D404
+        ; Silence
+        lda #$00
+        sta $D418
+
         ; Print ready message
         ldx #0
 -       lda ready_msg,x

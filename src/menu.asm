@@ -87,81 +87,112 @@ show_menu:
         bne -
 +
 
-        ; Print option 1 (Drive A)
+        ; --- Emulation Options ---
         ldx #0
--       lda menu_opt1_pre,x
+-       lda menu_emu_hdr,x
         beq +
         jsr CHROUT
         inx
         bne -
 +
-        lda floppy_a_loaded
-        beq _menu_show_mount_a
-        ; Drive A is mounted -- show unmount option
+
+        ; [1] - Start or Restart
+        lda menu_emu_started
+        bne _menu_show_restart
         ldx #0
--       lda menu_unmount_a_txt,x
+-       lda menu_start_txt,x
         beq _menu_opt1_done
         jsr CHROUT
         inx
         bne -
         bra _menu_opt1_done
-_menu_show_mount_a:
+_menu_show_restart:
         ldx #0
--       lda menu_mount_a_txt,x
+-       lda menu_restart_txt,x
         beq _menu_opt1_done
         jsr CHROUT
         inx
         bne -
 _menu_opt1_done:
 
-        ; Print option 2 (Drive B)
+        ; [2] - Resume (show unavailable if not running)
+        lda menu_emu_started
+        bne _menu_show_resume
         ldx #0
--       lda menu_opt2_pre,x
-        beq +
-        jsr CHROUT
-        inx
-        bne -
-+
-        lda floppy_b_loaded
-        beq _menu_show_mount_b
-        ; Drive B is mounted -- show unmount option
-        ldx #0
--       lda menu_unmount_b_txt,x
+-       lda menu_resume_na_txt,x
         beq _menu_opt2_done
         jsr CHROUT
         inx
         bne -
         bra _menu_opt2_done
-_menu_show_mount_b:
+_menu_show_resume:
         ldx #0
--       lda menu_mount_b_txt,x
+-       lda menu_resume_txt,x
         beq _menu_opt2_done
         jsr CHROUT
         inx
         bne -
 _menu_opt2_done:
 
-        ; Print option 3
+        ; [X] - Quit
         ldx #0
--       lda menu_opt3,x
+-       lda menu_quit_txt,x
         beq +
         jsr CHROUT
         inx
         bne -
 +
 
-        ; Print option 4
+        ; --- Drive Options ---
         ldx #0
--       lda menu_opt4,x
+-       lda menu_drv_hdr,x
         beq +
         jsr CHROUT
         inx
         bne -
 +
 
-        ; Print TAB hint
+        ; [A] - Mount or Unmount Drive A
+        lda floppy_a_loaded
+        bne _menu_show_unmount_a
         ldx #0
--       lda menu_tab_hint,x
+-       lda menu_mount_a_txt,x
+        beq _menu_opta_done
+        jsr CHROUT
+        inx
+        bne -
+        bra _menu_opta_done
+_menu_show_unmount_a:
+        ldx #0
+-       lda menu_unmount_a_txt,x
+        beq _menu_opta_done
+        jsr CHROUT
+        inx
+        bne -
+_menu_opta_done:
+
+        ; [B] - Mount or Unmount Drive B
+        lda floppy_b_loaded
+        bne _menu_show_unmount_b
+        ldx #0
+-       lda menu_mount_b_txt,x
+        beq _menu_optb_done
+        jsr CHROUT
+        inx
+        bne -
+        bra _menu_optb_done
+_menu_show_unmount_b:
+        ldx #0
+-       lda menu_unmount_b_txt,x
+        beq _menu_optb_done
+        jsr CHROUT
+        inx
+        bne -
+_menu_optb_done:
+
+        ; --- Special Keys ---
+        ldx #0
+-       lda menu_keys_hdr,x
         beq +
         jsr CHROUT
         inx
@@ -172,22 +203,50 @@ _menu_opt2_done:
         lda #$00
         sta $D610
 
-        ; Wait for keypress 1-4
+        ; Wait for keypress
 _menu_wait_key:
         lda $D610
         beq _menu_wait_key
         sta $D610               ; Dequeue
         cmp #'1'
-        beq menu_do_1
+        beq menu_do_start
         cmp #'2'
-        beq menu_do_2
-        cmp #'3'
-        beq menu_do_3
-        cmp #'4'
-        beq menu_do_4
+        beq menu_do_resume
+        cmp #$78                ; 'x' lowercase
+        beq menu_do_quit
+        cmp #$58                ; 'X' uppercase
+        beq menu_do_quit
+        cmp #$61                ; 'a' lowercase
+        beq menu_do_drive_a
+        cmp #$41                ; 'A' uppercase
+        beq menu_do_drive_a
+        cmp #$62                ; 'b' lowercase
+        beq menu_do_drive_b
+        cmp #$42                ; 'B' uppercase
+        beq menu_do_drive_b
         bra _menu_wait_key
 
-menu_do_1:
+menu_do_start:
+        ; Start or Restart emulation
+        lda menu_emu_started
+        beq _menu_first_start
+        ; Restart: re-init everything
+        lda #0
+        sta menu_emu_started
+        sta scr_row
+        sta scr_col
+_menu_first_start:
+        lda #1
+        sta menu_emu_started
+        jmp start_emulation
+
+menu_do_resume:
+        ; Resume — only if running
+        lda menu_emu_started
+        beq show_menu           ; Not running, redraw menu
+        jmp resume_emulation
+
+menu_do_drive_a:
         ; Drive A: mount or unmount
         lda floppy_a_loaded
         beq menu_mount_drive_var_a
@@ -208,7 +267,7 @@ menu_mount_drive_var_a:
         jsr menu_do_mount_fn
         jmp show_menu
 
-menu_do_2:
+menu_do_drive_b:
         ; Drive B: mount or unmount
         lda floppy_b_loaded
         beq menu_mount_drive_var_b
@@ -229,29 +288,11 @@ menu_mount_drive_var_b:
         jsr menu_do_mount_fn
         jmp show_menu
 
-menu_do_3:
-        ; Start / Resume emulation
-        lda menu_emu_started
-        bne _menu_resume
-        ; First time: full init
-        lda #1
-        sta menu_emu_started
-        jmp start_emulation
-
-_menu_resume:
-        ; Returning from TAB: resume emulation
-        jmp resume_emulation
-
-menu_do_4:
-        ; Quit emulator
-        cli
-        lda #147                ; Clear screen
-        jsr CHROUT
-        lda #$0D
-        jsr CHROUT
-        lda #$00
-        sta $D610
-        rts                     ; Return to BASIC
+menu_do_quit:
+        ; Quit emulator — warm boot MEGA65 via Hyppo
+        lda #$7E
+        sta $D640
+        clv
 
 ; ============================================================================
 ; menu_do_mount_fn — Prompt for filename and load floppy image
@@ -552,35 +593,53 @@ menu_restore_screen:
 menu_header:
         .text 13
         .text "MegaPC - 8086 PC Emulator", 13
-        .text "By Scott Hutter - xlar54", 13
-        .text 13, 0
+        .text "By Scott Hutter - xlar54", 13, 0
 
-menu_opt1_pre:
-        .text "1) ", 0
+hex_tbl:
+        .text "0123456789ABCDEF"
+
+menu_emu_hdr:
+        .text 13
+        .text "Emulation Options:", 13
+        .text "--------------------------------------", 13, 0
+
+menu_start_txt:
+        .text "[1] - Start Emulation", 13, 0
+
+menu_restart_txt:
+        .text "[1] - Restart Emulation", 13, 0
+
+menu_resume_txt:
+        .text "[2] - Resume Emulation", 13, 0
+
+menu_resume_na_txt:
+        .text "[2] - Resume Emulation (unavailable)", 13, 0
+
+menu_quit_txt:
+        .text "[X] - Quit Emulator", 13, 0
+
+menu_drv_hdr:
+        .text 13
+        .text "Drive Options:", 13
+        .text "--------------------------------------", 13, 0
 
 menu_mount_a_txt:
-        .text "Mount disk image to Drive A", 13, 0
+        .text "[A] - Mount Drive A", 13, 0
 
 menu_unmount_a_txt:
-        .text "Unmount Drive A", 13, 0
-
-menu_opt2_pre:
-        .text "2) ", 0
+        .text "[A] - Unmount Drive A", 13, 0
 
 menu_mount_b_txt:
-        .text "Mount disk image to Drive B", 13, 0
+        .text "[B] - Mount Drive B", 13, 0
 
 menu_unmount_b_txt:
-        .text "Unmount Drive B", 13, 0
+        .text "[B] - Unmount Drive B", 13, 0
 
-menu_opt3:
-        .text "3) Start Emulation", 13, 0
-
-menu_opt4:
-        .text "4) Quit Emulator", 13, 0
-
-menu_tab_hint:
-        .text 13, "[TAB] Returns to this screen", 13, 0
+menu_keys_hdr:
+        .text 13
+        .text "Special Keys While In Emulation:", 13
+        .text "--------------------------------------", 13
+        .text "[TAB] - Return to this menu", 13, 0
 
 msg_filename:
         .text "Filename: ", 0
