@@ -137,7 +137,8 @@ scratch_b       = $B1
 scratch_c       = $B2
 scratch_d       = $B3
 ea_offset_lo    = $B4           ; Saved 16-bit EA offset (pre-segment mapping)
-ea_offset_hi    = $B5           ; Used by LEA instruction
+ea_offset_hi    = $B5
+ea_seg_ofs      = $B6           ; Actual segment register offset used for EA
 
 ; Code cache variables (for executing from attic-backed segments)
 cs_in_attic     = $B7           ; Non-zero = CS is in attic range, use code cache

@@ -276,13 +276,19 @@ ea_resolve_seg:
         sta ea_offset_hi
 
         ; rm_addr+0/+1 = 16-bit offset
-        ; Default segment is DS unless overridden
         lda rm_addr
         sta temp32
         lda rm_addr+1
         sta temp32+1
-        ldx #SEG_DS_OFS         ; Default segment
-        jsr seg_ofs_to_linear   ; Handles override internally
+
+        ; Work out the actual segment register used
+        ldx #SEG_DS_OFS
+        lda seg_override_en
+        beq +
+        ldx seg_override
++       stx ea_seg_ofs
+
+        jsr seg_ofs_to_linear
         ; temp32 now has 20-bit linear address
         jsr linear_to_chip      ; temp_ptr now has chip address
         lda temp_ptr

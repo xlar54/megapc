@@ -122,6 +122,8 @@ int10_handler:
         beq _i10_get_cursor
         cmp #$06
         beq _i10_scroll_up
+        cmp #$08
+        beq _i10_read_char_attr
         cmp #$09
         beq _i10_write_char_attr
         cmp #$0A
@@ -132,30 +134,9 @@ int10_handler:
         rts
 
 _i10_teletype:
-        ; AH=0E: Teletype output — write character AL to screen
+        ; AH=0E: Teletype output — route through con_write_char
         lda reg_al
-        cmp #$0A
-        beq _i10t_done          ; Ignore LF — CR already does newline on MEGA65
-        cmp #$0D
-        beq _i10t_cr
-        cmp #$08
-        beq _i10t_bs            ; Backspace
-        cmp #$07
-        beq _i10t_done          ; Bell — ignore
-        cmp #$20
-        bcc _i10t_done          ; Control chars < $20 — ignore
-        ; Regular character: always write and advance
-        jsr ascii_to_pet
-        jsr chrout_safe
-_i10t_done:
-        rts
-_i10t_cr:
-        lda #$0D
-        jsr chrout_safe
-        rts
-_i10t_bs:
-        lda #$9D                ; PETSCII cursor left
-        jsr chrout_safe
+        jsr con_write_char
         rts
 
 _i10_set_mode:
@@ -224,11 +205,22 @@ _i10su_scroll:
 +       sta scr_row
         rts
 
+_i10_read_char_attr:
+        ; AH=08: Read character and attribute at cursor position
+        ; Read from guest video buffer at $18000 + (row*80+col)*2
+        jsr cwc_calc_vidbuf
+        ldz #0
+        lda [temp_ptr2],z       ; Character byte
+        sta reg_al
+        ldz #1
+        lda [temp_ptr2],z       ; Attribute byte
+        sta reg_ah
+        rts
+
 _i10_write_char_attr:
         ; AH=09/0A: Write character at cursor, CX times, no cursor advance
         lda reg_al
-        jsr ascii_to_pet
-        jsr pet_to_screen
+        jsr ascii_to_screenB
         sta scratch_d
         ; Save cursor position
         lda scr_row
@@ -616,6 +608,375 @@ _pts_lower:
         sec
         sbc #$C0                ; $C1→$01, $DA→$1A
 _pts_done:
+        rts
+
+; ============================================================================
+; Console Renderer — single source of truth for DOS text output
+; ============================================================================
+VIDBUF_BASE     = $018000       ; Bank 1: guest video buffer (char+attr pairs)
+CON_ATTR        = $07           ; Default attribute: white on black
+
+; ============================================================================
+; con_write_char — Write one ASCII character to console
+; ============================================================================
+; Input: A = ASCII character
+;
+con_write_char:
+        cmp #$0D
+        beq _cwc_cr
+        cmp #$0A
+        beq _cwc_lf
+        cmp #$08
+        beq _cwc_bs
+        cmp #$09
+        beq _cwc_tab
+        cmp #$07
+        beq _cwc_bel
+        cmp #$20
+        bcc _cwc_done           ; Other control chars — ignore
+
+        ; --- Printable character ---
+        pha
+
+        ; Write to guest text page
+        jsr cwc_calc_vidbuf
+        pla
+        pha
+        ldz #0
+        sta [temp_ptr2],z
+        lda #CON_ATTR
+        ldz #1
+        sta [temp_ptr2],z
+
+        ; Write to MEGA65 screen
+        jsr calc_scr_ptr
+        pla
+        jsr ascii_to_screenB
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Advance cursor
+        inc scr_col
+        lda scr_col
+        cmp #SCR_COLS
+        bcc _cwc_done
+        lda #0
+        sta scr_col
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc _cwc_done
+        jsr do_scr_scroll
+_cwc_done:
+        jmp cursor_update
+
+_cwc_cr:
+        lda #0
+        sta scr_col
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc +
+        jsr do_scr_scroll
++       jmp cursor_update
+
+_cwc_lf:
+        ; Line feed: ignore (CR already handles newline)
+        rts
+
+_cwc_bs:
+        lda scr_col
+        beq _cwc_done
+        dec scr_col
+        jsr calc_scr_ptr
+        lda #$20
+        ldz #0
+        sta [temp_ptr],z
+        jsr cwc_calc_vidbuf
+        lda #$20
+        ldz #0
+        sta [temp_ptr2],z
+        lda #CON_ATTR
+        ldz #1
+        sta [temp_ptr2],z
+        jmp cursor_update
+
+_cwc_tab:
+        lda scr_col
+        ora #$07
+        inc a
+        cmp #SCR_COLS
+        bcc +
+        lda #0
++       sta scr_col
+        jmp cursor_update
+
+_cwc_bel:
+        rts
+
+; Convert ASCII to screen code for charset B lowercase half
+ascii_to_screenB:
+        cmp #$20
+        bcc _atsB_space
+        cmp #$40
+        bcc _atsB_done
+        cmp #$5B
+        bcc _atsB_done          ; $41-$5A: uppercase, keep as-is
+        cmp #$60
+        bcc _atsB_done
+        cmp #$7B
+        bcc _atsB_lower
+        cmp #$7F
+        bcc _atsB_done
+_atsB_space:
+        lda #$20
+_atsB_done:
+        rts
+_atsB_lower:
+        sec
+        sbc #$60                ; $61→$01, $7A→$1A
+        rts
+
+; Calculate guest video buffer pointer
+; Output: temp_ptr2 = VIDBUF_BASE + (row*80+col)*2
+cwc_calc_vidbuf:
+        lda scr_row
+        asl
+        asl
+        asl
+        asl
+        sta scratch_a
+        lda scr_row
+        lsr
+        lsr
+        lsr
+        lsr
+        sta scratch_b
+        lda scr_row
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        sta scratch_c
+        lda scr_row
+        lsr
+        lsr
+        sta scratch_d
+        clc
+        lda scratch_a
+        adc scratch_c
+        sta scratch_a
+        lda scratch_b
+        adc scratch_d
+        sta scratch_b
+        clc
+        lda scratch_a
+        adc scr_col
+        sta scratch_a
+        lda scratch_b
+        adc #0
+        sta scratch_b
+        asl scratch_a
+        rol scratch_b
+        clc
+        lda scratch_a
+        adc #<VIDBUF_BASE
+        sta temp_ptr2
+        lda scratch_b
+        adc #>VIDBUF_BASE
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+        rts
+
+; ============================================================================
+; con_write_buffer — Write CX bytes from DS:DX to console
+; ============================================================================
+; Input: DS:DX, CX = 8086 registers
+; Flushes cache, computes linear address, reads via DMA or cache,
+; outputs each byte via con_write_char.
+;
+con_write_buffer:
+        lda reg_cx
+        ora reg_cx+1
+        beq cwb_done
+
+        jsr cache_flush_all
+
+        ; Compute linear base address from DS:DX
+        lda reg_dx
+        sta temp32
+        lda reg_dx+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        ldx #SEG_DS_OFS
+        lda #0
+        sta seg_override_en
+        jsr seg_ofs_to_linear
+
+        ; Save linear base
+        lda temp32
+        sta $8FD0
+        lda temp32+1
+        sta $8FD1
+        lda temp32+2
+        sta $8FD2
+
+        ; Total remaining count
+        lda reg_cx
+        sta $8FD3
+        lda reg_cx+1
+        sta $8FD4
+
+        lda #0
+        sta $8FD6               ; SECTOR_BUF index
+
+cwb_page_loop:
+        lda $8FD3
+        ora $8FD4
+        beq cwb_snapshot_done
+
+        ; Chunk = min(remaining, bytes_left_in_page)
+        lda #$00
+        sec
+        sbc $8FD0
+        beq _cwb_full_pg
+        cmp $8FD3
+        bcc _cwb_chunk_ok
+        lda $8FD4
+        bne _cwb_chunk_ok2
+        lda $8FD3
+        bra _cwb_chunk_ok
+_cwb_full_pg:
+        lda #$80
+        cmp $8FD3
+        bcc _cwb_chunk_ok
+        lda $8FD4
+        bne _cwb_chunk_ok2
+        lda $8FD3
+        bra _cwb_chunk_ok
+_cwb_chunk_ok2:
+        lda #$00
+        sec
+        sbc $8FD0
+        beq +
+        bra _cwb_chunk_ok
++       lda #$80
+_cwb_chunk_ok:
+        sta $8FD5
+
+        ; Is this attic range?
+        lda $8FD2
+        cmp #$01
+        bcc _cwb_pg_direct
+        cmp #$0F
+        bcs _cwb_pg_direct
+
+        ; Attic: DMA from attic to SECTOR_BUF
+        lda $8FD0
+        sta dma_src_lo
+        lda $8FD1
+        sta dma_src_hi
+        lda $8FD2
+        sta dma_src_bank
+        clc
+        lda #<SECTOR_BUF
+        adc $8FD6
+        sta dma_dst_lo
+        lda #>SECTOR_BUF
+        adc #0
+        sta dma_dst_hi
+        lda #$00
+        sta dma_dst_bank
+        lda $8FD5
+        sta dma_count_lo
+        lda #$00
+        sta dma_count_hi
+        jsr do_dma_from_attic
+        bra _cwb_pg_advance
+
+_cwb_pg_direct:
+        ; Non-attic: byte-by-byte via linear_to_chip
+        ldx #0
+        ldy $8FD6
+_cwb_pg_dloop:
+        lda $8FD0
+        sta temp32
+        lda $8FD1
+        sta temp32+1
+        lda $8FD2
+        sta temp32+2
+        lda #0
+        sta temp32+3
+        phx
+        phy
+        jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
+        ply
+        plx
+        sta SECTOR_BUF,y
+        iny
+        inc $8FD0
+        bne +
+        inc $8FD1
+        bne +
+        inc $8FD2
++       inx
+        cpx $8FD5
+        bne _cwb_pg_dloop
+        bra _cwb_pg_advance     ; Skip linear advance (done in loop)
+
+_cwb_pg_advance:
+        ; Advance SECTOR_BUF index
+        clc
+        lda $8FD6
+        adc $8FD5
+        sta $8FD6
+
+        ; Advance linear address (for DMA path only)
+        clc
+        lda $8FD0
+        adc $8FD5
+        sta $8FD0
+        lda $8FD1
+        adc #0
+        sta $8FD1
+        lda $8FD2
+        adc #0
+        sta $8FD2
+
+        ; Subtract from remaining
+        sec
+        lda $8FD3
+        sbc $8FD5
+        sta $8FD3
+        lda $8FD4
+        sbc #0
+        sta $8FD4
+
+        jmp cwb_page_loop
+
+cwb_snapshot_done:
+        ; Phase 2: Print from SECTOR_BUF
+        ldx #0
+_cwb_print:
+        cpx $8FD6
+        bcs cwb_done
+        lda SECTOR_BUF,x
+        phx
+        jsr con_write_char
+        plx
+        inx
+        bra _cwb_print
+
+cwb_done:
         rts
 
 ; ============================================================================

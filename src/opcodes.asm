@@ -750,6 +750,25 @@ op_call_far:
         sta op_result+1
         jsr push_word
 
+        ; Check if target matches INT 10h or INT 29h IVT vector
+        jsr cf_check_int10
+        bcs cf_do_int10
+        jsr cf_check_int29
+        bcs cf_do_int29
+        bra cf_no_hook
+
+cf_do_int10:
+        jsr cf_pop_return
+        jsr int10_handler
+        jmp opcode_done
+
+cf_do_int29:
+        jsr cf_pop_return
+        lda reg_al
+        jsr con_write_char
+        jmp opcode_done
+
+cf_no_hook:
         ; Set new CS:IP
         lda i_data1
         sta reg_cs
@@ -764,6 +783,68 @@ op_call_far:
         jsr compute_cs_base
         jsr update_opcode_ptr
         jmp opcode_done
+
+; --- CALL FAR hook helpers ---
+cf_pop_return:
+        jsr pop_word
+        lda op_result
+        sta reg_ip
+        lda op_result+1
+        sta reg_ip+1
+        jsr pop_word
+        lda op_result
+        sta reg_cs
+        lda op_result+1
+        sta reg_cs+1
+        lda #1
+        sta cs_dirty
+        jsr compute_cs_base
+        jsr update_opcode_ptr
+        rts
+
+cf_check_int10:
+        lda #$40
+        sta temp_ptr
+        lda #$00
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        bra cf_check_common
+
+cf_check_int29:
+        lda #$A4
+        sta temp_ptr
+        lda #$00
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+cf_check_common:
+        ldz #0
+        lda [temp_ptr],z
+        cmp i_data0
+        bne cf_check_fail
+        ldz #1
+        lda [temp_ptr],z
+        cmp i_data0+1
+        bne cf_check_fail
+        ldz #2
+        lda [temp_ptr],z
+        cmp i_data1
+        bne cf_check_fail
+        ldz #3
+        lda [temp_ptr],z
+        cmp i_data1+1
+        bne cf_check_fail
+        sec
+        rts
+cf_check_fail:
+        clc
+        rts
 
 ; ============================================================================
 ; $21 — PUSHF (9C)
@@ -2567,43 +2648,104 @@ _ii_not0_count:
         jmp opcode_done
 
 _ii_int21:
-        ; INT 21h — intercept AH=09 (print string), pass rest to DOS
+        ; INT 21h — route console output through con_write_*
         lda reg_ah
+        cmp #$02
+        beq _ii_int21_ah02
+        cmp #$06
+        beq _ii_int21_ah06
         cmp #$09
         beq _ii_int21_ah09
+        cmp #$40
+        beq _ii_int21_ah40
         ; All other functions: let DOS handle via IVT
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
         jmp opcode_done
 
+_ii_int21_ah02:
+        lda reg_dl
+        jsr con_write_char
+        jmp opcode_done
+
+_ii_int21_ah06:
+        lda reg_dl
+        cmp #$FF
+        beq _i21_06_input
+        jsr con_write_char
+        jmp opcode_done
+_i21_06_input:
+        lda #$21
+        jsr do_sw_interrupt
+        jsr compute_cs_base
+        jmp opcode_done
+
 _ii_int21_ah09:
-        ; AH=09: Print string at DS:DX until '$'
-        ; Use $8FD0/$8FD1 as 16-bit offset counter (safe from mem_read8)
+        ; AH=09: Print $-terminated string at DS:DX
+        jsr cache_flush_all
         lda reg_dx
-        sta $8FD0
+        sta temp32
         lda reg_dx+1
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        sta seg_override_en
+        ldx #SEG_DS_OFS
+        jsr seg_ofs_to_linear
+        lda temp32
+        sta $8FD0
+        lda temp32+1
         sta $8FD1
+        lda temp32+2
+        sta $8FD2
 _i21_09_loop:
         lda $8FD0
         sta temp32
         lda $8FD1
         sta temp32+1
-        ldx #SEG_DS_OFS
-        jsr mem_read8           ; A = byte at DS:offset
+        lda $8FD2
+        sta temp32+2
+        lda #0
+        sta temp32+3
+        jsr linear_to_chip
+        ldz #0
+        lda [temp_ptr],z
         cmp #'$'
         beq _i21_09_done
-        ; Output via INT 10h AH=0E teletype path
-        sta reg_al
-        lda #$0E
-        sta reg_ah
-        jsr int10_handler
-        ; Advance offset counter
+        jsr con_write_char
         inc $8FD0
         bne _i21_09_loop
         inc $8FD1
+        bne _i21_09_loop
+        inc $8FD2
         bra _i21_09_loop
 _i21_09_done:
+        jmp opcode_done
+
+_ii_int21_ah40:
+        ; AH=40: Write to file/device — only intercept stdout/stderr
+        lda reg_bx+1
+        bne _i21_40_dos
+        lda reg_bx
+        cmp #$01
+        beq _i21_40_con
+        cmp #$02
+        beq _i21_40_con
+_i21_40_dos:
+        lda #$21
+        jsr do_sw_interrupt
+        jsr compute_cs_base
+        jmp opcode_done
+_i21_40_con:
+        jsr con_write_buffer
+        lda reg_cx
+        sta reg_al
+        lda reg_cx+1
+        sta reg_ah
+        lda #0
+        sta flag_cf
         jmp opcode_done
 
 _ii_int13:
@@ -2622,20 +2764,9 @@ _ii_int16:
         jmp opcode_done
 
 _ii_int29:
-        ; INT 29h — Fast console output (used by FreeDOS printf)
-        ; AL = character to print
+        ; INT 29h — Fast console output — route through con_write_char
         lda reg_al
-        cmp #$0A
-        beq _i29_done           ; Ignore LF — CR already does newline on MEGA65
-        cmp #$0D
-        beq _i29_cr
-        jsr ascii_to_pet
-        jsr chrout_safe
-_i29_done:
-        jmp opcode_done
-_i29_cr:
-        lda #$0D
-        jsr chrout_safe
+        jsr con_write_char
         jmp opcode_done
 
 _ii_int15:
@@ -2846,37 +2977,11 @@ op_emu_special:
         jsr fetch_byte          ; Consume the sub-opcode
         cmp #$00
         bne _emu_sp_done
-        ; 0F 00: Output AL as teletype character
+        ; 0F 00: Output AL — route through con_write_char
         lda reg_al
-        cmp #$1B                ; ESC — start of ANSI sequence, ignore
+        cmp #$1B                ; ESC — ignore
         beq _emu_sp_done
-        cmp #$0A
-        beq _emu_sp_done        ; LF — ignore (CR handles newline)
-        cmp #$0D
-        beq _emu_sp_cr
-        cmp #$08
-        beq _emu_sp_bs
-        cmp #$07
-        beq _emu_sp_done        ; Bell — ignore
-        cmp #$20
-        bcc _emu_sp_done        ; Control chars — ignore
-        ; Printable character: write to screen
-        jsr ascii_to_pet
-        jsr chrout_safe
-        jmp opcode_done
-_emu_sp_cr:
-        lda #$0D
-        jsr chrout_safe
-        jmp opcode_done
-_emu_sp_bs:
-        lda scr_col
-        beq _emu_sp_done
-        dec scr_col
-        jsr calc_scr_ptr
-        lda #$20                ; Erase with space
-        ldz #0
-        sta [temp_ptr],z
-        jsr cursor_update
+        jsr con_write_char
         jmp opcode_done
 _emu_sp_done:
         jmp opcode_done
@@ -3081,7 +3186,14 @@ _idr_call_far_ind:
         lda reg_ip+1
         sta op_result+1
         jsr push_word
-        ; Set new CS:IP
+
+        ; Check if target matches INT 10h or INT 29h IVT vector
+        jsr cf_check_int10
+        bcs _idr_cf_int10
+        jsr cf_check_int29
+        bcs _idr_cf_int29
+
+        ; No hook — set new CS:IP
         lda i_data1
         sta reg_cs
         lda i_data1+1
@@ -3094,6 +3206,16 @@ _idr_call_far_ind:
         sta cs_dirty
         jsr compute_cs_base
         jsr update_opcode_ptr
+        jmp opcode_done
+
+_idr_cf_int10:
+        jsr cf_pop_return
+        jsr int10_handler
+        jmp opcode_done
+_idr_cf_int29:
+        jsr cf_pop_return
+        lda reg_al
+        jsr con_write_char
         jmp opcode_done
 
 _idr_jmp_far_ind:

@@ -129,7 +129,7 @@ INT 10h (Video):
   AH=05 Set active display page     NOT IMPLEMENTED
   AH=06 Scroll up                   PARTIAL (AL=0 clears; AL>0 only adjusts row)
   AH=07 Scroll down                 NOT IMPLEMENTED
-  AH=08 Read char/attr at cursor    NOT IMPLEMENTED (screen read)
+  AH=08 Read char/attr at cursor    IMPLEMENTED (reads guest text page)
   AH=09 Write char/attr at cursor   IMPLEMENTED
   AH=0A Write char only at cursor   IMPLEMENTED (same as 09)
   AH=0E Teletype output             IMPLEMENTED
@@ -161,15 +161,29 @@ INT 12h Memory size                   IMPLEMENTED
 INT 14h Serial port                   NOT IMPLEMENTED (not needed)
 INT 17h Printer                       NOT IMPLEMENTED (not needed)
 INT 19h Reboot                        IMPLEMENTED (halts with message)
-INT 21h AH=09 Print string            INTERCEPTED (fast output)
-INT 29h Fast console output           INTERCEPTED (fast output)
+INT 21h AH=02 Display char            INTERCEPTED → con_write_char
+INT 21h AH=06 Direct console I/O      INTERCEPTED → con_write_char
+INT 21h AH=09 Print string            INTERCEPTED → con_write_char (linear read)
+INT 21h AH=40 Write stdout/stderr     INTERCEPTED → con_write_buffer (cache flush + DMA)
+INT 29h Fast console output           INTERCEPTED → con_write_char
+CALL FAR to INT 10h/29h vectors       INTERCEPTED → int10_handler / con_write_char
+
+CONSOLE RENDERER (con_write_char / con_write_buffer):
+  Single source of truth for all DOS text output.
+  Writes to both guest text page ($18000 char+attr) and MEGA65 screen ($0800).
+  Handles CR (newline), LF (ignored), BS, TAB, BEL, printable ASCII.
+  Uses ascii_to_screenB for MEGA65 charset B lowercase half.
+  con_write_buffer: cache flush → DMA from attic → print from SECTOR_BUF.
 
 KNOWN OUTPUT ISSUE:
-  COMMAND.COM internal commands (ECHO, DIR filenames) use
-  PUSHF/CALL FAR to BIOS INT 10h handler, bypassing INT
-  instruction interception. Characters reach INT 29h for some
-  output (prompt, volume label) but not for ECHO text or
-  filenames. Root cause not yet resolved.
+  DOS 3.3 ECHO and DIR filenames still do not display.
+  Boot text, prompts, volume labels, and file counts work.
+  Root cause: COMMAND.COM's AH=40h stdout writes use a shared
+  formatter buffer in attic RAM. con_write_buffer reads via DMA
+  after cache flush, but gets stale data for ECHO/DIR content.
+  The ECHO text exists in a different buffer region than the
+  formatter ($3F5B). Investigation ongoing — likely a cache
+  coherency issue between guest writes and DMA readback.
 
 CONFIGURATION
 ==============
