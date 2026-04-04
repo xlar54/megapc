@@ -3,7 +3,7 @@
 ; ============================================================================
 ;
 ; CGA text mode: 80×25, character + attribute pairs.
-; CGA buffer at 8086 address $B8000 → bank 2 at $02A000
+; CGA buffer at 8086 address $B8000 → bank 1 at $18000
 ; We periodically refresh the MEGA65 screen from the CGA buffer.
 ;
 ; The MEGA65 screen at $0800 (40-col) or $C000 (80-col) is updated
@@ -21,7 +21,7 @@ init_display:
 ; ============================================================================
 ; refresh_cga — Copy CGA text buffer to MEGA65 screen RAM
 ; ============================================================================
-; Reads 80×25 characters from CGA buffer at $02A000.
+; Reads 80×25 characters from CGA buffer at bank 1 $18000.
 ; CGA format: char, attr, char, attr, ... (4000 bytes for 80×25)
 ; MEGA65 screen at $0800: screen codes only (no attribute byte)
 ;

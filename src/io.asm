@@ -108,7 +108,7 @@ io_write_port:
 ; ============================================================================
 ; INT 10h — Video Services
 ; ============================================================================
-; (cursor position tracked by scr_row/scr_col in chrout_safe)
+; (cursor position tracked by scr_row/scr_col in con_write_char and chrout_safe)
 
 int10_handler:
         lda reg_ah
