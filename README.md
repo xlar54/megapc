@@ -3,6 +3,7 @@
 This is a simple DOS 8086 emulator for the Mega65 computer,
 with 640kb of RAM, and an A and B floppy drive.
 
+***Usage***
 Place disk images on your sd-card in the root, named in ALL CAPS.  After that, its pretty self explanatory.  It will handle disks
 of varying sizes (160k, 180k, 320k, 360k, 720k, 1.44MB)
 
@@ -18,8 +19,8 @@ Known issues:
 
 Due to bios implementations, some dos disks may work, others - especially OEM versions - may not.
 
-**Building**
-I use 64TASS - a terrific cross platform assembler.  Just copy down the repo, run build.bat from the command line and it should generate a d81 in the target folder.
+***Building***
+I use 64TASS - a terrific cross platform assembler.  Just copy down the repo, run build.bat from the DOS command prompt and it should generate a d81 in the target folder.
 
 
 
