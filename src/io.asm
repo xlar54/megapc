@@ -421,7 +421,7 @@ chrout_safe:
         bcc _cs_done
         jsr do_scr_scroll
 _cs_done:
-        rts
+        jmp cursor_update
 
 _cs_cr:
         lda #0
@@ -431,7 +431,7 @@ _cs_cr:
         cmp #SCR_ROWS
         bcc +
         jsr do_scr_scroll
-+       rts
++       jmp cursor_update
 
 _cs_cls:
         ; Clear screen via DMA fill
@@ -450,7 +450,7 @@ _cs_cls:
         lda #0
         sta scr_row
         sta scr_col
-        rts
+        jmp cursor_update
 
 _cs_down:
         inc scr_row
@@ -458,7 +458,7 @@ _cs_down:
         cmp #SCR_ROWS
         bcc +
         jsr do_scr_scroll
-+       rts
++       jmp cursor_update
 
 _cs_right:
         inc scr_col
@@ -467,19 +467,19 @@ _cs_right:
         bcc +
         lda #SCR_COLS-1
         sta scr_col
-+       rts
++       jmp cursor_update
 
 _cs_left:
         lda scr_col
         beq +
         dec scr_col
-+       rts
++       jmp cursor_update
 
 _cs_home:
         lda #0
         sta scr_row
         sta scr_col
-        rts
+        jmp cursor_update
 
 ; --- Calculate screen pointer from scr_row/scr_col ---
 ; Output: temp_ptr = SCREEN_BASE + scr_row * 80 + scr_col
@@ -617,4 +617,138 @@ _pts_lower:
         sbc #$C0                ; $C1→$01, $DA→$1A
 _pts_done:
         rts
+
+; ============================================================================
+; Sprite cursor — uses sprite 0 as a blinking text cursor
+; ============================================================================
+; VIC-IV sprite 0 registers:
+;   $D000 = sprite 0 X low
+;   $D001 = sprite 0 Y
+;   $D010 = sprite X MSB (bit 0 = sprite 0)
+;   $D015 = sprite enable (bit 0 = sprite 0)
+;   $D027 = sprite 0 color
+;   $D01C = sprite multicolor (bit 0 = 0 for hires)
+;   $D017 = sprite Y expand
+;   $D01D = sprite X expand
+;   Sprite pointer at SCREEN_BASE + $3F8 (sprite 0)
+;
+; 80-col mode character cell: 8x8 pixels
+; Screen origin approximately X=80, Y=50 (may need tuning)
+
+CURSOR_X_OFS    = 80            ; X pixel offset to column 0
+CURSOR_Y_OFS    = 37            ; Y pixel offset to row 0
+CURSOR_COLOR    = 5             ; Green
+
+; ============================================================================
+; cursor_init — Set up sprite 0 as text cursor
+; ============================================================================
+cursor_init:
+        ; Set up sprite shape: underscore cursor
+        ; Sprite data is 63 bytes (21 rows × 3 bytes)
+        ; Clear all rows first
+        ldx #62
+        lda #$00
+-       sta cursor_sprite_data,x
+        dex
+        bpl -
+        ; Set bottom row (row 20, bytes 60-62) to underscore
+        lda #$FE                ; 8 pixels wide (left-aligned)
+        sta cursor_sprite_data+60
+        lda #$00
+        sta cursor_sprite_data+61
+        sta cursor_sprite_data+62
+
+        ; Set up SPRPTRADR to point to our sprite pointer table
+        ; Table at cursor_spr_ptrs (16-byte aligned)
+        ; $D06C = low byte, $D06D = high byte, $D06E bit 7 = SPRPTR16
+        lda #<cursor_spr_ptrs
+        sta $D06C
+        lda #>cursor_spr_ptrs
+        sta $D06D
+        lda $D06E
+        ora #$80                ; Set SPRPTR16 bit
+        sta $D06E
+
+        ; Write 16-bit sprite pointer for sprite 0
+        ; Pointer value = cursor_sprite_data / 64
+        ; Split into low byte at cursor_spr_ptrs+0, high at cursor_spr_ptrs+1
+        lda #<(cursor_sprite_data / 64)
+        sta cursor_spr_ptrs
+        lda #>(cursor_sprite_data / 64)
+        sta cursor_spr_ptrs+1
+
+        ; Configure sprite 0
+        lda #CURSOR_COLOR
+        sta $D027               ; Sprite 0 color
+        lda #$00
+        sta $D01C               ; Not multicolor
+        sta $D017               ; No Y expand
+        sta $D01D               ; No X expand
+        lda #$01
+        sta $D015               ; Enable sprite 0
+
+        ; Position cursor at scr_row/scr_col
+        jsr cursor_update
+        rts
+
+; ============================================================================
+; cursor_update — Move sprite to current scr_row/scr_col position
+; ============================================================================
+cursor_update:
+        ; X = CURSOR_X_OFS + scr_col * 8
+        lda scr_col
+        asl
+        asl
+        asl                     ; × 8
+        clc
+        adc #CURSOR_X_OFS
+        sta $D000               ; Sprite 0 X low
+        ; Handle X MSB: if carry set or col >= 23, set bit 0 of $D010
+        lda scr_col
+        cmp #23                 ; col*8 + 80 > 255 when col >= 22
+        bcc _cu_no_msb
+        lda $D010
+        ora #$01
+        sta $D010
+        bra _cu_y
+_cu_no_msb:
+        lda $D010
+        and #$FE
+        sta $D010
+
+_cu_y:
+        ; Y = CURSOR_Y_OFS + scr_row * 8
+        lda scr_row
+        asl
+        asl
+        asl                     ; × 8
+        clc
+        adc #CURSOR_Y_OFS
+        sta $D001               ; Sprite 0 Y
+        rts
+
+; ============================================================================
+; cursor_show / cursor_hide
+; ============================================================================
+cursor_show:
+        lda $D015
+        ora #$01
+        sta $D015
+        rts
+
+cursor_hide:
+        lda $D015
+        and #$FE
+        sta $D015
+        rts
+
+; Sprite pointer table (16-byte aligned, 16 bytes for 8 sprites × 2)
+        .align 16
+cursor_spr_ptrs:
+        .fill 16, 0
+
+; Sprite data must be 64-byte aligned
+        .align 64
+cursor_sprite_data:
+        .fill 64, 0
 

@@ -477,6 +477,9 @@ _mpak_wait:
 ; Saves screen RAM to attic, enables IRQs, shows menu.
 ;
 menu_tab_handler:
+        ; Hide sprite cursor before saving screen
+        jsr cursor_hide
+
         ; Save ZP state (KERNAL IRQs trash $90-$FA)
         ; Save all of ZP $00-$FF to $8F00 area (non-ZP RAM)
         ldx #0

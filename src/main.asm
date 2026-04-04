@@ -306,6 +306,9 @@ _beep_wait:
         lda #$03
         sta $D06A
 
+        ; Initialize sprite cursor
+        jsr cursor_init
+
         ; Enter main emulation loop
         jmp main_loop
 
@@ -358,6 +361,9 @@ _resume_restore_zp:
         sta $D069
         lda #$03
         sta $D06A
+
+        ; Re-init sprite cursor (CINT trashes VIC-IV sprite state)
+        jsr cursor_init
 
         ; Resume main loop (segment bases intact from ZP restore)
         jmp main_loop
