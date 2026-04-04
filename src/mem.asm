@@ -94,13 +94,15 @@ linear_to_chip:
         lda temp32+2
         cmp #$0F
         bcs _ltc_f_seg
+        cmp #$0C
+        beq _ltc_c_seg          ; $C0000-$CFFFF → video alias (8086tiny BIOS)
         cmp #$0B
         bne _ltc_not_b
         ; $B0000-$B7FFF (MDA) and $B8000-$BFFFF (CGA) both map to video buffer
         lda temp32+1
         cmp #$80
         bcs _ltc_cga            ; $B8xxx+ → CGA buffer
-        ; $B0xxx-$B7xxx → MDA buffer (same bank 2 location, offset from $B0000)
+        ; $B0xxx-$B7xxx → MDA buffer (same bank 1 location, offset from $B0000)
         bra _ltc_mda
 _ltc_not_b:
         cmp #$01
@@ -118,30 +120,45 @@ _ltc_not_b:
         rts
 
 _ltc_mda:
-        ; --- $B0000–$B7FFF: Map to bank 2 at $2A000 ---
-        ; MDA uses same physical buffer as CGA
-        ; $B0000 + offset → $02:A000 + offset
+        ; --- $B0000–$B7FFF: Map to bank 1 at $18000 ---
+        ; MDA buffer: $B0000 + offset → $01:8000 + offset
         lda temp32
         sta temp_ptr
         lda temp32+1
         clc
-        adc #$A0                ; $00 + $A0 = $A0 → $2A000
+        adc #$80                ; $00 + $80 = $80 → $18000
         sta temp_ptr+1
-        lda #$02
+        lda #$01
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
         rts
 
 _ltc_cga:
-        ; --- $B8000–$BFFFF: Map to bank 2 at $2A000 ---
+        ; --- $B8000–$BFFFF: Map to bank 1 at $18000 ---
+        ; CGA buffer: $B8000 + offset → $01:8000 + offset
+        ; temp32+1 is $80+ already, which maps directly
+        lda temp32
+        sta temp_ptr
+        lda temp32+1
+        sta temp_ptr+1
+        lda #$01
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        rts
+
+_ltc_c_seg:
+        ; --- $C0000–$C7FFF: Video alias used by 8086tiny BIOS ---
+        ; Maps to same buffer as MDA/CGA at bank 1 $18000
+        ; $C0000 + offset → $01:8000 + offset
         lda temp32
         sta temp_ptr
         lda temp32+1
         clc
-        adc #$20                ; $80 + $20 = $A0 → $2A000
+        adc #$80                ; $00 + $80 = $80 → $18000
         sta temp_ptr+1
-        lda #$02
+        lda #$01
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3

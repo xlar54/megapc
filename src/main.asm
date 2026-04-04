@@ -164,11 +164,6 @@ entry:
         lda #$53
         sta VIC_KEY
 
-        ; Disable ROM write-protect for bank 2 (used for CGA buffer)
-        lda #$70
-        sta $D640
-        clv
-
         ; Map: $0000–$1FFF = bank 0 ZP/stack
         ;       $6000–$7FFF = bank 0 (emulator code continues)
         ;       $8000–$BFFF = unmapped (reads physical bank 0)
@@ -254,7 +249,7 @@ _beep_wait:
         iny
         bne _beep_wait
         inx
-        cpx #$0C
+        cpx #$18
         bne _beep_wait
         ; Gate off
         lda #$40                ; Gate off, pulse waveform

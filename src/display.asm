@@ -28,12 +28,12 @@ init_display:
 ; Converts ASCII→screen codes inline. Runs with IRQs off (no CHROUT).
 ;
 refresh_cga:
-        ; Source: CGA buffer at bank 2, $2A000
+        ; Source: CGA/MDA buffer at bank 1, $18000
         lda #$00
         sta temp_ptr
-        lda #$A0
+        lda #$80
         sta temp_ptr+1
-        lda #$02
+        lda #$01
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3

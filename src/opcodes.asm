@@ -2841,10 +2841,44 @@ _tai_flags:
 ; $30 — Emulator special (0F prefix)
 ; ============================================================================
 op_emu_special:
-        ; 0F prefix is used for 286+ instructions.
-        ; On 8086 this is POP CS — but we use it as our extension prefix.
-        ; For now: skip the next byte and NOP.
+        ; 0F prefix: 8086tiny uses 0F xx as emulator traps.
+        ; 0F 00 = output character in AL to screen (teletype)
         jsr fetch_byte          ; Consume the sub-opcode
+        cmp #$00
+        bne _emu_sp_done
+        ; 0F 00: Output AL as teletype character
+        lda reg_al
+        cmp #$1B                ; ESC — start of ANSI sequence, ignore
+        beq _emu_sp_done
+        cmp #$0A
+        beq _emu_sp_done        ; LF — ignore (CR handles newline)
+        cmp #$0D
+        beq _emu_sp_cr
+        cmp #$08
+        beq _emu_sp_bs
+        cmp #$07
+        beq _emu_sp_done        ; Bell — ignore
+        cmp #$20
+        bcc _emu_sp_done        ; Control chars — ignore
+        ; Printable character: write to screen
+        jsr ascii_to_pet
+        jsr chrout_safe
+        jmp opcode_done
+_emu_sp_cr:
+        lda #$0D
+        jsr chrout_safe
+        jmp opcode_done
+_emu_sp_bs:
+        lda scr_col
+        beq _emu_sp_done
+        dec scr_col
+        jsr calc_scr_ptr
+        lda #$20                ; Erase with space
+        ldz #0
+        sta [temp_ptr],z
+        jsr cursor_update
+        jmp opcode_done
+_emu_sp_done:
         jmp opcode_done
 
 ; ============================================================================

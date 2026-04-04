@@ -149,6 +149,32 @@ _et_loop:
         cpx #20
         bne _et_loop
 
+        ; Patch TBL_XLAT_OP: opcode $0F → xlat $30 (op_emu_special)
+        ; The BIOS decode table maps $0F to $01 (MOV reg,imm) but
+        ; 8086tiny uses $0F as an emulator trap prefix. Patch it to
+        ; our op_emu_special handler so 0F xx traps work.
+        lda #$0F
+        sta temp_ptr
+        lda #>TBL_XLAT_OP
+        sta temp_ptr+1
+        lda #$01                ; Bank 1
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$30
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Patch TBL_BASE_SIZE: opcode $0F → 0 (handler fetches sub-opcode itself)
+        lda #$0F
+        sta temp_ptr
+        lda #>TBL_BASE_SIZE
+        sta temp_ptr+1
+        ; Bank 1 and byte 3 already set from above
+        lda #$00
+        ldz #0
+        sta [temp_ptr],z
+
         ; Print table load confirmation
         ldx #0
 -       lda _tbl_msg,x
