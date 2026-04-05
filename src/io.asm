@@ -239,13 +239,12 @@ _i10_scroll_up:
         rts
 _i10su_scroll:
         ; AL>0: scroll up AL lines
-        tax
+        sta $8FD8               ; Save line count (do_scr_scroll clobbers X)
 _i10su_loop:
-        ; Force do_scr_scroll by setting scr_row to bottom
         lda #SCR_ROWS
         sta scr_row
         jsr do_scr_scroll
-        dex
+        dec $8FD8
         bne _i10su_loop
         rts
 
@@ -260,10 +259,10 @@ _i10_scroll_down:
         rts
 _i10sd_scroll:
         ; AL>0: scroll down AL lines
-        tax
+        sta $8FD8               ; Save count (do_scr_scroll_down clobbers X)
 _i10sd_loop:
         jsr do_scr_scroll_down
-        dex
+        dec $8FD8
         bne _i10sd_loop
         rts
 

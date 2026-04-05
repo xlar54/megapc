@@ -3006,10 +3006,12 @@ _emu_sp_scrollup:
         ; native BIOS output testing. Reverted to standard check.
         lda reg_al
         beq _emu_sp_ret         ; 0 lines = no-op
-        tax
+        sta $8FD8               ; Save count (do_scr_scroll clobbers X)
 _emu_sp_scrollup_loop:
+        lda #SCR_ROWS
+        sta scr_row
         jsr do_scr_scroll
-        dex
+        dec $8FD8
         bne _emu_sp_scrollup_loop
         jmp opcode_done
 
