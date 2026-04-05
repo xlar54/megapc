@@ -280,6 +280,8 @@ mem_read16:
         sta op_source+1
         rts
 _mr16_cross:
+        lda #0
+        sta temp32              ; Offset 0 in new page
         inc temp32+1
         bne +
         inc temp32+2
@@ -345,6 +347,8 @@ mem_write16:
         sta [temp_ptr],z
         rts
 _mw16_cross:
+        lda #0
+        sta temp32              ; Offset 0 in new page
         inc temp32+1
         bne +
         inc temp32+2

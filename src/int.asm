@@ -79,7 +79,9 @@ _pushw_cross:
         bne +
         jsr mark_cache_dirty
 +
-        ; Page boundary: increment linear address and re-resolve
+        ; Page boundary: reset offset to 0, advance page
+        lda #0
+        sta temp32              ; Offset 0 in new page
         inc temp32+1
         bne +
         inc temp32+2
@@ -174,7 +176,9 @@ pop_word:
         bra _popw_sp
 
 _popw_cross:
-        ; Page boundary: increment linear address and re-resolve
+        ; Page boundary: reset offset to 0, advance page
+        lda #0
+        sta temp32
         inc temp32+1
         bne +
         inc temp32+2

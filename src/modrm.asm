@@ -348,11 +348,13 @@ _rrm16_no_cross:
         sta op_source+1
         rts
 _rrm16_cross:
-        ; Save temp32, resolve next byte, restore
+        ; Save temp32, resolve next byte at offset 0 of next page, restore
         lda temp32+1
         sta scratch_a
         lda temp32+2
         sta scratch_b
+        lda #0
+        sta temp32              ; Offset 0 in new page
         inc temp32+1
         bne +
         inc temp32+2
@@ -370,11 +372,11 @@ _rrm16_cross:
         rts
 _rrm16_seg_wrap:
         ; EA offset was $FFFF — second byte wraps to offset $0000 in same segment
-        ; Save temp32 for restore
+        ; Save temp32 on stack (seg_ofs_to_linear clobbers scratch_a/b)
         lda temp32+1
-        sta scratch_a
+        pha
         lda temp32+2
-        sta scratch_b
+        pha
         ; Resolve segment:$0000
         lda #0
         sta temp32
@@ -388,10 +390,10 @@ _rrm16_seg_wrap:
         ; Restore temp32
         lda #$FF
         sta temp32
-        lda scratch_a
-        sta temp32+1
-        lda scratch_b
+        pla
         sta temp32+2
+        pla
+        sta temp32+1
         rts
 _rrm16_reg:
         ldx rm_addr
@@ -477,11 +479,13 @@ _wrm16_no_cross:
         sta [rm_addr],z
         rts
 _wrm16_cross:
-        ; Save temp32 so repeated accesses stay anchored
+        ; Save temp32 on stack (mark_cache_dirty clobbers scratch_a/b)
         lda temp32+1
-        sta scratch_a
+        pha
         lda temp32+2
-        sta scratch_b
+        pha
+        lda #0
+        sta temp32              ; Offset 0 in new page
         inc temp32+1
         bne +
         inc temp32+2
@@ -496,17 +500,18 @@ _wrm16_cross:
 +       ; Restore temp32
         lda #$FF
         sta temp32
-        lda scratch_a
-        sta temp32+1
-        lda scratch_b
+        pla
         sta temp32+2
+        pla
+        sta temp32+1
         rts
 _wrm16_seg_wrap:
         ; EA offset was $FFFF — second byte wraps to offset $0000 in same segment
+        ; Save temp32 on stack (seg_ofs_to_linear clobbers scratch_a/b)
         lda temp32+1
-        sta scratch_a
+        pha
         lda temp32+2
-        sta scratch_b
+        pha
         lda #0
         sta temp32
         sta temp32+1
@@ -523,10 +528,10 @@ _wrm16_seg_wrap:
 +       ; Restore temp32
         lda #$FF
         sta temp32
-        lda scratch_a
-        sta temp32+1
-        lda scratch_b
+        pla
         sta temp32+2
+        pla
+        sta temp32+1
         rts
 _wrm16_rom_skip:
         rts                     ; Silently discard ROM write
