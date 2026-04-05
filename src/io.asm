@@ -124,6 +124,8 @@ int10_handler:
         beq _i10_get_cursor
         cmp #$06
         beq _i10_scroll_up
+        cmp #$07
+        beq _i10_scroll_down
         cmp #$08
         beq _i10_read_char_attr
         cmp #$09
@@ -163,18 +165,14 @@ _i10_set_cursor_shape:
         lda reg_ch
         and #$20
         bne _i10_hide_cur
-        ; Visible: determine shape from start scan line
-        ; Block: start <= 3 (covers most/all of cell)
-        ; Underline: start >= 4 (just bottom portion)
+        ; Visible: set shape from scan line range
         lda reg_ch
-        and #$1F                ; Mask off control bits
-        cmp #$04
-        bcs _i10_underline
-        jsr cursor_set_block
-        jsr cursor_show
-        rts
-_i10_underline:
-        jsr cursor_set_underline
+        and #$1F                ; Start scan line (0-7)
+        sta scratch_c           ; Save start
+        lda reg_cl
+        and #$1F                ; End scan line (0-7)
+        sta scratch_d           ; Save end
+        jsr cursor_set_shape
         jsr cursor_show
         rts
 _i10_hide_cur:
@@ -230,21 +228,43 @@ _i10_get_cursor:
         rts
 
 _i10_scroll_up:
-        ; AH=06: Scroll up — AL=lines (0=clear)
+        ; AH=06: Scroll up — AL=lines (0=clear entire window)
         lda reg_al
         bne _i10su_scroll
-        ; AL=0: clear window — just clear screen
+        ; AL=0: clear window — clear screen
         lda #$93
         jsr chrout_safe
+        ; Also clear guest video buffer
+        jsr clear_vidbuf
         rts
 _i10su_scroll:
-        ; AL>0: scroll up — adjust row tracking
-        sec
-        lda scr_row
-        sbc reg_al
-        bcs +
-        lda #0
-+       sta scr_row
+        ; AL>0: scroll up AL lines
+        tax
+_i10su_loop:
+        ; Force do_scr_scroll by setting scr_row to bottom
+        lda #SCR_ROWS
+        sta scr_row
+        jsr do_scr_scroll
+        dex
+        bne _i10su_loop
+        rts
+
+_i10_scroll_down:
+        ; AH=07: Scroll down — AL=lines (0=clear entire window)
+        lda reg_al
+        bne _i10sd_scroll
+        ; AL=0: clear window
+        lda #$93
+        jsr chrout_safe
+        jsr clear_vidbuf
+        rts
+_i10sd_scroll:
+        ; AL>0: scroll down AL lines
+        tax
+_i10sd_loop:
+        jsr do_scr_scroll_down
+        dex
+        bne _i10sd_loop
         rts
 
 _i10_read_char_attr:
@@ -660,6 +680,163 @@ _scr_scroll_vbuf_clr:
 do_scr_scroll_done:
         rts
 
+; ============================================================================
+; do_scr_scroll_down — Scroll screen DOWN one line
+; ============================================================================
+; Moves rows 0-23 down to rows 1-24, clears row 0.
+; Scrolls both MEGA65 screen and guest video buffer.
+;
+do_scr_scroll_down:
+        ; === Scroll MEGA65 screen DOWN ===
+        ; Copy rows 0-23 down to rows 1-24 (1920 bytes, one row at a time)
+        ; Work from bottom to top to avoid overlap corruption
+        ldx #24                 ; 24 rows to copy
+        lda #<(SCREEN_BASE+1920) ; Start at row 24 dest
+        sta dma_dst_lo
+        lda #>(SCREEN_BASE+1920)
+        sta dma_dst_hi
+        lda #<(SCREEN_BASE+1840) ; Source = row 23
+        sta dma_src_lo
+        lda #>(SCREEN_BASE+1840)
+        sta dma_src_hi
+_ssd_scr_loop:
+        lda #$00
+        sta dma_src_bank
+        sta dma_dst_bank
+        lda #SCR_COLS
+        sta dma_count_lo
+        lda #$00
+        sta dma_count_hi
+        jsr do_dma_chip_copy
+        ; Move source and dest up one row (subtract 80)
+        sec
+        lda dma_dst_lo
+        sbc #SCR_COLS
+        sta dma_dst_lo
+        lda dma_dst_hi
+        sbc #0
+        sta dma_dst_hi
+        sec
+        lda dma_src_lo
+        sbc #SCR_COLS
+        sta dma_src_lo
+        lda dma_src_hi
+        sbc #0
+        sta dma_src_hi
+        dex
+        bne _ssd_scr_loop
+        ; Clear top row
+        lda #$00
+        sta $D707
+        .byte $80, $00
+        .byte $81, $00
+        .byte $00
+        .byte $03               ; FILL
+        .word SCR_COLS
+        .word $0020             ; Space
+        .byte $00
+        .word SCREEN_BASE       ; Row 0
+        .byte $00
+        .byte $00, $00, $00
+
+        ; === Scroll guest video buffer DOWN ===
+        ; Same approach: one row at a time, bottom to top
+        ldx #24
+        lda #<($8000+3840)      ; Dest = row 24
+        sta dma_dst_lo
+        lda #>($8000+3840)
+        sta dma_dst_hi
+        lda #<($8000+3680)      ; Source = row 23
+        sta dma_src_lo
+        lda #>($8000+3680)
+        sta dma_src_hi
+_ssd_vbuf_loop:
+        lda #$01
+        sta dma_src_bank
+        sta dma_dst_bank
+        lda #<160
+        sta dma_count_lo
+        lda #$00
+        sta dma_count_hi
+        jsr do_dma_chip_copy
+        ; Move up one row (subtract 160)
+        sec
+        lda dma_dst_lo
+        sbc #<160
+        sta dma_dst_lo
+        lda dma_dst_hi
+        sbc #>160
+        sta dma_dst_hi
+        sec
+        lda dma_src_lo
+        sbc #<160
+        sta dma_src_lo
+        lda dma_src_hi
+        sbc #>160
+        sta dma_src_hi
+        dex
+        bne _ssd_vbuf_loop
+        ; Clear top row of video buffer
+        lda #<$8000
+        sta temp_ptr2
+        lda #>$8000
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+        ldx #80
+_ssd_vbuf_clr:
+        lda #$20
+        ldz #0
+        sta [temp_ptr2],z
+        lda #CON_ATTR
+        ldz #1
+        sta [temp_ptr2],z
+        clc
+        lda temp_ptr2
+        adc #2
+        sta temp_ptr2
+        bcc +
+        inc temp_ptr2+1
++       dex
+        bne _ssd_vbuf_clr
+        rts
+
+; ============================================================================
+; clear_vidbuf — Clear entire guest video buffer
+; ============================================================================
+clear_vidbuf:
+        lda #<$8000
+        sta temp_ptr2
+        lda #>$8000
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+        ldx #0                  ; 256 iterations × 2 passes = 2000 chars (close enough for 80x25)
+        ldy #2                  ; 2 passes of 256
+_cv_outer:
+_cv_loop:
+        lda #$20
+        ldz #0
+        sta [temp_ptr2],z
+        lda #CON_ATTR
+        ldz #1
+        sta [temp_ptr2],z
+        clc
+        lda temp_ptr2
+        adc #2
+        sta temp_ptr2
+        bcc +
+        inc temp_ptr2+1
++       dex
+        bne _cv_loop
+        dey
+        bne _cv_outer
+        rts
+
 ; Screen position tracking
 scr_row         .byte 0
 scr_col         .byte 0
@@ -935,20 +1112,8 @@ CURSOR_COLOR    = 5             ; Green
 ; cursor_init — Set up sprite 0 as text cursor
 ; ============================================================================
 cursor_init:
-        ; Set up sprite shape: underscore cursor
-        ; Sprite data is 63 bytes (21 rows × 3 bytes)
-        ; Clear all rows first
-        ldx #62
-        lda #$00
--       sta cursor_sprite_data,x
-        dex
-        bpl -
-        ; Set bottom row (row 20, bytes 60-62) to underscore
-        lda #$FE                ; 8 pixels wide (left-aligned)
-        sta cursor_sprite_data+60
-        lda #$00
-        sta cursor_sprite_data+61
-        sta cursor_sprite_data+62
+        ; Set up sprite shape: underscore cursor (scan lines 6-7)
+        jsr cursor_set_underline
 
         ; Set up SPRPTRADR to point to our sprite pointer table
         ; Table at cursor_spr_ptrs (16-byte aligned)
@@ -1037,36 +1202,60 @@ cursor_hide:
 ; ============================================================================
 ; cursor_set_underline / cursor_set_block — Change sprite shape
 ; ============================================================================
-cursor_set_underline:
-        ; Clear all rows, set only bottom row
-        ldx #62
-        lda #$00
--       sta cursor_sprite_data,x
-        dex
-        bpl -
-        lda #$FE                ; 8 pixels wide
-        sta cursor_sprite_data+60
-        rts
-
-cursor_set_block:
+cursor_set_shape:
+        ; Set cursor sprite shape from scan line range
+        ; Input: scratch_c = start scan line (0-7), scratch_d = end scan line (0-7)
+        ; Maps 8 PC scan lines onto sprite rows 13-20 (bottom 8 of 21)
         ; Clear entire sprite first
         ldx #62
         lda #$00
 -       sta cursor_sprite_data,x
         dex
         bpl -
-        ; Fill bottom 8 rows (rows 13-20): set first byte to $FE (8 pixels)
-        ; Row 13 starts at byte 13*3 = 39
-        ldx #39
-        ldy #8
--       lda #$FE
+        ; Clamp start/end to 0-7
+        lda scratch_c
+        cmp #8
+        bcc +
+        lda #7
++       sta scratch_c
+        lda scratch_d
+        cmp #8
+        bcc +
+        lda #7
++       sta scratch_d
+        ; Fill rows from start to end (inclusive)
+        ; Sprite row = 13 + scan_line, byte offset = row * 3
+        lda scratch_c           ; Start scan line
+        clc
+        adc #13                 ; Map to sprite row
+        ; Multiply by 3: row*3 = row*2 + row
+        sta scratch_a
+        asl                     ; ×2
+        clc
+        adc scratch_a           ; ×3
+        tax                     ; X = byte offset of first row
+        lda scratch_d
+        sec
+        sbc scratch_c           ; End - start
+        tay
+        iny                     ; Count = end - start + 1
+_css_fill:
+        lda #$FE                ; 8 pixels wide
         sta cursor_sprite_data,x
         inx
         inx
         inx                     ; Next row (3 bytes per row)
         dey
-        bne -
+        bne _css_fill
         rts
+
+cursor_set_underline:
+        ; Convenience: set underline (scan lines 6-7)
+        lda #6
+        sta scratch_c
+        lda #7
+        sta scratch_d
+        jmp cursor_set_shape
 
 ; Sprite pointer table (16-byte aligned, 16 bytes for 8 sprites × 2)
         .align 16
