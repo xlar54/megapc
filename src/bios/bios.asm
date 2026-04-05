@@ -91,6 +91,19 @@ main:
 ; These values (BIOS ID string, BIOS date and so forth) go at the very top of memory
 
 biosstr	db	'8086tiny BIOS Revision 1.61!', 0, 0		; Why not?
+
+; System configuration table for INT 15h AH=C0
+; Located at a known offset in BIOS ROM for ES:BX return
+sys_config_table:
+	dw	8			; Table length (8 bytes following)
+	db	0xFE			; Model: XT
+	db	0x00			; Sub-model
+	db	0x00			; BIOS revision
+	db	0x00			; Feature flags (no special features)
+	db	0x00			; Reserved
+	db	0x00			; Reserved
+	db	0x00			; Reserved
+	db	0x00			; Reserved
 mem_top	db	0xea, 0, 0x01, 0, 0xf0, '03/08/14', 0, 0xfe, 0
 
 bios_entry:

@@ -2776,6 +2776,8 @@ _ii_int15:
         jmp opcode_done
 _i15_not88:
         lda reg_ah
+        cmp #$C0
+        beq _i15_sys_config
         cmp #$90
         beq _i15_device_wait    ; AH=90: Device busy (wait)
         cmp #$91
@@ -2785,6 +2787,22 @@ _i15_not88:
         sta reg_ah
         lda #1
         sta flag_cf             ; CF=1 error
+        jmp opcode_done
+
+_i15_sys_config:
+        ; AH=C0: Get system configuration table
+        ; Return ES:BX pointing to config table in BIOS ROM
+        lda #$00
+        sta reg_es              ; ES = $F000
+        lda #$F0
+        sta reg_es+1
+        lda #$4C                ; BX = $014C (offset of sys_config_table)
+        sta reg_bx
+        lda #$01
+        sta reg_bx+1
+        lda #0
+        sta reg_ah              ; AH=0 success
+        sta flag_cf             ; CF=0
         jmp opcode_done
 
 _i15_device_wait:
