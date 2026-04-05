@@ -79,22 +79,8 @@ _i13_get_type:
         sta flag_cf
         rts
 _i13_gt_floppy:
-        ; Check if drive is loaded
-        cmp #$01
-        beq _i13_gt_check_b
-        lda floppy_a_loaded
-        bra _i13_gt_check
-_i13_gt_check_b:
-        lda floppy_b_loaded
-_i13_gt_check:
-        beq _i13_gt_no_drive    ; Not loaded → no drive
+        ; Drive exists (hardware always present), disk may or may not be inserted
         lda #$01                ; Floppy without change-line
-        sta reg_ah
-        lda #0
-        sta flag_cf
-        rts
-_i13_gt_no_drive:
-        lda #$00                ; No drive
         sta reg_ah
         lda #0
         sta flag_cf
