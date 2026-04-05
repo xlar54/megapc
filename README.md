@@ -15,13 +15,15 @@ Different version of DOS give mixed results. Im working on improving. Please lea
 Known issues:
 * Freedos does some decompression and writing to higher ram, and seems to have an issue.  Working on this.
 
-* MS-DOS 3.3 (the standard Im aiming to fully support) also has an issue on how it outputs some commands to screen.  DIR and ECHO seem to print empty spaces.  This one is high priority.
-
 Due to bios implementations, some dos disks may work, others - especially OEM versions - may not.
 
 ***Building***
 I use 64TASS - a terrific cross platform assembler.  Just copy down the repo, run build.bat from the DOS command prompt and it should generate a d81 in the target folder.  You also need NASM installed in order to build the bios.bin file.
 
+***credits***
+Modified Tiny86 bios source from https://github.com/xrip/tiny8086-sdl2-win32/tree/main
+
+ClaudeAI for much else
 
 
 
