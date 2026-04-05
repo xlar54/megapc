@@ -543,6 +543,8 @@ do_scr_scroll:
         lda scr_row
         cmp #SCR_ROWS
         bcc do_scr_scroll_done     ; Not past bottom, no scroll needed
+
+        ; === Scroll MEGA65 screen ($0800) ===
         ; DMA copy: row 1-24 → row 0-23 (1920 bytes = 24*80)
         lda #$00
         sta $D707
@@ -569,6 +571,48 @@ do_scr_scroll:
         .word SCREEN_BASE+1920  ; Dest = row 24
         .byte $00
         .byte $00, $00, $00
+
+        ; === Scroll guest video buffer ($18000, bank 1) ===
+        ; 160 bytes/row (80 chars × 2 bytes each: char + attr)
+        ; DMA copy: row 1-24 → row 0-23 (3840 bytes = 24*160)
+        lda #$00
+        sta $D707
+        .byte $80, $00          ; Source MB = 0
+        .byte $81, $00          ; Dest MB = 0
+        .byte $00               ; End options
+        .byte $00               ; Command = COPY
+        .word 3840              ; Count = 24 * 160
+        .word $80A0             ; Source = $18000 + 160 (row 1)
+        .byte $01               ; Source bank 1
+        .word $8000             ; Dest = $18000 (row 0)
+        .byte $01               ; Dest bank 1
+        .byte $00, $00, $00     ; Modulo
+        ; Clear last row of video buffer (80 char+attr pairs)
+        lda #<($8000+3840)      ; $8F00
+        sta temp_ptr2
+        lda #>($8000+3840)      ; $8F
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+        ldx #80
+_scr_scroll_vbuf_clr:
+        lda #$20                ; Space character
+        ldz #0
+        sta [temp_ptr2],z
+        lda #CON_ATTR           ; Default attribute ($07)
+        ldz #1
+        sta [temp_ptr2],z
+        clc
+        lda temp_ptr2
+        adc #2
+        sta temp_ptr2
+        bcc +
+        inc temp_ptr2+1
++       dex
+        bne _scr_scroll_vbuf_clr
+
         lda #SCR_ROWS-1
         sta scr_row             ; Cursor on last row
 do_scr_scroll_done:
