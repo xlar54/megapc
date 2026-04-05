@@ -2404,6 +2404,8 @@ op_daa_das:
         ; DAS
         lda reg_al
         sta op_dest
+        lda flag_cf
+        sta scratch_d           ; Save old CF
         lda #0
         sta flag_cf
         ; If low nibble > 9 or AF set
@@ -2420,16 +2422,17 @@ _das_adj_lo:
         sta reg_al
         lda #1
         sta flag_af
-        ; CF might be set from borrow
+        ; CF = old_CF OR borrow
         bcs +
         lda #1
         sta flag_cf
 +
 _das_check_hi:
+        ; Check old AL > $99 OR old CF
         lda op_dest
         cmp #$9A
         bcs _das_adj_hi
-        lda flag_cf
+        lda scratch_d           ; Check OLD CF (not current)
         beq _das_done
 _das_adj_hi:
         sec
@@ -2449,6 +2452,8 @@ _das_done:
 _daa:
         lda reg_al
         sta op_dest
+        lda flag_cf
+        sta scratch_d           ; Save old CF
         lda #0
         sta flag_cf
         lda reg_al
@@ -2464,15 +2469,17 @@ _daa_adj_lo:
         sta reg_al
         lda #1
         sta flag_af
+        ; CF = old_CF OR carry
         bcc +
         lda #1
         sta flag_cf
 +
 _daa_check_hi:
+        ; Check old AL > $99 OR old CF
         lda op_dest
         cmp #$9A
         bcs _daa_adj_hi
-        lda flag_cf
+        lda scratch_d           ; Check OLD CF (not current)
         beq _daa_done
 _daa_adj_hi:
         clc
@@ -2502,7 +2509,12 @@ op_aaa_aas:
         cmp #$0A
         bcs _aas_adj
         lda flag_af
-        beq _aas_done
+        bne _aas_adj
+        ; No adjustment: clear AF and CF
+        lda #0
+        sta flag_af
+        sta flag_cf
+        bra _aas_done
 _aas_adj:
         sec
         lda reg_al
@@ -2524,7 +2536,12 @@ _aaa:
         cmp #$0A
         bcs _aaa_adj
         lda flag_af
-        beq _aaa_done
+        bne _aaa_adj
+        ; No adjustment: clear AF and CF
+        lda #0
+        sta flag_af
+        sta flag_cf
+        bra _aaa_done
 _aaa_adj:
         clc
         lda reg_al

@@ -238,6 +238,15 @@ _i10wa_cap:
 _i10wa_go:
         tax
 _i10wa_loop:
+        ; Write to guest video buffer (for AH=08 readback)
+        jsr cwc_calc_vidbuf
+        lda reg_al
+        ldz #0
+        sta [temp_ptr2],z
+        lda reg_bl              ; Attribute from BL (AH=09) or default (AH=0A)
+        ldz #1
+        sta [temp_ptr2],z
+        ; Write to MEGA65 screen
         jsr calc_scr_ptr
         lda scratch_d
         ldz #0
