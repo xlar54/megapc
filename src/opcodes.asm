@@ -2648,7 +2648,7 @@ _ii_not0_count:
         jmp opcode_done
 
 _ii_int21:
-        ; INT 21h — route console output through con_write_*
+        ; Intercept console output functions. All else goes to DOS.
         lda reg_ah
         cmp #$02
         beq _ii_int21_ah02
@@ -2656,9 +2656,7 @@ _ii_int21:
         beq _ii_int21_ah06
         cmp #$09
         beq _ii_int21_ah09
-        cmp #$40
-        beq _ii_int21_ah40
-        ; All other functions: let DOS handle via IVT
+        ; All other INT 21h functions: let DOS handle via IVT
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -2724,29 +2722,6 @@ _i21_09_loop:
 _i21_09_done:
         jmp opcode_done
 
-_ii_int21_ah40:
-        ; AH=40: Write to file/device — only intercept stdout/stderr
-        lda reg_bx+1
-        bne _i21_40_dos
-        lda reg_bx
-        cmp #$01
-        beq _i21_40_con
-        cmp #$02
-        beq _i21_40_con
-_i21_40_dos:
-        lda #$21
-        jsr do_sw_interrupt
-        jsr compute_cs_base
-        jmp opcode_done
-_i21_40_con:
-        jsr con_write_buffer
-        lda reg_cx
-        sta reg_al
-        lda reg_cx+1
-        sta reg_ah
-        lda #0
-        sta flag_cf
-        jmp opcode_done
 
 _ii_int13:
         ; INT 13h — disk services (intercepted)
@@ -2764,7 +2739,7 @@ _ii_int16:
         jmp opcode_done
 
 _ii_int29:
-        ; INT 29h — Fast console output — route through con_write_char
+        ; INT 29h — Fast console output
         lda reg_al
         jsr con_write_char
         jmp opcode_done
@@ -2973,17 +2948,79 @@ _tai_flags:
 ; ============================================================================
 op_emu_special:
         ; 0F prefix: 8086tiny uses 0F xx as emulator traps.
-        ; 0F 00 = output character in AL to screen (teletype)
         jsr fetch_byte          ; Consume the sub-opcode
         cmp #$00
-        bne _emu_sp_done
-        ; 0F 00: Output AL — route through con_write_char
+        beq _emu_sp_putchar
+        cmp #$04
+        beq _emu_sp_setcursor
+        cmp #$05
+        beq _emu_sp_scrollup
+        cmp #$06
+        beq _emu_sp_scrolldown
+        cmp #$07
+        beq _emu_sp_clearscr
+        cmp #$08
+        beq _emu_sp_showcur
+        cmp #$09
+        beq _emu_sp_hidecur
+        ; 0F 01 (RTC), 0F 02/03 (disk) — ignore on our emulator
+        jmp opcode_done
+
+_emu_sp_putchar:
+        ; 0F 00: Output AL via con_write_char
         lda reg_al
         cmp #$1B                ; ESC — ignore
-        beq _emu_sp_done
+        beq _emu_sp_ret
         jsr con_write_char
         jmp opcode_done
-_emu_sp_done:
+
+_emu_sp_setcursor:
+        ; 0F 04: Set cursor position — DH=row, DL=col
+        lda reg_dh
+        sta scr_row
+        lda reg_dl
+        sta scr_col
+        jsr cursor_update
+        jmp opcode_done
+
+_emu_sp_scrollup:
+        ; 0F 05: Scroll up — AL=lines, CH/CL=start, DH/DL=end, BH=attr
+        ; DEAD CODE NOTE: forced scroll (lda #SCR_ROWS / sta scr_row) was from
+        ; native BIOS output testing. Reverted to standard check.
+        lda reg_al
+        beq _emu_sp_ret         ; 0 lines = no-op
+        tax
+_emu_sp_scrollup_loop:
+        jsr do_scr_scroll
+        dex
+        bne _emu_sp_scrollup_loop
+        jmp opcode_done
+
+_emu_sp_scrolldown:
+        ; 0F 06: Scroll down — not implemented yet, just ignore
+        jmp opcode_done
+
+_emu_sp_clearscr:
+        ; 0F 07: Clear screen — BH=fill attribute
+        lda #$93                ; PETSCII clear screen
+        jsr chrout_safe
+        lda #0
+        sta scr_row
+        sta scr_col
+        jsr cursor_update
+        jmp opcode_done
+
+_emu_sp_showcur:
+        ; 0F 08: Show cursor
+        jsr cursor_show
+        jmp opcode_done
+
+_emu_sp_hidecur:
+        ; 0F 09: Hide cursor
+        jsr cursor_hide
+        jmp opcode_done
+
+_emu_sp_ret:
         jmp opcode_done
 
 ; ============================================================================

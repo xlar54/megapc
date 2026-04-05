@@ -636,7 +636,21 @@ con_write_char:
         bcc _cwc_done           ; Other control chars — ignore
 
         ; --- Printable character ---
+        ; DEBUG: save row/col/char to $8F9A (if $8F9A == $FF)
         pha
+        lda $8F9A
+        cmp #$FF
+        bne _cwc_no_dbg
+        pla
+        pha
+        sta $8F9D               ; Character
+        lda scr_row
+        sta $8F9B               ; Row
+        lda scr_col
+        sta $8F9C               ; Col
+        lda #$00
+        sta $8F9A               ; Disarm
+_cwc_no_dbg:
 
         ; Write to guest text page
         jsr cwc_calc_vidbuf
@@ -671,18 +685,19 @@ _cwc_done:
         jmp cursor_update
 
 _cwc_cr:
+        ; Carriage return: column 0 only, no row advance
         lda #0
         sta scr_col
+        jmp cursor_update
+
+_cwc_lf:
+        ; Line feed: advance row
         inc scr_row
         lda scr_row
         cmp #SCR_ROWS
         bcc +
         jsr do_scr_scroll
 +       jmp cursor_update
-
-_cwc_lf:
-        ; Line feed: ignore (CR already handles newline)
-        rts
 
 _cwc_bs:
         lda scr_col
@@ -793,192 +808,13 @@ cwc_calc_vidbuf:
         sta temp_ptr2+3
         rts
 
+; con_write_buffer removed — was dead code due to unresolved cache
+; coherency issue. AH=40h now handled by DOS natively.
+
 ; ============================================================================
-; con_write_buffer — Write CX bytes from DS:DX to console
+; Sprite cursor — uses sprite 0 as a blinking text cursor
 ; ============================================================================
-; Input: DS:DX, CX = 8086 registers
-; Flushes cache, computes linear address, reads via DMA or cache,
-; outputs each byte via con_write_char.
-;
-con_write_buffer:
-        lda reg_cx
-        ora reg_cx+1
-        beq cwb_done
-
-        jsr cache_flush_all
-
-        ; Compute linear base address from DS:DX
-        lda reg_dx
-        sta temp32
-        lda reg_dx+1
-        sta temp32+1
-        lda #0
-        sta temp32+2
-        sta temp32+3
-        ldx #SEG_DS_OFS
-        lda #0
-        sta seg_override_en
-        jsr seg_ofs_to_linear
-
-        ; Save linear base
-        lda temp32
-        sta $8FD0
-        lda temp32+1
-        sta $8FD1
-        lda temp32+2
-        sta $8FD2
-
-        ; Total remaining count
-        lda reg_cx
-        sta $8FD3
-        lda reg_cx+1
-        sta $8FD4
-
-        lda #0
-        sta $8FD6               ; SECTOR_BUF index
-
-cwb_page_loop:
-        lda $8FD3
-        ora $8FD4
-        beq cwb_snapshot_done
-
-        ; Chunk = min(remaining, bytes_left_in_page)
-        lda #$00
-        sec
-        sbc $8FD0
-        beq _cwb_full_pg
-        cmp $8FD3
-        bcc _cwb_chunk_ok
-        lda $8FD4
-        bne _cwb_chunk_ok2
-        lda $8FD3
-        bra _cwb_chunk_ok
-_cwb_full_pg:
-        lda #$80
-        cmp $8FD3
-        bcc _cwb_chunk_ok
-        lda $8FD4
-        bne _cwb_chunk_ok2
-        lda $8FD3
-        bra _cwb_chunk_ok
-_cwb_chunk_ok2:
-        lda #$00
-        sec
-        sbc $8FD0
-        beq +
-        bra _cwb_chunk_ok
-+       lda #$80
-_cwb_chunk_ok:
-        sta $8FD5
-
-        ; Is this attic range?
-        lda $8FD2
-        cmp #$01
-        bcc _cwb_pg_direct
-        cmp #$0F
-        bcs _cwb_pg_direct
-
-        ; Attic: DMA from attic to SECTOR_BUF
-        lda $8FD0
-        sta dma_src_lo
-        lda $8FD1
-        sta dma_src_hi
-        lda $8FD2
-        sta dma_src_bank
-        clc
-        lda #<SECTOR_BUF
-        adc $8FD6
-        sta dma_dst_lo
-        lda #>SECTOR_BUF
-        adc #0
-        sta dma_dst_hi
-        lda #$00
-        sta dma_dst_bank
-        lda $8FD5
-        sta dma_count_lo
-        lda #$00
-        sta dma_count_hi
-        jsr do_dma_from_attic
-        bra _cwb_pg_advance
-
-_cwb_pg_direct:
-        ; Non-attic: byte-by-byte via linear_to_chip
-        ldx #0
-        ldy $8FD6
-_cwb_pg_dloop:
-        lda $8FD0
-        sta temp32
-        lda $8FD1
-        sta temp32+1
-        lda $8FD2
-        sta temp32+2
-        lda #0
-        sta temp32+3
-        phx
-        phy
-        jsr linear_to_chip
-        ldz #0
-        lda [temp_ptr],z
-        ply
-        plx
-        sta SECTOR_BUF,y
-        iny
-        inc $8FD0
-        bne +
-        inc $8FD1
-        bne +
-        inc $8FD2
-+       inx
-        cpx $8FD5
-        bne _cwb_pg_dloop
-        bra _cwb_pg_advance     ; Skip linear advance (done in loop)
-
-_cwb_pg_advance:
-        ; Advance SECTOR_BUF index
-        clc
-        lda $8FD6
-        adc $8FD5
-        sta $8FD6
-
-        ; Advance linear address (for DMA path only)
-        clc
-        lda $8FD0
-        adc $8FD5
-        sta $8FD0
-        lda $8FD1
-        adc #0
-        sta $8FD1
-        lda $8FD2
-        adc #0
-        sta $8FD2
-
-        ; Subtract from remaining
-        sec
-        lda $8FD3
-        sbc $8FD5
-        sta $8FD3
-        lda $8FD4
-        sbc #0
-        sta $8FD4
-
-        jmp cwb_page_loop
-
-cwb_snapshot_done:
-        ; Phase 2: Print from SECTOR_BUF
-        ldx #0
-_cwb_print:
-        cpx $8FD6
-        bcs cwb_done
-        lda SECTOR_BUF,x
-        phx
-        jsr con_write_char
-        plx
-        inx
-        bra _cwb_print
-
-cwb_done:
-        rts
-
+; (con_write_buffer function removed — dead code, cache coherency issue)
 ; ============================================================================
 ; Sprite cursor — uses sprite 0 as a blinking text cursor
 ; ============================================================================

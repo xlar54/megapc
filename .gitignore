@@ -2,3 +2,4 @@
 *.lst
 .claude/*
 target/emu8086.d81
+ai_work/

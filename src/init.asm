@@ -46,11 +46,11 @@ init_tables:
         ldy #>_bios_fname
         jsr SETNAM
 
-        ; Load BIOS to bank 5 at $0000 (linear $50000 = F000:0000)
+        ; Load BIOS to bank 5 at $0100 (linear $50100 = F000:0100)
         ; A=$40 = MEGA65 KERNAL: force load to X/Y address, ignore file header
         lda #$40
         ldx #$00                ; Load address low
-        ldy #$01                ; Load address high ($0000 in bank 5)
+        ldy #$01                ; Load address high ($0100 in bank 5)
         jsr LOAD
 
         pha
@@ -77,14 +77,13 @@ init_tables:
         tsb VIC_HOTREGS         ; Re-disable hot registers
 
         ; --- Extract decode tables ---
-        ; BIOS register file base is at $50000 (F000:0000)
-        ; Table pointers start at $50000 + $102 = $50102
-        ; Each table pointer is a 16-bit offset from register file base
-        ; We have 20 tables, each 256 bytes
+        ; BIOS loaded at $50100 (org 100h). Table pointers at $50102.
+        ; Each pointer is a 16-bit offset within F000 segment.
+        ; We have 20 tables, each 256 bytes.
         ;
         ; Read pointer for table 0:
         ;   ptr = word at $50102
-        ;   table_data = $50000 + ptr
+        ;   table_data = $50000 + ptr  (ptr already includes $100 base)
         ;   DMA copy 256 bytes to TBL_BASE + (0 * 256)
 
         ldx #0                  ; Table index (0–19)
@@ -261,7 +260,7 @@ _cga_loop:
         sta [temp_ptr],z
 
         ; --- Write reset vector at F000:FFF0 ($5FFF0) ---
-        ; JMP FAR F000:0100 = EA 00 01 00 F0
+        ; JMP FAR F000:015C = EA 5C 01 00 F0
         ; NOTE: [ptr],z only works reliably with Z=0 on MEGA65/XEMU
         ; So we increment the pointer for each byte
         lda #$F0
@@ -277,10 +276,10 @@ _cga_loop:
         lda #$EA                ; JMP FAR opcode
         sta [temp_ptr],z
         inc temp_ptr            ; $5FFF1
-        lda #$00                ; Offset low = $00
+        lda #$5C                ; Offset low = $5C
         sta [temp_ptr],z
         inc temp_ptr            ; $5FFF2
-        lda #$01                ; Offset high = $01 (F000:0100)
+        lda #$01                ; Offset high = $01 (F000:015C)
         sta [temp_ptr],z
         inc temp_ptr            ; $5FFF3
         lda #$00                ; Segment low = $00
@@ -289,45 +288,91 @@ _cga_loop:
         lda #$F0                ; Segment high = $F0 (F000)
         sta [temp_ptr],z
 
-        ; Fill IVT: each entry = $FF00 (IP), $F000 (CS)
-        lda #$00
-        sta temp_ptr
-        lda #$00
-        sta temp_ptr+1
-        lda #$04                ; Bank 4
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        ; --- Fill IVT from BIOS int_table (DISABLED — BIOS does this itself) ---
+        ; First, clear all 256 IVT entries to F000:FF00 (default IRET)
+        ;lda #$00
+        ;sta temp_ptr
+        ;sta temp_ptr+1
+        ;lda #$04                ; Bank 4
+        ;sta temp_ptr+2
+        ;lda #$00
+        ;sta temp_ptr+3
+        ;ldy #0
+;_ivt_clear:
+        ;lda #$00
+        ;ldz #0
+        ;sta [temp_ptr],z
+        ;lda #$FF
+        ;ldz #1
+        ;sta [temp_ptr],z
+        ;lda #$00
+        ;ldz #2
+        ;sta [temp_ptr],z
+        ;lda #$F0
+        ;ldz #3
+        ;sta [temp_ptr],z
+        ;clc
+        ;lda temp_ptr
+        ;adc #4
+        ;sta temp_ptr
+        ;bcc +
+        ;inc temp_ptr+1
+;+       iny
+        ;bne _ivt_clear
 
-        ldy #0                  ; Counter: 0–255
-_ivt_loop:
-        ; IP low
-        lda #$00
-        ldz #0
-        sta [temp_ptr],z
-        ; IP high
-        lda #$FF
-        ldz #1
-        sta [temp_ptr],z
-        ; CS low
-        lda #$00
-        ldz #2
-        sta [temp_ptr],z
-        ; CS high
-        lda #$F0
-        ldz #3
-        sta [temp_ptr],z
+        ; Now read BIOS int_table pointer from fixed offset $012A
+        ;lda #$2A
+        ;sta temp_ptr
+        ;lda #$01
+        ;sta temp_ptr+1
+        ;lda #$05                ; Bank 5
+        ;sta temp_ptr+2
+        ;lda #$00
+        ;sta temp_ptr+3
+        ;ldz #0
+        ;lda [temp_ptr],z        ; int_table ptr low
+        ;sta scratch_a
+        ;ldz #1
+        ;lda [temp_ptr],z        ; int_table ptr high
+        ;sta scratch_b
+        ; Read itbl_size pointer
+        ;ldz #2
+        ;lda [temp_ptr],z        ; itbl_size ptr low
+        ;sta scratch_c
+        ;ldz #3
+        ;lda [temp_ptr],z        ; itbl_size ptr high
+        ;sta scratch_d
 
-        ; Advance pointer by 4
-        clc
-        lda temp_ptr
-        adc #4
-        sta temp_ptr
-        bcc +
-        inc temp_ptr+1
-+
-        iny
-        bne _ivt_loop           ; 256 iterations
+        ; Read actual size from itbl_size pointer
+        ;lda scratch_c
+        ;sta temp_ptr
+        ;lda scratch_d
+        ;sta temp_ptr+1
+        ; temp_ptr+2 still $05 (bank 5)
+        ;ldz #0
+        ;lda [temp_ptr],z        ; size low
+        ;sta $8F80
+        ;ldz #1
+        ;lda [temp_ptr],z        ; size high
+        ;sta $8F81
+
+        ; DMA copy int_table from BIOS to guest IVT at $40000
+        ;lda scratch_a
+        ;sta dma_src_lo
+        ;lda scratch_b
+        ;sta dma_src_hi
+        ;lda #$05
+        ;sta dma_src_bank
+        ;lda #$00
+        ;sta dma_dst_lo
+        ;sta dma_dst_hi
+        ;lda #$04                ; Bank 4
+        ;sta dma_dst_bank
+        ;lda $8F80
+        ;sta dma_count_lo
+        ;lda $8F81
+        ;sta dma_count_hi
+        ;jsr do_dma_chip_copy
 
         ; --- Set INT 1Eh vector to disk parameter table at F000:F000 ---
         ; IVT entry 1Eh = 4 bytes at linear $0078 (bank 4 $40078)
@@ -558,26 +603,23 @@ init_regs:
         dex
         bpl -
 
-        ; Power-on register values (8086 reset vector)
-        ; CS = $F000, IP = $FFF0 (reset vector at F000:FFF0)
+        ; Boot through BIOS via reset vector at F000:FFF0
+        ; Reset vector contains JMP FAR F000:015C → bios_entry
         lda #$00
         sta reg_cs
         lda #$F0
-        sta reg_cs+1
+        sta reg_cs+1            ; CS = $F000
         lda #$F0
         sta reg_ip
         lda #$FF
-        sta reg_ip+1
+        sta reg_ip+1            ; IP = $FFF0
 
-        ; SS = $F000, SP = $F000 (BIOS convention)
+        ; Stack uninitialized — BIOS sets SS:SP itself
         lda #$00
         sta reg_ss
-        lda #$F0
-        sta reg_ss+1
-        lda #$00
+        sta reg_ss+1            ; SS = $0000
         sta reg_sp86
-        lda #$F0
-        sta reg_sp86+1
+        sta reg_sp86+1          ; SP = $0000
 
         ; DS = ES = $0000
         lda #0
@@ -617,236 +659,4 @@ init_regs:
 _reg_msg:
         .text "REGS SET TO POWER-ON STATE", 13, 0
 
-; ============================================================================
-; test_bios — Install a small test program in place of real BIOS
-; ============================================================================
-; Copies hand-assembled 8086 machine code to F000:0100 (bank 5 $50100)
-; and writes the reset vector JMP FAR at F000:FFF0 ($5FFF0).
-; Also initializes DS=ES=0000 in init_regs.
-;
-; Test results are written to 0000:7F00 ($47F00 in bank 4).
-; Expected results after successful run:
-;   $47F00 = $34  (MOV AX,imm — AL stored)
-;   $47F01 = $78  (MOV BX,imm — BL stored)
-;   $47F02 = $AA  (JMP SHORT success marker)
-;   $47F03 = $01  (XOR+INC result)
-;   $47F04 = $55  (PUSH/POP result)
-;   $47F05 = $CC  (CALL/RET success marker)
-;   $47F06 = $DD  (CMP+JZ success marker)
-;
-test_bios:
-        ; Set up pointer to F000:0100 = bank 5 $0100 = linear $50100
-        lda #$00
-        sta temp_ptr
-        lda #$01
-        sta temp_ptr+1
-        lda #$05
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
 
-        ; Copy test program bytes
-        ldx #0
-        ldz #0
-_tb_copy:
-        lda _test_program,x
-        sta [temp_ptr],z
-        ; Increment pointer (can't use Z>0 reliably)
-        inc temp_ptr
-        bne +
-        inc temp_ptr+1
-+       inx
-        cpx #_test_program_end - _test_program
-        bne _tb_copy
-
-        ; Write reset vector at F000:FFF0 ($5FFF0)
-        ; JMP FAR F000:0100 = EA 00 01 00 F0
-        lda #$F0
-        sta temp_ptr
-        lda #$FF
-        sta temp_ptr+1
-        lda #$05
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
-
-        ldz #0
-        lda #$EA
-        sta [temp_ptr],z
-        inc temp_ptr
-        lda #$00                ; Offset low
-        sta [temp_ptr],z
-        inc temp_ptr
-        lda #$01                ; Offset high
-        sta [temp_ptr],z
-        inc temp_ptr
-        lda #$00                ; Segment low
-        sta [temp_ptr],z
-        inc temp_ptr
-        lda #$F0                ; Segment high
-        sta [temp_ptr],z
-
-        ; Print confirmation
-        ldx #0
--       lda _tb_msg,x
-        beq +
-        jsr CHROUT
-        inx
-        bne -
-+
-        rts
-
-_tb_msg:
-        .text "TEST BIOS INSTALLED", 13, 0
-
-; 8086 machine code for the test program at F000:0100
-; Assumes DS=0000 (segment 0 = bank 4)
-; Assumes SS:SP = F000:F000
-_test_program:
-        ; === Test 8: Code and stack on SAME attic page ===
-        ; This mirrors the boot sector: CS=SS=$1FE0
-        ; Code at 1FE0:7Cxx (page $27C), stack at 1FE0:7Bxx (page $27B)
-        ; BPB data also at 1FE0:7Cxx (page $27C) — shared with code!
-
-        .byte $B4, $0E
-        .byte $B0, $54          ; 'T'
-        .byte $CD, $10
-
-        ; --- Set up: Write code + data at segment $2000 ---
-        ; Code at 2000:0100 (page $201) 
-        ; Stack at 2000:0080 (page $200) — SAME as below
-        ; Data at 2000:0050 (page $200)
-        ; 
-        ; Actually, for overlap: put code AND data on the SAME page
-        ; Code at 2000:0000-003F  (page $200)
-        ; Data at 2000:0040-007F  (page $200, same page as code!)
-        ; Stack at 2000:00F0      (page $200, same page!)
-
-        .byte $B8, $00, $20     ; MOV AX, $2000
-        .byte $8E, $D8          ; MOV DS, AX
-
-        ; Write subroutine at 2000:0000
-        ; It reads data from [0050] (same page), then RETFs
-        ;   A1 50 00    MOV AX, [0050]  (read data from same page as code)
-        ;   A1 52 00    MOV AX, [0052]
-        ;   A1 54 00    MOV AX, [0054]
-        ;   CB          RETF
-        .byte $B0, $A1
-        .byte $A2, $00, $00
-        .byte $B0, $50
-        .byte $A2, $01, $00
-        .byte $B0, $00
-        .byte $A2, $02, $00
-        .byte $B0, $A1
-        .byte $A2, $03, $00
-        .byte $B0, $52
-        .byte $A2, $04, $00
-        .byte $B0, $00
-        .byte $A2, $05, $00
-        .byte $B0, $A1
-        .byte $A2, $06, $00
-        .byte $B0, $54
-        .byte $A2, $07, $00
-        .byte $B0, $00
-        .byte $A2, $08, $00
-        .byte $B0, $CB
-        .byte $A2, $09, $00
-
-        ; Write some data at 2000:0050
-        .byte $C7, $06, $50, $00, $AA, $55  ; MOV WORD [0050], $55AA
-        .byte $C7, $06, $52, $00, $BB, $66  ; MOV WORD [0052], $66BB
-        .byte $C7, $06, $54, $00, $CC, $77  ; MOV WORD [0054], $77CC
-
-        ; Restore DS=0
-        .byte $B8, $00, $00
-        .byte $8E, $D8
-
-        ; Set SS:SP to 2000:00F0 (same page $200 as code and data!)
-        .byte $B8, $00, $20
-        .byte $8E, $D0          ; SS=$2000
-        .byte $BC, $F0, $00     ; SP=$00F0
-
-        ; Single CALL FAR
-        .byte $9A, $00, $00, $00, $20
-        ; Success
-        .byte $B0, $59          ; 'Y'
-        .byte $B4, $0E
-        .byte $B0, $38          ; '8'
-        .byte $CD, $10
-
-        ; Loop 50 times
-        .byte $B9, $32, $00     ; MOV CX, 50
-        ; CALL FAR 2000:0000
-        .byte $9A, $00, $00, $00, $20
-        .byte $E2, $F9          ; LOOP back 7 bytes
-
-        .byte $B4, $0E
-        .byte $B0, $39          ; '9'
-        .byte $CD, $10
-
-        ; === Test with code on page N, stack on page N ===
-        ; Even more extreme: put code at 2000:0080, stack at 2000:00F0
-        ; Both on page $200. RETF return address is ON the code page.
-        
-        ; Write RETF at 2000:0080
-        .byte $B8, $00, $20
-        .byte $8E, $D8
-        .byte $B0, $CB
-        .byte $A2, $80, $00     ; [2000:0080] = CB (RETF)
-        .byte $B8, $00, $00
-        .byte $8E, $D8
-
-        ; SP=$00F0 on page $200, code at $0080 also page $200
-        ; Return address pushed at SP-4=$00EC, also page $200
-        .byte $B9, $32, $00     ; MOV CX, 50
-        .byte $9A, $80, $00, $00, $20  ; CALL FAR 2000:0080
-        .byte $E2, $F9          ; LOOP
-
-        .byte $B4, $0E
-        .byte $B0, $41          ; 'A'
-        .byte $CD, $10
-
-        ; === Test with boot-sector-like layout ===
-        ; CS=SS=$1FE0, code at 7C00+, stack near 7B00+
-        ; Write RETF at 1FE0:7C00
-        .byte $B8, $E0, $1F     ; MOV AX, $1FE0
-        .byte $8E, $D8          ; DS=$1FE0
-        .byte $B0, $CB
-        .byte $A2, $00, $7C     ; [1FE0:7C00] = CB (RETF)
-        .byte $B8, $00, $00
-        .byte $8E, $D8
-
-        ; Set SS=$1FE0, SP=$7BA8 (matching boot sector)
-        .byte $B8, $E0, $1F
-        .byte $8E, $D0          ; SS=$1FE0
-        .byte $BC, $A8, $7B     ; SP=$7BA8
-
-        ; CALL FAR 1FE0:7C00
-        .byte $9A, $00, $7C, $E0, $1F
-        ; If we get here, success
-        .byte $B4, $0E
-        .byte $B0, $42          ; 'B'
-        .byte $CD, $10
-
-        ; Loop 50 times
-        .byte $B9, $32, $00
-        .byte $9A, $00, $7C, $E0, $1F
-        .byte $E2, $F9
-
-        .byte $B4, $0E
-        .byte $B0, $43          ; 'C'
-        .byte $CD, $10
-
-        ; Print OK
-        .byte $B4, $0E
-        .byte $B0, $0D
-        .byte $CD, $10
-        .byte $B0, $4F
-        .byte $CD, $10
-        .byte $B0, $4B
-        .byte $CD, $10
-
-        .byte $F4
-        .byte $EB, $FE
-
-_test_program_end:

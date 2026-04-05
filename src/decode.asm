@@ -360,6 +360,7 @@ _ml_ptr_done:
         jsr fetch_byte
         sta raw_opcode
 
+
         ; --- Handle prefix bytes ---
         ; Segment overrides: 26=ES, 2E=CS, 36=SS, 3E=DS
         cmp #$26
@@ -682,3 +683,4 @@ _dph_nib:
         adc #$06               ; adjust for A-F (carry is set from cmp)
 +       adc #$30               ; '0'
         jmp CHROUT
+
