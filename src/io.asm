@@ -116,6 +116,8 @@ int10_handler:
         beq _i10_teletype
         cmp #$00
         beq _i10_set_mode
+        cmp #$01
+        beq _i10_set_cursor_shape
         cmp #$02
         beq _i10_set_cursor
         cmp #$03
@@ -137,6 +139,34 @@ _i10_teletype:
         ; AH=0E: Teletype output — route through con_write_char
         lda reg_al
         jsr con_write_char
+        rts
+
+_i10_set_cursor_shape:
+        ; AH=01: Set cursor shape — CH=start scan line, CL=end scan line
+        ; Bit 5 of CH = cursor hidden
+        ; Store in BDA at 0040:0060 (end) and 0040:0061 (start)
+        lda #$60
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda reg_cl              ; End scan line
+        ldz #0
+        sta [temp_ptr],z
+        lda reg_ch              ; Start scan line
+        ldz #1
+        sta [temp_ptr],z
+        ; Show or hide sprite cursor based on bit 5 of CH
+        lda reg_ch
+        and #$20
+        bne _i10_hide_cur
+        jsr cursor_show
+        rts
+_i10_hide_cur:
+        jsr cursor_hide
         rts
 
 _i10_set_mode:
