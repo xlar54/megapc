@@ -40,6 +40,8 @@ int13_handler:
         beq _i13_read
         cmp #$03
         beq _i13_write
+        cmp #$01
+        beq _i13_get_status
         cmp #$04
         beq _i13_verify
         cmp #$08
@@ -54,6 +56,28 @@ int13_handler:
         sta reg_ah
         lda #1
         sta flag_cf             ; CF=1 = error
+        rts
+
+_i13_get_status:
+        ; AH=01: Get status of last operation from BDA 0040:0041
+        lda #$41
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z        ; Read last status byte
+        sta reg_ah              ; Return in AH
+        ; CF=1 if status non-zero, CF=0 if success
+        beq +
+        lda #1
+        sta flag_cf
+        rts
++       lda #0
+        sta flag_cf
         rts
 
 _i13_verify:
