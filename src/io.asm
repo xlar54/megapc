@@ -159,10 +159,22 @@ _i10_set_cursor_shape:
         lda reg_ch              ; Start scan line
         ldz #1
         sta [temp_ptr],z
-        ; Show or hide sprite cursor based on bit 5 of CH
+        ; Check bit 5 of CH: cursor hidden
         lda reg_ch
         and #$20
         bne _i10_hide_cur
+        ; Visible: determine shape from start scan line
+        ; Block: start <= 3 (covers most/all of cell)
+        ; Underline: start >= 4 (just bottom portion)
+        lda reg_ch
+        and #$1F                ; Mask off control bits
+        cmp #$04
+        bcs _i10_underline
+        jsr cursor_set_block
+        jsr cursor_show
+        rts
+_i10_underline:
+        jsr cursor_set_underline
         jsr cursor_show
         rts
 _i10_hide_cur:
@@ -1020,6 +1032,40 @@ cursor_hide:
         lda $D015
         and #$FE
         sta $D015
+        rts
+
+; ============================================================================
+; cursor_set_underline / cursor_set_block — Change sprite shape
+; ============================================================================
+cursor_set_underline:
+        ; Clear all rows, set only bottom row
+        ldx #62
+        lda #$00
+-       sta cursor_sprite_data,x
+        dex
+        bpl -
+        lda #$FE                ; 8 pixels wide
+        sta cursor_sprite_data+60
+        rts
+
+cursor_set_block:
+        ; Clear entire sprite first
+        ldx #62
+        lda #$00
+-       sta cursor_sprite_data,x
+        dex
+        bpl -
+        ; Fill bottom 8 rows (rows 13-20): set first byte to $FE (8 pixels)
+        ; Row 13 starts at byte 13*3 = 39
+        ldx #39
+        ldy #8
+-       lda #$FE
+        sta cursor_sprite_data,x
+        inx
+        inx
+        inx                     ; Next row (3 bytes per row)
+        dey
+        bne -
         rts
 
 ; Sprite pointer table (16-byte aligned, 16 bytes for 8 sprites × 2)
