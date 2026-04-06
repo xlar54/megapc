@@ -439,6 +439,7 @@ emulator_exit:
         .include "opcodes.asm"  ; Opcode handlers
         .include "io.asm"       ; I/O port handlers (IN/OUT, CGA, keyboard)
         .include "disk.asm"     ; Disk I/O (INT 13h, floppy via attic)
+        .include "fat_writer.asm" ; FAT32 file writer (save floppy to SD card)
         .include "display.asm"  ; CGA refresh, screen output
         .include "init.asm"     ; Initialization (tables, guest mem, regs)
         .include "menu.asm"     ; Disk mount menu system

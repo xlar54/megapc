@@ -861,95 +861,42 @@ _lfd_fail:
 ; save_floppy_drive — Save floppy image from attic back to SD card
 ; ============================================================================
 ; Input:  A = drive number (0=A, 1=B)
-;         floppy_fname_page = filename (set by caller before calling)
+;         floppy_fname_page = filename (null-terminated)
 ; Output: carry set = success, carry clear = failure
 ;
-; Uses Hyppo closefile + writefile approach:
-;   1. Set filename via Hyppo setname ($2E)
-;   2. Compute image size from geometry
-;   3. DMA from attic to chip RAM in 512-byte chunks
-;   4. Write each chunk to file via Hyppo
-;
-; For now: uses Hyppo trap $36 (savefile_attic) if available
-; Falls back to error if not supported
+; Flow: Hyppo setname → findfile → rmfile → fat_save_floppy
 ;
 save_floppy_drive:
+        ; --- DISABLED: jmp over save logic until tested on real hardware ---
+        jmp _sfd_end
+
         pha                     ; Save drive number
 
-        ; Compute image size: cyls × heads × spt × 512
-        ; For 1.44MB: 80 × 2 × 18 × 512 = 1474560 = $168000
-        ; Store total sectors in save_total_lo/hi
-        pla
-        pha
-        beq _sfd_geom_a
-        ; Drive B geometry
-        lda floppy_b_cyls
-        sta scratch_a
-        lda floppy_b_heads
-        sta scratch_b
-        lda floppy_b_spt
-        sta scratch_c
-        bra _sfd_calc_size
-_sfd_geom_a:
-        lda floppy_a_cyls
-        sta scratch_a
-        lda floppy_a_heads
-        sta scratch_b
-        lda floppy_a_spt
-        sta scratch_c
-_sfd_calc_size:
-        ; Total sectors = cyls × heads × spt
-        ; Use hardware multiplier at $D770
-        lda scratch_a           ; Cylinders
-        sta $D770
-        lda #0
-        sta $D771
-        lda scratch_b           ; Heads
-        sta $D774
-        lda #0
-        sta $D775
-        ; Result at $D778-$D77B = cyls × heads
-        lda $D778
-        sta $D770
-        lda $D779
-        sta $D771
-        lda scratch_c           ; SPT
-        sta $D774
-        lda #0
-        sta $D775
-        ; Result = total sectors (16-bit at $D778/$D779)
-        lda $D778
-        sta save_total_lo
-        lda $D779
-        sta save_total_hi
-
-        ; Set Hyppo filename
+        ; Step 1: Set filename via Hyppo setname
         ldy #>floppy_fname_page
         lda #$2E                ; hyppo_setname
         sta $D640
         clv
         bcc _sfd_fail
 
-        ; Save from attic using Hyppo
-        ; Set up size in bytes: total_sectors × 512
-        ; D = total_sectors << 9 (× 512)
-        ; We need to pass size to Hyppo somehow
-        ; For now: try trap $36 (save_file_attic — unconfirmed)
-        ; Z = attic MB offset ($10=A, $20=B), Y/X = $00
-        pla                     ; Drive number
-        pha
-        beq _sfd_save_a
-        ldz #$20                ; Drive B attic
-        bra _sfd_do_save
-_sfd_save_a:
-        ldz #$10                ; Drive A attic
-_sfd_do_save:
-        ldy #$00
-        ldx #$00
-        lda #$36                ; hyppo_savefile_attic (may not exist)
+        ; Step 2: Find file via Hyppo findfile (required before rmfile)
+        lda #$34                ; hyppo_findfile
         sta $D640
         clv
-        bcc _sfd_fail           ; If trap not supported, carry clear
+        bcc _sfd_not_found      ; File doesn't exist — skip delete
+
+        ; Step 3: Delete old file via Hyppo rmfile
+        lda #$26                ; hyppo_rmfile
+        sta $D640
+        clv
+        ; Ignore rmfile errors — file may already be gone
+
+_sfd_not_found:
+        ; Step 4: Create new file and write data via FAT32 writer
+        pla                     ; Recover drive number
+        pha
+        jsr fat_save_floppy
+        bcc _sfd_fail
 
         ; Success — clear dirty flag
         pla
@@ -966,11 +913,9 @@ _sfd_clear_a:
 
 _sfd_fail:
         pla                     ; Discard drive number
+_sfd_end:
         clc
         rts
-
-save_total_lo   .byte 0
-save_total_hi   .byte 0
 
 ; ============================================================================
 ; detect_floppy_geom_drive — Auto-detect floppy geometry from BPB
