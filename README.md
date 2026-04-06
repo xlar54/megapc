@@ -21,6 +21,8 @@ Different version of DOS give mixed results. Im working on improving. Please lea
 
 * The emulator uses the Mega65 characterset that is IBM-like. I believe some chars are still not translated properly.  Eventually we may implement a true codepage 37 characterset.
 
+* The IBM PC XT could not originally read 1.44MB disks.  Some addons and bios upgrades allowed this.  I cant say for certain of success reading or writing these disks. Beware. 360k and 720k hould be safe.
+
 ***Building***
 I use 64TASS - a terrific cross platform assembler.  Just copy down the repo, run build.bat from the DOS command prompt and it should generate a d81 in the target folder.  You also need NASM installed in order to build the bios.bin file.
 
