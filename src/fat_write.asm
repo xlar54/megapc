@@ -1730,13 +1730,45 @@ _ffc_loop:
         pla
         sta fat_cur_cluster
 
-        ; Check for 0 (already freed / broken chain) — stop before corrupting FAT[0]
+        ; Validate next cluster before continuing
+
+        ; Stop on 0 (freed / broken chain)
         lda fat_cur_cluster
         ora fat_cur_cluster+1
         ora fat_cur_cluster+2
         ora fat_cur_cluster+3
-        beq _ffc_done           ; Next is 0 → chain broken, stop
+        beq _ffc_done
 
+        ; Stop on reserved clusters < 2
+        lda fat_cur_cluster+1
+        ora fat_cur_cluster+2
+        ora fat_cur_cluster+3
+        bne _ffc_range_ok       ; High bytes non-zero → cluster >= 256
+        lda fat_cur_cluster
+        cmp #2
+        bcc _ffc_done           ; Cluster 0 or 1 → reserved, stop
+
+_ffc_range_ok:
+        ; Stop on out-of-range cluster > fat_max_cluster
+        lda fat_cur_cluster+3
+        cmp fat_max_cluster+3
+        bcc _ffc_in_range
+        bne _ffc_done
+        lda fat_cur_cluster+2
+        cmp fat_max_cluster+2
+        bcc _ffc_in_range
+        bne _ffc_done
+        lda fat_cur_cluster+1
+        cmp fat_max_cluster+1
+        bcc _ffc_in_range
+        bne _ffc_done
+        lda fat_cur_cluster
+        cmp fat_max_cluster
+        bcc _ffc_in_range
+        beq _ffc_in_range
+        bra _ffc_done           ; Past max → stop
+
+_ffc_in_range:
         ; Check if next is end-of-chain ($0FFFFFF8+)
         lda fat_cur_cluster+3
         and #$0F
@@ -1751,6 +1783,7 @@ _ffc_loop:
         lda fat_cur_cluster
         cmp #$F8
         bcc _ffc_loop           ; Below $F8 → not end
+
 _ffc_done:
         rts
 
