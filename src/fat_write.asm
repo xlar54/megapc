@@ -62,6 +62,8 @@ fat_cluster_base = $8E5A        ; 4 bytes: base sector of current dir cluster
 fat_name_count = $8E60          ; 1 byte: name char count
 fat_ext_flag = $8E61            ; 1 byte: extension parsing flag
 fat_ext_count = $8E62           ; 1 byte: extension char count
+fat_direntry_created = $8E63    ; 1 byte: set to 1 after dir entry written
+fat_max_cluster = $8E64         ; 4 bytes: highest valid cluster number
 
 ; ============================================================================
 ; sd_wait_ready — Wait for SD card to be ready
@@ -408,6 +410,72 @@ _fof_found:
         adc fat_sectors_per_fat+3
         sta fat_data_sector+3
 
+        ; Compute max valid cluster number
+        ; total_data_sectors = total_sectors - (data_sector - partition_start)
+        ; max_cluster = total_data_sectors / sectors_per_cluster + 1
+        ; total_sectors from BPB offset $20 (4 bytes)
+        lda SECTOR_BUF+$20
+        sta fat_max_cluster
+        lda SECTOR_BUF+$21
+        sta fat_max_cluster+1
+        lda SECTOR_BUF+$22
+        sta fat_max_cluster+2
+        lda SECTOR_BUF+$23
+        sta fat_max_cluster+3
+        ; Subtract non-data sectors: data_sector - partition_start
+        sec
+        lda fat_max_cluster
+        sbc fat_data_sector
+        sta fat_max_cluster
+        lda fat_max_cluster+1
+        sbc fat_data_sector+1
+        sta fat_max_cluster+1
+        lda fat_max_cluster+2
+        sbc fat_data_sector+2
+        sta fat_max_cluster+2
+        lda fat_max_cluster+3
+        sbc fat_data_sector+3
+        sta fat_max_cluster+3
+        ; Add back partition_start (data_sector is absolute)
+        clc
+        lda fat_max_cluster
+        adc fat_partition_start
+        sta fat_max_cluster
+        lda fat_max_cluster+1
+        adc fat_partition_start+1
+        sta fat_max_cluster+1
+        lda fat_max_cluster+2
+        adc fat_partition_start+2
+        sta fat_max_cluster+2
+        lda fat_max_cluster+3
+        adc fat_partition_start+3
+        sta fat_max_cluster+3
+        ; Divide by sectors_per_cluster (shift right by log2(spc))
+        lda fat_sectors_per_cluster
+_fof_div_spc:
+        lsr
+        bcs _fof_div_done
+        lsr fat_max_cluster+3
+        ror fat_max_cluster+2
+        ror fat_max_cluster+1
+        ror fat_max_cluster
+        bra _fof_div_spc
+_fof_div_done:
+        ; Add 1 (cluster numbering starts at 2, but we computed count)
+        clc
+        lda fat_max_cluster
+        adc #1
+        sta fat_max_cluster
+        lda fat_max_cluster+1
+        adc #0
+        sta fat_max_cluster+1
+        lda fat_max_cluster+2
+        adc #0
+        sta fat_max_cluster+2
+        lda fat_max_cluster+3
+        adc #0
+        sta fat_max_cluster+3
+
         sec                     ; Success
         rts
 
@@ -654,7 +722,26 @@ _fffc_shl:
         sta fat_tmp0+3
 
 _fffc_done:
-        sec                     ; Found
+        ; Validate: cluster must be <= fat_max_cluster
+        lda fat_tmp0+3
+        cmp fat_max_cluster+3
+        bcc _fffc_valid         ; Less → valid
+        bne _fffc_not_in_sector ; Greater → skip, try next sector
+        lda fat_tmp0+2
+        cmp fat_max_cluster+2
+        bcc _fffc_valid
+        bne _fffc_not_in_sector
+        lda fat_tmp0+1
+        cmp fat_max_cluster+1
+        bcc _fffc_valid
+        bne _fffc_not_in_sector
+        lda fat_tmp0
+        cmp fat_max_cluster
+        bcc _fffc_valid
+        beq _fffc_valid
+        bra _fffc_not_in_sector ; Past max cluster → disk full
+_fffc_valid:
+        sec                     ; Found valid free cluster
         rts
 
 _fffc_not_in_sector:
@@ -1379,6 +1466,10 @@ _fsf_setup:
         sta fat_remaining+2
         sta fat_remaining+3
 
+        ; Clear direntry flag (no entry created yet)
+        lda #0
+        sta fat_direntry_created
+
         ; Step 1: Open filesystem
         jsr fat_open_filesystem
         bcc _fsf_fail
@@ -1407,6 +1498,8 @@ _fsf_setup:
 
         ; Step 4: Create directory entry
         jsr fat_create_direntry
+        lda #1
+        sta fat_direntry_created
 
         ; Step 5: Write data sectors
         lda #0
@@ -1551,9 +1644,98 @@ _fsf_fail_pop4:
         pla
         pla
 _fsf_fail:
-        ; Failure — mark directory entry as deleted to avoid orphaned file
+        ; Failure — clean up allocated clusters and directory entry
+        lda fat_direntry_created
+        beq _fsf_fail_done      ; Nothing to clean up
+
+        ; Free the cluster chain starting from fat_file_cluster
+        jsr fat_free_chain
+        ; Delete the directory entry
         jsr fat_delete_direntry
+_fsf_fail_done:
         clc
+        rts
+
+; ============================================================================
+; fat_free_chain — Free a cluster chain in the FAT
+; ============================================================================
+; Input: fat_file_cluster = first cluster to free
+; Walks the chain, setting each entry to 0 (free), until end-of-chain.
+;
+fat_free_chain:
+        ; Start with first cluster
+        lda fat_file_cluster
+        sta fat_cur_cluster
+        lda fat_file_cluster+1
+        sta fat_cur_cluster+1
+        lda fat_file_cluster+2
+        sta fat_cur_cluster+2
+        lda fat_file_cluster+3
+        sta fat_cur_cluster+3
+
+_ffc_loop:
+        ; Read current cluster's FAT value (next in chain)
+        lda fat_cur_cluster
+        sta fat_tmp0
+        lda fat_cur_cluster+1
+        sta fat_tmp0+1
+        lda fat_cur_cluster+2
+        sta fat_tmp0+2
+        lda fat_cur_cluster+3
+        sta fat_tmp0+3
+        jsr fat_read_cluster_value
+        ; fat_tmp0 = next cluster (or end marker)
+        ; Save next cluster
+        lda fat_tmp0
+        pha
+        lda fat_tmp0+1
+        pha
+        lda fat_tmp0+2
+        pha
+        lda fat_tmp0+3
+        pha
+
+        ; Free current cluster (set to 0)
+        lda fat_cur_cluster
+        sta fat_tmp0
+        lda fat_cur_cluster+1
+        sta fat_tmp0+1
+        lda fat_cur_cluster+2
+        sta fat_tmp0+2
+        lda fat_cur_cluster+3
+        sta fat_tmp0+3
+        lda #0
+        sta fat_tmp1
+        sta fat_tmp1+1
+        sta fat_tmp1+2
+        sta fat_tmp1+3
+        jsr fat_set_cluster_value
+
+        ; Restore next cluster
+        pla
+        sta fat_cur_cluster+3
+        pla
+        sta fat_cur_cluster+2
+        pla
+        sta fat_cur_cluster+1
+        pla
+        sta fat_cur_cluster
+
+        ; Check if next is end-of-chain ($0FFFFFF8+)
+        lda fat_cur_cluster+3
+        and #$0F
+        cmp #$0F
+        bne _ffc_loop           ; Not end → continue
+        lda fat_cur_cluster+2
+        cmp #$FF
+        bne _ffc_loop
+        lda fat_cur_cluster+1
+        cmp #$FF
+        bne _ffc_loop
+        lda fat_cur_cluster
+        cmp #$F8
+        bcc _ffc_loop           ; Below $F8 → not end
+        ; End of chain — also check for 0 (already freed/bad)
         rts
 
 ; ============================================================================
