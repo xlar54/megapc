@@ -2198,17 +2198,9 @@ int14:
 
 ; ************************* INT 15h - get system configuration
 
-int15:	; Here we do not support any of the functions, and just return
-	; a function not supported code - like the original IBM PC/XT does.
-
-	; cmp	ah, 0xc0
-	; je	int15_sysconfig
-	; cmp	ah, 0x41
-	; je	int15_waitevent
-	; cmp	ah, 0x4f
-	; je	int15_intercept
-	; cmp	ah, 0x88
-	; je	int15_getextmem
+int15:
+	cmp	ah, 0xc0
+	je	int15_sysconfig
 
 ; Otherwise, function not supported
 
@@ -2216,25 +2208,14 @@ int15:	; Here we do not support any of the functions, and just return
 
 	jmp	reach_stack_stc
 
-;  int15_sysconfig: ; Return address of system configuration table in ROM
-;
-;	mov	bx, 0xf000
-;	mov	es, bx
-;	mov	bx, rom_config
-;	mov	ah, 0
-;
-;	jmp	reach_stack_clc
-;
-;  int15_waitevent: ; Events not supported
-;
-;	mov	ah, 0x86
-;
-;	jmp	reach_stack_stc
-;
-;  int15_intercept: ; Keyboard intercept
-;
-;	jmp	reach_stack_stc
-;
+  int15_sysconfig:
+	; Return address of system configuration table in ROM
+	mov	bx, 0xf000
+	mov	es, bx
+	mov	bx, sys_config_table
+	mov	ah, 0
+
+	jmp	reach_stack_clc
 ;  int15_getextmem: ; Extended memory not supported
 ;
 ;	mov	ah,0x86
