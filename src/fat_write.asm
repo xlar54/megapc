@@ -64,6 +64,7 @@ fat_ext_flag = $8E61            ; 1 byte: extension parsing flag
 fat_ext_count = $8E62           ; 1 byte: extension char count
 fat_direntry_created = $8E63    ; 1 byte: set to 1 after dir entry written
 fat_max_cluster = $8E64         ; 4 bytes: highest valid cluster number
+fat_chain_allocated = $8E68     ; 1 byte: set to 1 after first cluster allocated
 
 ; ============================================================================
 ; sd_wait_ready — Wait for SD card to be ready
@@ -95,6 +96,14 @@ sd_read_sector:
         lda #$02                ; Read sector command
         sta $D680
         jsr sd_wait_ready
+        ; Check for error (bit 6 of $D680 = error flag on MEGA65)
+        lda $D680
+        and #$40
+        bne _sdr_fail
+        sec                     ; Success
+        rts
+_sdr_fail:
+        clc                     ; Failure
         rts
 
 ; ============================================================================
@@ -117,6 +126,14 @@ sd_write_sector:
         lda #$03                ; Write sector command
         sta $D680
         jsr sd_wait_ready
+        ; Check for error
+        lda $D680
+        and #$40
+        bne _sdw_fail
+        sec                     ; Success
+        rts
+_sdw_fail:
+        clc                     ; Failure
         rts
 
 ; ============================================================================
@@ -1475,9 +1492,10 @@ _fsf_setup:
         sta fat_remaining+2
         sta fat_remaining+3
 
-        ; Clear direntry flag (no entry created yet)
+        ; Clear state flags (nothing allocated/created yet)
         lda #0
         sta fat_direntry_created
+        sta fat_chain_allocated
 
         ; Step 1: Open filesystem
         jsr fat_open_filesystem
@@ -1504,6 +1522,8 @@ _fsf_setup:
         sta fat_file_cluster+3
         sta fat_cur_cluster+3
         jsr fat_allocate_cluster
+        lda #1
+        sta fat_chain_allocated
 
         ; Step 4: Create directory entry
         jsr fat_create_direntry
@@ -1612,6 +1632,7 @@ _fsf_write_sector:
 
         ; Write SD sector
         jsr sd_write_sector
+        bcc _fsf_fail           ; SD write failed
 
         ; Advance attic pointer by 512
         clc
@@ -1653,13 +1674,13 @@ _fsf_fail_pop4:
         pla
         pla
 _fsf_fail:
-        ; Failure — clean up allocated clusters and directory entry
-        lda fat_direntry_created
-        beq _fsf_fail_done      ; Nothing to clean up
-
-        ; Free the cluster chain starting from fat_file_cluster
+        ; Failure — clean up allocated clusters and directory entry separately
+        lda fat_chain_allocated
+        beq _fsf_no_chain
         jsr fat_free_chain
-        ; Delete the directory entry
+_fsf_no_chain:
+        lda fat_direntry_created
+        beq _fsf_fail_done
         jsr fat_delete_direntry
 _fsf_fail_done:
         clc
