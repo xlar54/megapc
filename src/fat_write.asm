@@ -51,6 +51,15 @@ fat_attic_hi = $8E34
 fat_tmp0 = $8E40                ; 4 bytes
 fat_tmp1 = $8E44                ; 4 bytes
 
+; Scratch for FAT sector manipulation
+fat_fat_offset = $8E50          ; 2 bytes: offset within FAT sector (0-508)
+fat_fat_sec_idx = $8E52         ; 2 bytes: FAT sector index
+fat_fat1_abs = $8E54            ; 4 bytes: absolute FAT1 sector for write-back
+fat_cluster_base = $8E58        ; 4 bytes: base sector of current dir cluster
+fat_name_count = $8E60          ; 1 byte: name char count
+fat_ext_flag = $8E61            ; 1 byte: extension parsing flag
+fat_ext_count = $8E62           ; 1 byte: extension char count
+
 ; ============================================================================
 ; sd_wait_ready — Wait for SD card to be ready
 ; ============================================================================
@@ -478,7 +487,15 @@ _fffc_next_sector:
         lda fat_tmp1+3
         sta fat_tmp0+3
         jsr sd_read_sector
-        jsr sd_buf_to_chip      ; To SECTOR_BUF (fat_tmp1 still set)
+        ; Set fat_tmp1 to SECTOR_BUF for DMA destination
+        lda #<SECTOR_BUF
+        sta fat_tmp1
+        lda #>SECTOR_BUF
+        sta fat_tmp1+1
+        lda #0
+        sta fat_tmp1+2
+        sta fat_tmp1+3
+        jsr sd_buf_to_chip
 
         pla
         sta fat_tmp0+1
@@ -545,28 +562,44 @@ _fffc_found:
 
 _fffc_calc_cluster:
         ; cluster = fat_tmp0 * 128 + (half*256 + Y) / 4
-        ; fat_tmp0 = FAT sector index
-        ; Multiply sector index by 128 (entries per sector)
+        ; fat_tmp0 = FAT sector index (16-bit: fat_tmp0, fat_tmp0+1)
+        ; fat_tmp1 = Y offset, fat_tmp1+1 = half flag (0 or 1)
+        ;
+        ; sector_index × 128: shift left 7 (properly handling both bytes)
+        ; Save originals
         lda fat_tmp0
-        sta fat_tmp0+2          ; Save original
+        sta fat_tmp0+2
         lda fat_tmp0+1
         sta fat_tmp0+3
 
-        ; × 128 = shift left 7
-        lda #0
-        sta fat_tmp0
+        ; Result low = (original_low << 7) = bit 0 of original → bit 7
         lda fat_tmp0+2
-        lsr                     ; High bit → carry
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl                     ; << 7: only bit 0 survives as bit 7
+        sta fat_tmp0
+
+        ; Result high = (original_low >> 1) | (original_high << 7)
+        lda fat_tmp0+2
+        lsr                     ; original_low >> 1
         sta fat_tmp0+1
-        lda #0
-        ror                     ; Carry → bit 7
-        sta fat_tmp0            ; fat_tmp0 = sector_index * 128 (low 16 bits)
         lda fat_tmp0+3
-        lsr
-        ; (ignoring high bytes for now — cluster count < 65536 typical)
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl
+        asl                     ; original_high << 7
+        ora fat_tmp0+1
+        sta fat_tmp0+1
 
         ; Add offset / 4
-        lda fat_tmp1            ; Y offset
+        lda fat_tmp1            ; Y offset within half
         lsr
         lsr                     ; / 4
         clc
@@ -624,18 +657,20 @@ _fffc_not_in_sector:
 ;         fat_tmp1 = value to write (4 bytes)
 ;
 fat_set_cluster_value:
-        ; FAT sector = cluster / 128
-        ; FAT offset = (cluster % 128) * 4
+        ; FAT offset = (cluster * 4) & $1FF (9-bit, 0-508)
+        ; FAT sector index = cluster / 128
+        ;
+        ; Compute 16-bit FAT offset: (cluster & $7F) * 4
         lda fat_tmp0
         and #$7F                ; cluster % 128
         asl
-        asl                     ; × 4
-        sta $8E50               ; Save FAT offset within sector
+        asl                     ; × 4 — may overflow 8 bits
+        sta fat_fat_offset      ; Low byte
+        lda #0
+        rol                     ; Capture carry into high byte (0 or 1)
+        sta fat_fat_offset+1    ; High byte of offset (0 or 1)
 
-        ; FAT sector index = cluster >> 7
-        lda fat_tmp0+1
-        asl                     ; Shift cluster >> 7 (low byte)
-        sta $8E51               ; FAT sector index low
+        ; Compute FAT sector index: cluster >> 7 (16-bit)
         lda fat_tmp0
         lsr
         lsr
@@ -643,25 +678,29 @@ fat_set_cluster_value:
         lsr
         lsr
         lsr
-        lsr                     ; >> 7
-        ora $8E51
-        sta $8E51
+        lsr                     ; fat_tmp0 >> 7
+        sta fat_fat_sec_idx
+        lda fat_tmp0+1
+        asl                     ; fat_tmp0+1 << 1 (brings bit 0 into position)
+        ora fat_fat_sec_idx
+        sta fat_fat_sec_idx
         lda fat_tmp0+1
         lsr
         lsr
         lsr
         lsr
         lsr
-        lsr                     ; upper bits >> 7
-        sta $8E52
+        lsr
+        lsr                     ; fat_tmp0+1 >> 7
+        sta fat_fat_sec_idx+1
 
-        ; Read FAT1 sector
+        ; Read FAT1 sector: fat1_sector + fat_sec_idx
         clc
         lda fat_fat1_sector
-        adc $8E51
+        adc fat_fat_sec_idx
         sta fat_tmp0
         lda fat_fat1_sector+1
-        adc $8E52
+        adc fat_fat_sec_idx+1
         sta fat_tmp0+1
         lda fat_fat1_sector+2
         adc #0
@@ -672,72 +711,69 @@ fat_set_cluster_value:
 
         ; Save FAT1 absolute sector for write-back
         lda fat_tmp0
-        sta $8E54
+        sta fat_fat1_abs
         lda fat_tmp0+1
-        sta $8E55
+        sta fat_fat1_abs+1
         lda fat_tmp0+2
-        sta $8E56
+        sta fat_fat1_abs+2
         lda fat_tmp0+3
-        sta $8E57
+        sta fat_fat1_abs+3
 
         jsr sd_read_sector
 
-        ; Copy to SECTOR_BUF
-        lda #<SECTOR_BUF
-        sta fat_tmp1+2          ; Reuse tmp1 high bytes (value already saved)
-        ; Actually we need fat_tmp1 for the value... let me use stack
-        ; This is getting complex. For now, patch the SD buffer directly
-        ; via [ptr],z at $FFD6E00
-
-        ; Patch the entry in the SD buffer directly
-        ; SD buffer at $FFD6E00, offset = $8E50
+        ; Patch the entry in the SD buffer directly using [temp_ptr],Z
+        ; SD buffer base = $FFD6E00. Add fat_fat_offset to get entry address.
+        clc
         lda #$00
+        adc fat_fat_offset
         sta temp_ptr
         lda #$6E
+        adc fat_fat_offset+1
         sta temp_ptr+1
         lda #$0D
+        adc #0
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
 
-        ldy $8E50               ; FAT offset
+        ; Write 4 bytes of value from fat_tmp1
         lda fat_tmp1
-        sta (temp_ptr),y
-        iny
+        ldz #0
+        sta [temp_ptr],z
         lda fat_tmp1+1
-        sta (temp_ptr),y
-        iny
+        ldz #1
+        sta [temp_ptr],z
         lda fat_tmp1+2
-        sta (temp_ptr),y
-        iny
+        ldz #2
+        sta [temp_ptr],z
         lda fat_tmp1+3
         and #$0F                ; FAT32 uses only low 28 bits
-        sta (temp_ptr),y
+        ldz #3
+        sta [temp_ptr],z
 
         ; Write back to FAT1
-        lda $8E54
+        lda fat_fat1_abs
         sta fat_tmp0
-        lda $8E55
+        lda fat_fat1_abs+1
         sta fat_tmp0+1
-        lda $8E56
+        lda fat_fat1_abs+2
         sta fat_tmp0+2
-        lda $8E57
+        lda fat_fat1_abs+3
         sta fat_tmp0+3
         jsr sd_write_sector
 
-        ; Write same sector to FAT2
-        ; FAT2 sector = FAT1 sector + sectors_per_fat
+        ; Write same sector to FAT2: FAT1 sector + sectors_per_fat
         clc
-        lda $8E54
+        lda fat_fat1_abs
         adc fat_sectors_per_fat
         sta fat_tmp0
-        lda $8E55
+        lda fat_fat1_abs+1
         adc fat_sectors_per_fat+1
         sta fat_tmp0+1
-        lda $8E56
+        lda fat_fat1_abs+2
         adc fat_sectors_per_fat+2
         sta fat_tmp0+2
-        lda $8E57
+        lda fat_fat1_abs+3
         adc fat_sectors_per_fat+3
         sta fat_tmp0+3
         jsr sd_write_sector
@@ -953,16 +989,17 @@ _ffed_dir_full:
 ; Output: fat_tmp0 = FAT entry value (next cluster or end marker)
 ;
 fat_read_cluster_value:
-        ; FAT offset = cluster * 4
-        ; FAT sector = cluster / 128
-        ; Sector offset = (cluster % 128) * 4
+        ; FAT offset = (cluster & $7F) * 4 (16-bit, 0-508)
         lda fat_tmp0
         and #$7F
         asl
         asl
-        sta $8E50               ; Offset within sector
+        sta fat_fat_offset
+        lda #0
+        rol
+        sta fat_fat_offset+1
 
-        ; Sector index = cluster >> 7
+        ; FAT sector index = cluster >> 7 (16-bit)
         lda fat_tmp0
         lsr
         lsr
@@ -971,11 +1008,11 @@ fat_read_cluster_value:
         lsr
         lsr
         lsr
-        sta $8E51
+        sta fat_fat_sec_idx
         lda fat_tmp0+1
         asl
-        ora $8E51
-        sta $8E51
+        ora fat_fat_sec_idx
+        sta fat_fat_sec_idx
         lda fat_tmp0+1
         lsr
         lsr
@@ -983,15 +1020,16 @@ fat_read_cluster_value:
         lsr
         lsr
         lsr
-        sta $8E52
+        lsr
+        sta fat_fat_sec_idx+1
 
         ; Read FAT1 sector
         clc
         lda fat_fat1_sector
-        adc $8E51
+        adc fat_fat_sec_idx
         sta fat_tmp0
         lda fat_fat1_sector+1
-        adc $8E52
+        adc fat_fat_sec_idx+1
         sta fat_tmp0+1
         lda fat_fat1_sector+2
         adc #0
@@ -1001,27 +1039,31 @@ fat_read_cluster_value:
         sta fat_tmp0+3
         jsr sd_read_sector
 
-        ; Read the 4-byte entry from SD buffer directly
+        ; Read 4-byte entry from SD buffer using [temp_ptr],Z
+        clc
         lda #$00
+        adc fat_fat_offset
         sta temp_ptr
         lda #$6E
+        adc fat_fat_offset+1
         sta temp_ptr+1
         lda #$0D
+        adc #0
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
 
-        ldy $8E50
-        lda (temp_ptr),y
+        ldz #0
+        lda [temp_ptr],z
         sta fat_tmp0
-        iny
-        lda (temp_ptr),y
+        ldz #1
+        lda [temp_ptr],z
         sta fat_tmp0+1
-        iny
-        lda (temp_ptr),y
+        ldz #2
+        lda [temp_ptr],z
         sta fat_tmp0+2
-        iny
-        lda (temp_ptr),y
+        ldz #3
+        lda [temp_ptr],z
         and #$0F                ; FAT32 uses low 28 bits
         sta fat_tmp0+3
         rts
@@ -1061,40 +1103,49 @@ fat_create_direntry:
         sta fat_tmp1+3
         jsr sd_buf_to_chip
 
-        ; Build 8.3 name from floppy_fname_page
-        ; First clear the 32-byte entry with zeros
-        ldy fat_dir_offset
+        ; Set up temp_ptr = SECTOR_BUF + fat_dir_offset (16-bit add)
+        ; This handles offsets 0-480 correctly
+        clc
+        lda #<SECTOR_BUF
+        adc fat_dir_offset
+        sta temp_ptr
+        lda #>SECTOR_BUF
+        adc fat_dir_offset+1
+        sta temp_ptr+1
+        lda #0
+        sta temp_ptr+2
+        sta temp_ptr+3
+
+        ; Clear the 32-byte entry with zeros using [temp_ptr],Z
+        ldz #0
         ldx #32
 _fcd_clear:
         lda #0
-        sta SECTOR_BUF,y
-        iny
+        sta [temp_ptr],z
+        inz
         dex
         bne _fcd_clear
 
-        ; Parse filename into 8.3 format
-        ; Source: floppy_fname_page (null-terminated)
-        ; Dest: SECTOR_BUF + fat_dir_offset (8 bytes name + 3 bytes ext)
-        ldx #0                  ; Source index into floppy_fname_page
-        ldy fat_dir_offset      ; Dest index into SECTOR_BUF
-        lda #0
-        sta $8E60               ; Name char count (max 8)
-        sta $8E61               ; Extension flag (1 = after dot)
-
-        ; Fill name portion (8 bytes) with spaces first
-        pha
-        ldy fat_dir_offset
-        lda #$20
+        ; Fill name portion (11 bytes: 8 name + 3 ext) with spaces
+        ldz #0
         ldx #11
 _fcd_fill_spaces:
-        sta SECTOR_BUF,y
-        iny
+        lda #$20
+        sta [temp_ptr],z
+        inz
         dex
         bne _fcd_fill_spaces
-        pla
 
-        ldx #0                  ; Source index
-        ldy fat_dir_offset      ; Dest index
+        ; Parse filename into 8.3 format
+        ; Source: floppy_fname_page (null-terminated)
+        ; Dest: [temp_ptr]+0..10 (8 name + 3 ext)
+        ldx #0                  ; Source index into floppy_fname_page
+        lda #0
+        sta fat_name_count      ; Name chars written (max 8)
+        sta fat_ext_flag        ; 0=name, 1=extension
+        sta fat_ext_count       ; Extension chars written (max 3)
+        ldz #0                  ; Dest index within dir entry
+
 _fcd_name_loop:
         lda floppy_fname_page,x
         beq _fcd_name_done      ; Null terminator
@@ -1102,81 +1153,88 @@ _fcd_name_loop:
         beq _fcd_dot
         ; Uppercase conversion
         cmp #'a'
-        bcc _fcd_store
+        bcc _fcd_no_upper
         cmp #'z'+1
-        bcs _fcd_store
-        and #$DF                ; To uppercase
-_fcd_store:
-        lda $8E61               ; In extension?
+        bcs _fcd_no_upper
+        and #$DF
+_fcd_no_upper:
+        pha                     ; Save uppercased char
+        lda fat_ext_flag
         bne _fcd_store_ext
         ; Name portion (max 8 chars)
-        lda $8E60
+        lda fat_name_count
         cmp #8
-        bcs _fcd_skip_char      ; Already 8 chars, skip
-        lda floppy_fname_page,x
-        cmp #'a'
-        bcc +
-        cmp #'z'+1
-        bcs +
-        and #$DF
-+       sta SECTOR_BUF,y
-        iny
-        inc $8E60
+        bcs _fcd_skip_char
+        pla
+        sta [temp_ptr],z
+        inz
+        inc fat_name_count
+        inx
+        bra _fcd_name_loop
 _fcd_skip_char:
+        pla                     ; Discard char
         inx
         bra _fcd_name_loop
 
 _fcd_store_ext:
         ; Extension portion (max 3 chars)
-        lda floppy_fname_page,x
-        cmp #'a'
-        bcc +
-        cmp #'z'+1
-        bcs +
-        and #$DF
-+       sta SECTOR_BUF,y
-        iny
+        lda fat_ext_count
+        cmp #3
+        bcs _fcd_skip_ext
+        pla
+        sta [temp_ptr],z
+        inz
+        inc fat_ext_count
+        inx
+        bra _fcd_name_loop
+_fcd_skip_ext:
+        pla
         inx
         bra _fcd_name_loop
 
 _fcd_dot:
-        ; Switch to extension at offset +8
+        ; Switch to extension: Z = 8 (offset within dir entry)
         lda #1
-        sta $8E61
-        lda fat_dir_offset
-        clc
-        adc #8
-        tay                     ; Y = start of extension field
+        sta fat_ext_flag
+        ldz #8
         inx
         bra _fcd_name_loop
 
 _fcd_name_done:
-        ; Set attribute byte: offset +$0B = $20 (archive)
-        ldy fat_dir_offset
+        ; Set attribute byte: offset $0B = $20 (archive)
         lda #$20
-        sta SECTOR_BUF+$0B,y
+        ldz #$0B
+        sta [temp_ptr],z
 
-        ; Set first cluster low word: offset +$1A (2 bytes)
+        ; Set first cluster low word: offset $1A (2 bytes)
         lda fat_file_cluster
-        sta SECTOR_BUF+$1A,y
+        ldz #$1A
+        sta [temp_ptr],z
         lda fat_file_cluster+1
-        sta SECTOR_BUF+$1B,y
+        ldz #$1B
+        sta [temp_ptr],z
 
-        ; Set first cluster high word: offset +$14 (2 bytes)
+        ; Set first cluster high word: offset $14 (2 bytes)
         lda fat_file_cluster+2
-        sta SECTOR_BUF+$14,y
+        ldz #$14
+        sta [temp_ptr],z
         lda fat_file_cluster+3
-        sta SECTOR_BUF+$15,y
+        ldz #$15
+        sta [temp_ptr],z
 
-        ; Set file size: offset +$1C (4 bytes)
+        ; Set file size: offset $1C (4 bytes)
         lda fat_file_size
-        sta SECTOR_BUF+$1C,y
+        ldz #$1C
+        sta [temp_ptr],z
         lda fat_file_size+1
-        sta SECTOR_BUF+$1D,y
+        ldz #$1D
+        sta [temp_ptr],z
         lda fat_file_size+2
-        sta SECTOR_BUF+$1E,y
+        ldz #$1E
+        sta [temp_ptr],z
         lda fat_file_size+3
-        sta SECTOR_BUF+$1F,y
+        ldz #$1F
+        sta [temp_ptr],z
 
         ; Copy SECTOR_BUF back to SD buffer and write
         lda #<SECTOR_BUF
@@ -1406,6 +1464,9 @@ _fsf_write_sector:
         lda fat_tmp0+2
         adc #0
         sta fat_tmp0+2
+        lda fat_tmp0+3
+        adc #0
+        sta fat_tmp0+3
         ; fat_tmp0 = target SD sector
 
         ; DMA 512 bytes from attic to SD buffer
@@ -1428,13 +1489,17 @@ _fsf_write_sector:
         ; Advance sector in cluster
         inc fat_sector_in_cluster
 
-        ; Decrement remaining sectors
+        ; Decrement remaining sectors (proper 24-bit subtract)
+        sec
         lda fat_remaining
-        bne +
-        dec fat_remaining+1
-        bne +
-        dec fat_remaining+2
-+       dec fat_remaining
+        sbc #1
+        sta fat_remaining
+        lda fat_remaining+1
+        sbc #0
+        sta fat_remaining+1
+        lda fat_remaining+2
+        sbc #0
+        sta fat_remaining+2
 
         jmp _fsf_write_loop
 
