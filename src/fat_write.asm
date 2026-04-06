@@ -56,9 +56,9 @@ fat_tmp1 = $8E44                ; 4 bytes
 
 ; Scratch for FAT sector manipulation
 fat_fat_offset = $8E50          ; 2 bytes: offset within FAT sector (0-508)
-fat_fat_sec_idx = $8E52         ; 2 bytes: FAT sector index
-fat_fat1_abs = $8E54            ; 4 bytes: absolute FAT1 sector for write-back
-fat_cluster_base = $8E58        ; 4 bytes: base sector of current dir cluster
+fat_fat_sec_idx = $8E52         ; 4 bytes: FAT sector index (32-bit for large volumes)
+fat_fat1_abs = $8E56            ; 4 bytes: absolute FAT1 sector for write-back
+fat_cluster_base = $8E5A        ; 4 bytes: base sector of current dir cluster
 fat_name_count = $8E60          ; 1 byte: name char count
 fat_ext_flag = $8E61            ; 1 byte: extension parsing flag
 fat_ext_count = $8E62           ; 1 byte: extension char count
@@ -485,7 +485,7 @@ fat_find_free_cluster:
         sta fat_tmp0+3
 
 _fffc_next_sector:
-        ; Read FAT1 sector: fat1_sector + fat_tmp0
+        ; Read FAT1 sector: fat1_sector + fat_tmp0 (full 32-bit add)
         clc
         lda fat_fat1_sector
         adc fat_tmp0
@@ -494,16 +494,20 @@ _fffc_next_sector:
         adc fat_tmp0+1
         sta fat_tmp1+1
         lda fat_fat1_sector+2
-        adc #0
+        adc fat_tmp0+2
         sta fat_tmp1+2
         lda fat_fat1_sector+3
-        adc #0
+        adc fat_tmp0+3
         sta fat_tmp1+3
 
         ; Copy to fat_tmp0 for read (clobbers our index — save it)
         lda fat_tmp0
         pha
         lda fat_tmp0+1
+        pha
+        lda fat_tmp0+2
+        pha
+        lda fat_tmp0+3
         pha
 
         lda fat_tmp1
@@ -526,15 +530,21 @@ _fffc_next_sector:
         jsr sd_buf_to_chip
 
         pla
+        sta fat_tmp0+3
+        pla
+        sta fat_tmp0+2
+        pla
         sta fat_tmp0+1
         pla
-        sta fat_tmp0            ; Restore FAT sector index
+        sta fat_tmp0            ; Restore FAT sector index (32-bit)
 
         ; Scan SECTOR_BUF for zero 4-byte entries
         ; Each entry = 4 bytes, 128 entries per 512-byte sector
         ; On FAT sector 0: skip entries 0 and 1 (reserved clusters)
         lda fat_tmp0
         ora fat_tmp0+1
+        ora fat_tmp0+2
+        ora fat_tmp0+3
         bne +
         ldy #8                  ; Skip clusters 0-1 (8 bytes)
         bra _fffc_scan
@@ -596,41 +606,18 @@ _fffc_found:
 
 _fffc_calc_cluster:
         ; cluster = fat_tmp0 * 128 + (half*256 + Y) / 4
-        ; fat_tmp0 = FAT sector index (16-bit: fat_tmp0, fat_tmp0+1)
+        ; fat_tmp0 = FAT sector index (32-bit)
         ; fat_tmp1 = Y offset, fat_tmp1+1 = half flag (0 or 1)
         ;
-        ; sector_index × 128: shift left 7 (properly handling both bytes)
-        ; Save originals
-        lda fat_tmp0
-        sta fat_tmp0+2
-        lda fat_tmp0+1
-        sta fat_tmp0+3
-
-        ; Result low = (original_low << 7) = bit 0 of original → bit 7
-        lda fat_tmp0+2
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl                     ; << 7: only bit 0 survives as bit 7
-        sta fat_tmp0
-
-        ; Result high = (original_low >> 1) | (original_high << 7)
-        lda fat_tmp0+2
-        lsr                     ; original_low >> 1
-        sta fat_tmp0+1
-        lda fat_tmp0+3
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl
-        asl                     ; original_high << 7
-        ora fat_tmp0+1
-        sta fat_tmp0+1
+        ; sector_index × 128 = shift left 7 (full 32-bit)
+        ldx #7
+_fffc_shl:
+        asl fat_tmp0
+        rol fat_tmp0+1
+        rol fat_tmp0+2
+        rol fat_tmp0+3
+        dex
+        bne _fffc_shl
 
         ; Add offset / 4
         lda fat_tmp1            ; Y offset within half
@@ -642,6 +629,12 @@ _fffc_calc_cluster:
         lda fat_tmp0+1
         adc #0
         sta fat_tmp0+1
+        lda fat_tmp0+2
+        adc #0
+        sta fat_tmp0+2
+        lda fat_tmp0+3
+        adc #0
+        sta fat_tmp0+3
 
         ; If second half, add 64 (256/4)
         lda fat_tmp1+1
@@ -653,26 +646,39 @@ _fffc_calc_cluster:
         lda fat_tmp0+1
         adc #0
         sta fat_tmp0+1
+        lda fat_tmp0+2
+        adc #0
+        sta fat_tmp0+2
+        lda fat_tmp0+3
+        adc #0
+        sta fat_tmp0+3
 
 _fffc_done:
-        lda #0
-        sta fat_tmp0+2
-        sta fat_tmp0+3
         sec                     ; Found
         rts
 
 _fffc_not_in_sector:
-        ; Try next FAT sector
+        ; Try next FAT sector (32-bit increment)
         inc fat_tmp0
         bne +
         inc fat_tmp0+1
+        bne +
+        inc fat_tmp0+2
+        bne +
+        inc fat_tmp0+3
 +
-        ; Check if we've scanned all FAT sectors
-        lda fat_tmp0
-        cmp fat_sectors_per_fat
+        ; Check if we've scanned all FAT sectors (32-bit compare)
+        lda fat_tmp0+3
+        cmp fat_sectors_per_fat+3
+        bne _fffc_next_sector
+        lda fat_tmp0+2
+        cmp fat_sectors_per_fat+2
         bne _fffc_next_sector
         lda fat_tmp0+1
         cmp fat_sectors_per_fat+1
+        bne _fffc_next_sector
+        lda fat_tmp0
+        cmp fat_sectors_per_fat
         bne _fffc_next_sector
 
         ; No free cluster found
@@ -704,31 +710,28 @@ fat_set_cluster_value:
         rol                     ; Capture carry into high byte (0 or 1)
         sta fat_fat_offset+1    ; High byte of offset (0 or 1)
 
-        ; Compute FAT sector index: cluster >> 7 (16-bit)
+        ; Compute FAT sector index: cluster >> 7 (full 32-bit)
+        ; Copy cluster to sec_idx, then shift right 7
         lda fat_tmp0
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr                     ; fat_tmp0 >> 7
         sta fat_fat_sec_idx
         lda fat_tmp0+1
-        asl                     ; fat_tmp0+1 << 1 (brings bit 0 into position)
-        ora fat_fat_sec_idx
-        sta fat_fat_sec_idx
-        lda fat_tmp0+1
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr                     ; fat_tmp0+1 >> 7
         sta fat_fat_sec_idx+1
+        lda fat_tmp0+2
+        sta fat_fat_sec_idx+2
+        lda fat_tmp0+3
+        sta fat_fat_sec_idx+3
+        ; Shift right 7 = shift right 8 then shift left 1...
+        ; or just shift right 7 times
+        ldx #7
+_fscv_shr:
+        lsr fat_fat_sec_idx+3
+        ror fat_fat_sec_idx+2
+        ror fat_fat_sec_idx+1
+        ror fat_fat_sec_idx
+        dex
+        bne _fscv_shr
 
-        ; Read FAT1 sector: fat1_sector + fat_sec_idx
+        ; Read FAT1 sector: fat1_sector + fat_sec_idx (32-bit add)
         clc
         lda fat_fat1_sector
         adc fat_fat_sec_idx
@@ -737,10 +740,10 @@ fat_set_cluster_value:
         adc fat_fat_sec_idx+1
         sta fat_tmp0+1
         lda fat_fat1_sector+2
-        adc #0
+        adc fat_fat_sec_idx+2
         sta fat_tmp0+2
         lda fat_fat1_sector+3
-        adc #0
+        adc fat_fat_sec_idx+3
         sta fat_tmp0+3
 
         ; Save FAT1 absolute sector for write-back
@@ -1038,31 +1041,25 @@ fat_read_cluster_value:
         rol
         sta fat_fat_offset+1
 
-        ; FAT sector index = cluster >> 7 (16-bit)
+        ; FAT sector index = cluster >> 7 (full 32-bit)
         lda fat_tmp0
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
         sta fat_fat_sec_idx
         lda fat_tmp0+1
-        asl
-        ora fat_fat_sec_idx
-        sta fat_fat_sec_idx
-        lda fat_tmp0+1
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
         sta fat_fat_sec_idx+1
+        lda fat_tmp0+2
+        sta fat_fat_sec_idx+2
+        lda fat_tmp0+3
+        sta fat_fat_sec_idx+3
+        ldx #7
+_frcv_shr:
+        lsr fat_fat_sec_idx+3
+        ror fat_fat_sec_idx+2
+        ror fat_fat_sec_idx+1
+        ror fat_fat_sec_idx
+        dex
+        bne _frcv_shr
 
-        ; Read FAT1 sector
+        ; Read FAT1 sector (32-bit add)
         clc
         lda fat_fat1_sector
         adc fat_fat_sec_idx
@@ -1071,10 +1068,10 @@ fat_read_cluster_value:
         adc fat_fat_sec_idx+1
         sta fat_tmp0+1
         lda fat_fat1_sector+2
-        adc #0
+        adc fat_fat_sec_idx+2
         sta fat_tmp0+2
         lda fat_fat1_sector+3
-        adc #0
+        adc fat_fat_sec_idx+3
         sta fat_tmp0+3
         jsr sd_read_sector
 
