@@ -1128,7 +1128,10 @@ _ffed_sector_done:
         lda fat_cur_cluster+3
         sta fat_tmp0+3
         jsr fat_read_cluster_value
-        ; fat_tmp0 = next cluster
+        bcs +
+        clc
+        rts                     ; FAT read failed
++       ; fat_tmp0 = next cluster
         ; Check for end-of-chain ($0FFFFFF8+)
         lda fat_tmp0+3
         and #$0F
@@ -1627,8 +1630,24 @@ _fsf_write_loop:
         pla
         sta fat_tmp0
         jsr fat_chain_cluster
-        bcc _fsf_fail
-
+        bcs _fsf_chain_ok
+        ; Chain failed: free the orphan cluster we just allocated
+        lda fat_cur_cluster
+        sta fat_tmp0
+        lda fat_cur_cluster+1
+        sta fat_tmp0+1
+        lda fat_cur_cluster+2
+        sta fat_tmp0+2
+        lda fat_cur_cluster+3
+        sta fat_tmp0+3
+        lda #0
+        sta fat_tmp1
+        sta fat_tmp1+1
+        sta fat_tmp1+2
+        sta fat_tmp1+3
+        jsr fat_set_cluster_value
+        jmp _fsf_fail
+_fsf_chain_ok:
         lda #0
         sta fat_sector_in_cluster
 
@@ -1747,6 +1766,7 @@ _ffc_loop:
         lda fat_cur_cluster+3
         sta fat_tmp0+3
         jsr fat_read_cluster_value
+        bcc _ffc_done           ; FAT read failed — bail out
         ; fat_tmp0 = next cluster (or end marker)
         ; Save next cluster
         lda fat_tmp0
@@ -1773,6 +1793,7 @@ _ffc_loop:
         sta fat_tmp1+2
         sta fat_tmp1+3
         jsr fat_set_cluster_value
+        bcc _ffc_fail_pop4      ; FAT write failed — bail out
 
         ; Restore next cluster
         pla
@@ -1838,6 +1859,11 @@ _ffc_in_range:
         cmp #$F8
         bcc _ffc_loop           ; Below $F8 → not end
 
+_ffc_fail_pop4:
+        pla
+        pla
+        pla
+        pla
 _ffc_done:
         rts
 
