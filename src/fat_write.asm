@@ -532,7 +532,13 @@ _fffc_next_sector:
 
         ; Scan SECTOR_BUF for zero 4-byte entries
         ; Each entry = 4 bytes, 128 entries per 512-byte sector
-        ldy #0                  ; Offset within SECTOR_BUF
+        ; On FAT sector 0: skip entries 0 and 1 (reserved clusters)
+        lda fat_tmp0
+        ora fat_tmp0+1
+        bne +
+        ldy #8                  ; Skip clusters 0-1 (8 bytes)
+        bra _fffc_scan
++       ldy #0
 _fffc_scan:
         ; Check if all 4 bytes are zero
         lda SECTOR_BUF,y
@@ -774,9 +780,14 @@ fat_set_cluster_value:
         lda fat_tmp1+2
         ldz #2
         sta [temp_ptr],z
-        lda fat_tmp1+3
-        and #$0F                ; FAT32 uses only low 28 bits
+        ; Preserve high nibble of existing FAT entry (reserved bits)
         ldz #3
+        lda [temp_ptr],z        ; Read existing byte
+        and #$F0                ; Keep high nibble
+        sta fat_fat_offset      ; Temp storage (reuse scratch)
+        lda fat_tmp1+3
+        and #$0F                ; New value low nibble
+        ora fat_fat_offset      ; Merge with preserved high nibble
         sta [temp_ptr],z
 
         ; Write back to FAT1
@@ -1253,17 +1264,14 @@ _fcd_name_done:
         ldz #$15
         sta [temp_ptr],z
 
-        ; Set file size: offset $1C (4 bytes)
-        lda fat_file_size
+        ; Set file size: initially 0 (updated after successful write)
+        lda #0
         ldz #$1C
         sta [temp_ptr],z
-        lda fat_file_size+1
         ldz #$1D
         sta [temp_ptr],z
-        lda fat_file_size+2
         ldz #$1E
         sta [temp_ptr],z
-        lda fat_file_size+3
         ldz #$1F
         sta [temp_ptr],z
 
@@ -1535,8 +1543,9 @@ _fsf_write_sector:
         jmp _fsf_write_loop
 
 _fsf_write_done:
-        ; Success
-        sec
+        ; All data written — update directory entry with final file size
+        jsr fat_update_direntry_size
+        sec                     ; Success
         rts
 
 _fsf_fail_pop4:
@@ -1545,5 +1554,112 @@ _fsf_fail_pop4:
         pla
         pla
 _fsf_fail:
+        ; Failure — mark directory entry as deleted to avoid orphaned file
+        jsr fat_delete_direntry
         clc
+        rts
+
+; ============================================================================
+; fat_update_direntry_size — Patch file size into existing directory entry
+; ============================================================================
+; Re-reads the directory sector, patches the size field, writes it back.
+; Uses fat_dir_sector, fat_dir_offset, fat_file_size.
+;
+fat_update_direntry_size:
+        ; Read directory sector into SD buffer
+        lda fat_dir_sector
+        sta fat_tmp0
+        lda fat_dir_sector+1
+        sta fat_tmp0+1
+        lda fat_dir_sector+2
+        sta fat_tmp0+2
+        lda fat_dir_sector+3
+        sta fat_tmp0+3
+        jsr sd_read_sector
+
+        ; Set up temp_ptr to entry in SD buffer ($FFD6E00 + offset)
+        clc
+        lda #$00
+        adc fat_dir_offset
+        sta temp_ptr
+        lda #$6E
+        adc fat_dir_offset+1
+        sta temp_ptr+1
+        lda #$0D
+        adc #0
+        sta temp_ptr+2
+        lda #$FF
+        sta temp_ptr+3
+
+        ; Patch file size at offset $1C (4 bytes)
+        lda fat_file_size
+        ldz #$1C
+        sta [temp_ptr],z
+        lda fat_file_size+1
+        ldz #$1D
+        sta [temp_ptr],z
+        lda fat_file_size+2
+        ldz #$1E
+        sta [temp_ptr],z
+        lda fat_file_size+3
+        ldz #$1F
+        sta [temp_ptr],z
+
+        ; Write back
+        lda fat_dir_sector
+        sta fat_tmp0
+        lda fat_dir_sector+1
+        sta fat_tmp0+1
+        lda fat_dir_sector+2
+        sta fat_tmp0+2
+        lda fat_dir_sector+3
+        sta fat_tmp0+3
+        jsr sd_write_sector
+        rts
+
+; ============================================================================
+; fat_delete_direntry — Mark directory entry as deleted ($E5)
+; ============================================================================
+; On failure, marks the entry so the filesystem doesn't see an orphaned file.
+;
+fat_delete_direntry:
+        lda fat_dir_sector
+        sta fat_tmp0
+        lda fat_dir_sector+1
+        sta fat_tmp0+1
+        lda fat_dir_sector+2
+        sta fat_tmp0+2
+        lda fat_dir_sector+3
+        sta fat_tmp0+3
+        jsr sd_read_sector
+
+        ; Set up temp_ptr to entry in SD buffer
+        clc
+        lda #$00
+        adc fat_dir_offset
+        sta temp_ptr
+        lda #$6E
+        adc fat_dir_offset+1
+        sta temp_ptr+1
+        lda #$0D
+        adc #0
+        sta temp_ptr+2
+        lda #$FF
+        sta temp_ptr+3
+
+        ; Write $E5 to first byte (marks entry as deleted)
+        lda #$E5
+        ldz #0
+        sta [temp_ptr],z
+
+        ; Write back
+        lda fat_dir_sector
+        sta fat_tmp0
+        lda fat_dir_sector+1
+        sta fat_tmp0+1
+        lda fat_dir_sector+2
+        sta fat_tmp0+2
+        lda fat_dir_sector+3
+        sta fat_tmp0+3
+        jsr sd_write_sector
         rts
