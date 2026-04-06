@@ -256,7 +256,9 @@ fat_open_filesystem:
         sta fat_tmp0+2
         sta fat_tmp0+3
         jsr sd_read_sector
-
+        bcs +
+        rts                     ; Return with carry clear = error
++
         ; Copy SD buffer to SECTOR_BUF for parsing
         lda #<SECTOR_BUF
         sta fat_tmp1
@@ -339,7 +341,9 @@ _fof_found:
         lda fat_partition_start+3
         sta fat_tmp0+3
         jsr sd_read_sector
-
+        bcs +
+        rts
++
         ; Copy to SECTOR_BUF
         lda #<SECTOR_BUF
         sta fat_tmp1
@@ -604,7 +608,15 @@ _fffc_next_sector:
         lda fat_tmp1+3
         sta fat_tmp0+3
         jsr sd_read_sector
-        ; Set fat_tmp1 to SECTOR_BUF for DMA destination
+        bcs +
+        ; SD read failed — clean up stack and return failure
+        pla
+        pla
+        pla
+        pla
+        clc
+        rts
++       ; Set fat_tmp1 to SECTOR_BUF for DMA destination
         lda #<SECTOR_BUF
         sta fat_tmp1
         lda #>SECTOR_BUF
@@ -870,6 +882,7 @@ _fscv_shr:
         sta fat_fat1_abs+3
 
         jsr sd_read_sector
+        bcc _fscv_fail
 
         ; Patch the entry in the SD buffer directly using [temp_ptr],Z
         ; SD buffer base = $FFD6E00. Add fat_fat_offset to get entry address.
@@ -916,6 +929,7 @@ _fscv_shr:
         lda fat_fat1_abs+3
         sta fat_tmp0+3
         jsr sd_write_sector
+        bcc _fscv_fail
 
         ; Write same sector to FAT2: FAT1 sector + sectors_per_fat
         clc
@@ -932,6 +946,10 @@ _fscv_shr:
         adc fat_sectors_per_fat+3
         sta fat_tmp0+3
         jsr sd_write_sector
+        ; Carry from sd_write_sector propagates to caller
+        rts
+_fscv_fail:
+        clc
         rts
 
 ; ============================================================================
@@ -1028,7 +1046,10 @@ _ffed_next_sector:
         sta fat_dir_sector+3
 
         jsr sd_read_sector
-        lda #<SECTOR_BUF
+        bcs +
+        clc
+        rts                     ; SD read failed
++       lda #<SECTOR_BUF
         sta fat_tmp1
         lda #>SECTOR_BUF
         sta fat_tmp1+1
@@ -1187,6 +1208,7 @@ _frcv_shr:
         adc fat_fat_sec_idx+3
         sta fat_tmp0+3
         jsr sd_read_sector
+        bcc _frcv_fail
 
         ; Read 4-byte entry from SD buffer using [temp_ptr],Z
         clc
@@ -1215,6 +1237,10 @@ _frcv_shr:
         lda [temp_ptr],z
         and #$0F                ; FAT32 uses low 28 bits
         sta fat_tmp0+3
+        sec                     ; Success
+        rts
+_frcv_fail:
+        clc
         rts
 
 ; ============================================================================
@@ -1241,7 +1267,9 @@ fat_create_direntry:
         lda fat_dir_sector+3
         sta fat_tmp0+3
         jsr sd_read_sector
-
+        bcs +
+        rts                     ; Return carry clear = error
++
         ; Copy SD buffer to SECTOR_BUF for modification
         lda #<SECTOR_BUF
         sta fat_tmp1
@@ -1522,11 +1550,13 @@ _fsf_setup:
         sta fat_file_cluster+3
         sta fat_cur_cluster+3
         jsr fat_allocate_cluster
+        bcc _fsf_fail
         lda #1
         sta fat_chain_allocated
 
         ; Step 4: Create directory entry
         jsr fat_create_direntry
+        bcc _fsf_fail
         lda #1
         sta fat_direntry_created
 
@@ -1574,6 +1604,7 @@ _fsf_write_loop:
 
         ; Allocate new cluster (mark end-of-chain)
         jsr fat_allocate_cluster
+        bcc _fsf_fail_pop4
 
         ; Chain old cluster → new cluster
         ; fat_tmp0 = old cluster (from stack)
@@ -1596,6 +1627,7 @@ _fsf_write_loop:
         pla
         sta fat_tmp0
         jsr fat_chain_cluster
+        bcc _fsf_fail
 
         lda #0
         sta fat_sector_in_cluster
@@ -1665,6 +1697,7 @@ _fsf_write_sector:
 _fsf_write_done:
         ; All data written — update directory entry with final file size
         jsr fat_update_direntry_size
+        bcc _fsf_fail           ; Size update failed
         sec                     ; Success
         rts
 
@@ -1825,7 +1858,9 @@ fat_update_direntry_size:
         lda fat_dir_sector+3
         sta fat_tmp0+3
         jsr sd_read_sector
-
+        bcs +
+        rts
++
         ; Set up temp_ptr to entry in SD buffer ($FFD6E00 + offset)
         clc
         lda #$00
@@ -1881,7 +1916,9 @@ fat_delete_direntry:
         lda fat_dir_sector+3
         sta fat_tmp0+3
         jsr sd_read_sector
-
+        bcs +
+        rts
++
         ; Set up temp_ptr to entry in SD buffer
         clc
         lda #$00
