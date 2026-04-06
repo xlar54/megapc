@@ -412,11 +412,13 @@ no_boot_dev:
 .print_loop:
 	lodsb
 	or	al, al
-	jz	.halt
+	jz	.wait_key
 	extended_putchar_al
 	jmp	.print_loop
-.halt:
-	jmp	.halt			; Hang (user must reset)
+.wait_key:
+	mov	ah, 0
+	int	16h			; Wait for keypress (allows TAB menu)
+	jmp	.wait_key		; Loop (user can TAB to menu)
 
 no_boot_msg:
 	db	'No bootable disk found. Insert boot disk and reset.', 0
