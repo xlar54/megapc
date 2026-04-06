@@ -723,23 +723,32 @@ _fffc_shl:
 
 _fffc_done:
         ; Validate: cluster must be <= fat_max_cluster
+        ; If beyond max, the disk is full — no valid free clusters remain
         lda fat_tmp0+3
         cmp fat_max_cluster+3
         bcc _fffc_valid         ; Less → valid
-        bne _fffc_not_in_sector ; Greater → skip, try next sector
+        bne _fffc_full          ; Greater → disk full
         lda fat_tmp0+2
         cmp fat_max_cluster+2
         bcc _fffc_valid
-        bne _fffc_not_in_sector
+        bne _fffc_full
         lda fat_tmp0+1
         cmp fat_max_cluster+1
         bcc _fffc_valid
-        bne _fffc_not_in_sector
+        bne _fffc_full
         lda fat_tmp0
         cmp fat_max_cluster
         bcc _fffc_valid
         beq _fffc_valid
-        bra _fffc_not_in_sector ; Past max cluster → disk full
+_fffc_full:
+        ; Past max cluster — no valid free space
+        lda #0
+        sta fat_tmp0
+        sta fat_tmp0+1
+        sta fat_tmp0+2
+        sta fat_tmp0+3
+        clc                     ; Not found
+        rts
 _fffc_valid:
         sec                     ; Found valid free cluster
         rts
@@ -1721,6 +1730,13 @@ _ffc_loop:
         pla
         sta fat_cur_cluster
 
+        ; Check for 0 (already freed / broken chain) — stop before corrupting FAT[0]
+        lda fat_cur_cluster
+        ora fat_cur_cluster+1
+        ora fat_cur_cluster+2
+        ora fat_cur_cluster+3
+        beq _ffc_done           ; Next is 0 → chain broken, stop
+
         ; Check if next is end-of-chain ($0FFFFFF8+)
         lda fat_cur_cluster+3
         and #$0F
@@ -1735,7 +1751,7 @@ _ffc_loop:
         lda fat_cur_cluster
         cmp #$F8
         bcc _ffc_loop           ; Below $F8 → not end
-        ; End of chain — also check for 0 (already freed/bad)
+_ffc_done:
         rts
 
 ; ============================================================================
