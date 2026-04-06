@@ -17,7 +17,10 @@
 ;              $02 = read sector, $03 = write sector, $57 = write gate
 ;   $D681-684 — SD sector number (32-bit, little-endian)
 ;   $D689     — bit 7: map SD buffer instead of floppy buffer
-;   $FFD6E00  — 512-byte SD sector buffer
+;   $FFD6E00  — 512-byte SD sector buffer (28-bit: MB=$FF, bank=$0D, addr=$6E00)
+;
+; IMPORTANT: The SD buffer is in I/O space at $FFD6E00, NOT chip RAM at $00D6E00.
+; CPU access requires temp_ptr+3=$FF. DMA requires MB=$FF for source or dest.
 ;
 ; All 32-bit values are little-endian.
 ; Uses SECTOR_BUF ($9800) as temp workspace.
@@ -117,76 +120,101 @@ sd_write_sector:
 ; ============================================================================
 ; sd_buf_to_chip — Copy 512 bytes from SD buffer ($FFD6E00) to chip RAM
 ; ============================================================================
-; Input: fat_tmp1 = destination address (32-bit)
+; Input: fat_tmp1 = destination address (32-bit, in chip RAM MB=$00)
+; Uses inline DMA list with source MB=$FF to reach SD buffer.
 ;
 sd_buf_to_chip:
-        lda #$00
-        sta dma_src_lo
-        lda #$6E
-        sta dma_src_hi
-        lda #$0D
-        sta dma_src_bank        ; $FFD6E00 → bank $0D, addr $6E00
+        ; Patch the inline DMA list
         lda fat_tmp1
-        sta dma_dst_lo
+        sta _sbtc_dst
         lda fat_tmp1+1
-        sta dma_dst_hi
+        sta _sbtc_dst+1
         lda fat_tmp1+2
-        sta dma_dst_bank
+        sta _sbtc_dst_bank
+
         lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi        ; 512 bytes
-        jsr do_dma_chip_copy
+        sta $D707               ; Trigger DMA
+        .byte $80, $FF          ; Source MB = $FF (I/O space)
+        .byte $81, $00          ; Dest MB = $00 (chip RAM)
+        .byte $00               ; End options
+        .byte $00               ; Command = COPY
+        .word $0200             ; Count = 512
+        .word $6E00             ; Source = $6E00 (SD buffer)
+        .byte $0D               ; Source bank = $0D
+_sbtc_dst:
+        .word $0000             ; Dest address (patched)
+_sbtc_dst_bank:
+        .byte $00               ; Dest bank (patched)
+        .byte $00, $00, $00     ; Sub/modulo
         rts
 
 ; ============================================================================
 ; chip_to_sd_buf — Copy 512 bytes from chip RAM to SD buffer ($FFD6E00)
 ; ============================================================================
-; Input: fat_tmp1 = source address (32-bit)
+; Input: fat_tmp1 = source address (32-bit, in chip RAM MB=$00)
 ;
 chip_to_sd_buf:
         lda fat_tmp1
-        sta dma_src_lo
+        sta _ctsb_src
         lda fat_tmp1+1
-        sta dma_src_hi
+        sta _ctsb_src+1
         lda fat_tmp1+2
-        sta dma_src_bank
+        sta _ctsb_src_bank
+
         lda #$00
-        sta dma_dst_lo
-        lda #$6E
-        sta dma_dst_hi
-        lda #$0D
-        sta dma_dst_bank        ; $FFD6E00
-        lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi
-        jsr do_dma_chip_copy
+        sta $D707
+        .byte $80, $00          ; Source MB = $00 (chip RAM)
+        .byte $81, $FF          ; Dest MB = $FF (I/O space)
+        .byte $00               ; End options
+        .byte $00               ; Command = COPY
+        .word $0200             ; Count = 512
+_ctsb_src:
+        .word $0000             ; Source address (patched)
+_ctsb_src_bank:
+        .byte $00               ; Source bank (patched)
+        .word $6E00             ; Dest = $6E00 (SD buffer)
+        .byte $0D               ; Dest bank = $0D
+        .byte $00, $00, $00
         rts
 
 ; ============================================================================
-; attic_to_sd_buf — DMA 512 bytes from attic to SD buffer
+; attic_to_sd_buf — DMA 512 bytes from attic to SD buffer ($FFD6E00)
 ; ============================================================================
 ; Input: fat_attic_bank, fat_attic_lo/hi = source in attic
 ;
 attic_to_sd_buf:
         lda fat_attic_lo
-        sta dma_src_lo
+        sta _atsb_src
         lda fat_attic_hi
-        sta dma_src_hi
+        sta _atsb_src+1
         lda fat_attic_bank
-        sta dma_src_bank
+        and #$0F
+        sta _atsb_src_bank
+        ; Compute source MB: $80 + high nibble of attic_bank
+        lda fat_attic_bank
+        lsr
+        lsr
+        lsr
+        lsr
+        ora #$80
+        sta _atsb_src_mb
+
         lda #$00
-        sta dma_dst_lo
-        lda #$6E
-        sta dma_dst_hi
-        lda #$0D
-        sta dma_dst_bank        ; SD buffer at $FFD6E00
-        lda #$00
-        sta dma_count_lo
-        lda #$02
-        sta dma_count_hi
-        jsr do_dma_from_attic   ; Attic → chip (SD buffer is in chip space)
+        sta $D707
+        .byte $80               ; Source MB option
+_atsb_src_mb:
+        .byte $80               ; Source MB (patched)
+        .byte $81, $FF          ; Dest MB = $FF (I/O space for SD buffer)
+        .byte $00               ; End options
+        .byte $00               ; Command = COPY
+        .word $0200             ; Count = 512
+_atsb_src:
+        .word $0000             ; Source address (patched)
+_atsb_src_bank:
+        .byte $00               ; Source bank (patched)
+        .word $6E00             ; Dest = $6E00 (SD buffer)
+        .byte $0D               ; Dest bank = $0D
+        .byte $00, $00, $00
         rts
 
 ; ============================================================================
@@ -733,8 +761,8 @@ fat_set_cluster_value:
         lda #$0D
         adc #0
         sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        lda #$FF
+        sta temp_ptr+3          ; MB=$FF for I/O space ($FFD6E00)
 
         ; Write 4 bytes of value from fat_tmp1
         lda fat_tmp1
@@ -1050,8 +1078,8 @@ fat_read_cluster_value:
         lda #$0D
         adc #0
         sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        lda #$FF
+        sta temp_ptr+3          ; MB=$FF for I/O space ($FFD6E00)
 
         ldz #0
         lda [temp_ptr],z
@@ -1194,8 +1222,11 @@ _fcd_skip_ext:
 
 _fcd_dot:
         ; Switch to extension: Z = 8 (offset within dir entry)
+        ; Reset ext count so last extension wins for multi-dot filenames
         lda #1
         sta fat_ext_flag
+        lda #0
+        sta fat_ext_count
         ldz #8
         inx
         bra _fcd_name_loop
