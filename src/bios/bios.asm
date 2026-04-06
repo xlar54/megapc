@@ -387,35 +387,20 @@ next_out:
 	mov	ax, [es:tm_msec]
 	mov	[cs:last_int8_msec], ax
 
-; Try to boot from floppy A: then B:
+; Try to boot from floppy A:
 
 	mov	ax, 0
 	mov	es, ax
 
-	; Try drive A: (DL=0)
 	mov	ax, 0x0201		; AH=02 read, AL=01 sector
 	mov	dh, 0			; Head 0
 	mov	dl, 0			; Drive A:
 	mov	cx, 1			; Cylinder 0, Sector 1
 	mov	bx, 0x7c00
 	int	13h
-	jc	try_drive_b		; Read failed — try B:
-
-	; Check boot signature at 7C00+510 = 7DFE
-	cmp	word [es:0x7dfe], 0xaa55
-	je	boot_ok
-
-try_drive_b:
-	; Try drive B: (DL=1)
-	mov	ax, 0x0201
-	mov	dh, 0
-	mov	dl, 1			; Drive B:
-	mov	cx, 1
-	mov	bx, 0x7c00
-	int	13h
 	jc	no_boot_dev		; Read failed — no bootable disk
 
-	; Check boot signature
+	; Check boot signature at 7C00+510 = 7DFE
 	cmp	word [es:0x7dfe], 0xaa55
 	je	boot_ok
 
