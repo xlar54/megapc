@@ -301,6 +301,28 @@ _beep_wait:
         lda #$03
         sta $D06A
 
+        ; Patch charset: add backslash at screen code $5C
+        ; Charset B has no backslash — screen code $5C shows a pipe/pound
+        ; Overwrite the 8 bytes at $03D800 + $5C*8 = $03DAE0
+        lda #$E0
+        sta temp_ptr
+        lda #$DA
+        sta temp_ptr+1
+        lda #$03
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldx #0
+-       lda backslash_char,x
+        ldz #0
+        sta [temp_ptr],z
+        inc temp_ptr
+        bne +
+        inc temp_ptr+1
++       inx
+        cpx #8
+        bne -
+
         ; Initialize sprite cursor
         jsr cursor_init
 
@@ -309,6 +331,17 @@ _beep_wait:
 
 ready_msg:
         .text "READY. STARTING EMULATION...", 13, 0
+
+; Backslash character bitmap (8x8 pixels) for charset B patch
+backslash_char:
+        .byte %10000000
+        .byte %01000000
+        .byte %00100000
+        .byte %00010000
+        .byte %00001000
+        .byte %00000100
+        .byte %00000010
+        .byte %00000000
 
 ; ============================================================================
 ; resume_emulation — Called from menu when returning to running emulation
@@ -356,6 +389,26 @@ _resume_restore_zp:
         sta $D069
         lda #$03
         sta $D06A
+
+        ; Patch charset: backslash at screen code $5C
+        lda #$E0
+        sta temp_ptr
+        lda #$DA
+        sta temp_ptr+1
+        lda #$03
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldx #0
+-       lda backslash_char,x
+        ldz #0
+        sta [temp_ptr],z
+        inc temp_ptr
+        bne +
+        inc temp_ptr+1
++       inx
+        cpx #8
+        bne -
 
         ; Re-init sprite cursor (CINT trashes VIC-IV sprite state)
         jsr cursor_init
