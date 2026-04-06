@@ -642,6 +642,18 @@ _i13w_do_write:
         sta dma_count_hi
         jsr do_dma_to_attic
 
+        ; Mark drive as dirty (image modified)
+        lda i13_cur_bank
+        cmp #$20
+        beq _i13w_dirty_b
+        lda #1
+        sta floppy_a_dirty
+        bra _i13w_dirty_done
+_i13w_dirty_b:
+        lda #1
+        sta floppy_b_dirty
+_i13w_dirty_done:
+
         ; Advance BX by 512
         clc
         lda reg_bx
@@ -825,6 +837,8 @@ _lfd_load:
         beq _lfd_ok_a
         lda #1
         sta floppy_b_loaded
+        lda #0
+        sta floppy_b_dirty      ; Fresh image, not dirty
         lda #1
         jsr detect_floppy_geom_drive
         sec
@@ -833,6 +847,7 @@ _lfd_ok_a:
         lda #1
         sta floppy_a_loaded
         lda #0
+        sta floppy_a_dirty      ; Fresh image, not dirty
         jsr detect_floppy_geom_drive
         sec
         rts
@@ -841,6 +856,121 @@ _lfd_fail:
         pla                     ; Discard drive number
         clc
         rts
+
+; ============================================================================
+; save_floppy_drive — Save floppy image from attic back to SD card
+; ============================================================================
+; Input:  A = drive number (0=A, 1=B)
+;         floppy_fname_page = filename (set by caller before calling)
+; Output: carry set = success, carry clear = failure
+;
+; Uses Hyppo closefile + writefile approach:
+;   1. Set filename via Hyppo setname ($2E)
+;   2. Compute image size from geometry
+;   3. DMA from attic to chip RAM in 512-byte chunks
+;   4. Write each chunk to file via Hyppo
+;
+; For now: uses Hyppo trap $36 (savefile_attic) if available
+; Falls back to error if not supported
+;
+save_floppy_drive:
+        pha                     ; Save drive number
+
+        ; Compute image size: cyls × heads × spt × 512
+        ; For 1.44MB: 80 × 2 × 18 × 512 = 1474560 = $168000
+        ; Store total sectors in save_total_lo/hi
+        pla
+        pha
+        beq _sfd_geom_a
+        ; Drive B geometry
+        lda floppy_b_cyls
+        sta scratch_a
+        lda floppy_b_heads
+        sta scratch_b
+        lda floppy_b_spt
+        sta scratch_c
+        bra _sfd_calc_size
+_sfd_geom_a:
+        lda floppy_a_cyls
+        sta scratch_a
+        lda floppy_a_heads
+        sta scratch_b
+        lda floppy_a_spt
+        sta scratch_c
+_sfd_calc_size:
+        ; Total sectors = cyls × heads × spt
+        ; Use hardware multiplier at $D770
+        lda scratch_a           ; Cylinders
+        sta $D770
+        lda #0
+        sta $D771
+        lda scratch_b           ; Heads
+        sta $D774
+        lda #0
+        sta $D775
+        ; Result at $D778-$D77B = cyls × heads
+        lda $D778
+        sta $D770
+        lda $D779
+        sta $D771
+        lda scratch_c           ; SPT
+        sta $D774
+        lda #0
+        sta $D775
+        ; Result = total sectors (16-bit at $D778/$D779)
+        lda $D778
+        sta save_total_lo
+        lda $D779
+        sta save_total_hi
+
+        ; Set Hyppo filename
+        ldy #>floppy_fname_page
+        lda #$2E                ; hyppo_setname
+        sta $D640
+        clv
+        bcc _sfd_fail
+
+        ; Save from attic using Hyppo
+        ; Set up size in bytes: total_sectors × 512
+        ; D = total_sectors << 9 (× 512)
+        ; We need to pass size to Hyppo somehow
+        ; For now: try trap $36 (save_file_attic — unconfirmed)
+        ; Z = attic MB offset ($10=A, $20=B), Y/X = $00
+        pla                     ; Drive number
+        pha
+        beq _sfd_save_a
+        ldz #$20                ; Drive B attic
+        bra _sfd_do_save
+_sfd_save_a:
+        ldz #$10                ; Drive A attic
+_sfd_do_save:
+        ldy #$00
+        ldx #$00
+        lda #$36                ; hyppo_savefile_attic (may not exist)
+        sta $D640
+        clv
+        bcc _sfd_fail           ; If trap not supported, carry clear
+
+        ; Success — clear dirty flag
+        pla
+        beq _sfd_clear_a
+        lda #0
+        sta floppy_b_dirty
+        sec
+        rts
+_sfd_clear_a:
+        lda #0
+        sta floppy_a_dirty
+        sec
+        rts
+
+_sfd_fail:
+        pla                     ; Discard drive number
+        clc
+        rts
+
+save_total_lo   .byte 0
+save_total_hi   .byte 0
 
 ; ============================================================================
 ; detect_floppy_geom_drive — Auto-detect floppy geometry from BPB
@@ -1270,6 +1400,8 @@ floppy_a_type:
         .byte 0
 floppy_a_loaded:
         .byte 0
+floppy_a_dirty:
+        .byte 0                 ; Set to 1 when INT 13h AH=03 writes to drive A
 floppy_b_spt:
         .byte 0
 floppy_b_heads:
@@ -1280,6 +1412,8 @@ floppy_b_type:
         .byte 0
 floppy_b_loaded:
         .byte 0
+floppy_b_dirty:
+        .byte 0                 ; Set to 1 when INT 13h AH=03 writes to drive B
 
 ; Page-aligned filename for Hyppo setname
 ; Must be at a $xx00 address, null-terminated

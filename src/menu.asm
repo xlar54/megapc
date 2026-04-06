@@ -304,6 +304,69 @@ menu_mount_drive_var .byte 0
 menu_do_mount_fn:
         sta menu_mount_drive_var
 
+        ; Check if current disk is dirty — save before replacing
+        tax
+        beq _mdm_check_a
+        lda floppy_b_dirty
+        beq _mdm_not_dirty
+        bra _mdm_ask_save
+_mdm_check_a:
+        lda floppy_a_dirty
+        beq _mdm_not_dirty
+_mdm_ask_save:
+        ; Ask user to save changes
+        lda #$0D
+        jsr CHROUT
+        ldx #0
+-       lda msg_save_changes,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        ; Wait for Y/N
+_mdm_save_wait:
+        jsr CHRIN
+        cmp #'y'
+        beq _mdm_do_save
+        cmp #'Y'
+        beq _mdm_do_save
+        cmp #'n'
+        beq _mdm_not_dirty
+        cmp #'N'
+        beq _mdm_not_dirty
+        bra _mdm_save_wait
+_mdm_do_save:
+        lda #$0D
+        jsr CHROUT
+        ldx #0
+-       lda msg_saving,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+        lda menu_mount_drive_var
+        jsr save_floppy_drive
+        bcs _mdm_save_ok
+        ; Save failed
+        ldx #0
+-       lda msg_save_err,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       bra _mdm_not_dirty
+_mdm_save_ok:
+        ldx #0
+-       lda msg_save_ok,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+_mdm_not_dirty:
+
         ; Print filename prompt
         lda #$0D
         jsr CHROUT
@@ -646,6 +709,15 @@ menu_keys_hdr:
 
 msg_filename:
         .text "Filename: ", 0
+
+msg_save_changes:
+        .text "Disk modified. Save? (Y/N) ", 0
+msg_saving:
+        .text "Saving...", 0
+msg_save_ok:
+        .text " OK", 13, 0
+msg_save_err:
+        .text " FAILED", 13, 0
 
 msg_loading:
         .text "Loading...", 0
