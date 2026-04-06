@@ -2763,9 +2763,9 @@ _ii_int29:
 
 _ii_int15:
         ; INT 15h — System services
-        ; AH=88: Get extended memory size → return 0 (no extended memory)
-        ; AH=C0: Get system config → return CF=1 (not supported)
-        ; All others: return CF=1, AH=86 (unsupported)
+        ; AH=88: Get extended memory (handled here, returns 0)
+        ; AH=90/91: Device wait (handled here, returns CF=0)
+        ; All others: pass to BIOS via IVT (AH=C0, etc.)
         lda reg_ah
         cmp #$88
         bne _i15_not88
@@ -2780,11 +2780,10 @@ _i15_not88:
         beq _i15_device_wait    ; AH=90: Device busy (wait)
         cmp #$91
         beq _i15_device_wait    ; AH=91: Interrupt complete
-        ; All others: return CF=1, AH=86 (unsupported)
-        lda #$86
-        sta reg_ah
-        lda #1
-        sta flag_cf             ; CF=1 error
+        ; All others: pass to BIOS via IVT (handles AH=C0, etc.)
+        lda #$15
+        jsr do_sw_interrupt
+        jsr compute_cs_base
         jmp opcode_done
 
 _i15_device_wait:
