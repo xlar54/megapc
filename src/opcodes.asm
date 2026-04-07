@@ -318,7 +318,7 @@ op_alu_reg_rm:
         ; reg value is in op_dest (from load_reg_operand)
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         ; Write result back to reg (unless CMP)
         lda extra_field
         cmp #7                  ; CMP
@@ -343,7 +343,7 @@ _arm_w_rm_dest:
         sta op_dest+1
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda extra_field
         cmp #7
         beq _arm_done
@@ -362,7 +362,7 @@ _arm_byte:
         ; reg is dest (already loaded), r/m is source
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda extra_field
         cmp #7
         beq _arm_done
@@ -381,7 +381,7 @@ _arm_b_rm_dest:
         sta op_dest+1
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda extra_field
         cmp #7
         beq _arm_done
@@ -977,6 +977,7 @@ _cse_cli:
 _cse_sti:
         lda #1
         sta flag_if
+        sta $8F1B               ; Inhibit IRQ for one instruction (STI shadow)
         jmp opcode_done
 _cse_cld:
         lda #0
@@ -1221,7 +1222,7 @@ op_alu_imm_acc:
         sta op_source+1
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda extra_field
         cmp #7                  ; CMP doesn't store
         beq _aia_done
@@ -1243,7 +1244,7 @@ _aia_byte:
         sta op_source+1
         lda extra_field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda extra_field
         cmp #7
         beq _aia_done
@@ -1296,7 +1297,7 @@ _airm_sx8:
 _airm_w_go:
         lda i_reg              ; ALU sub-op from ModR/M reg field
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda i_reg
         cmp #7                 ; CMP
         beq _airm_done
@@ -1316,7 +1317,7 @@ _airm_byte:
         sta op_source+1
         lda i_reg
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
         lda i_reg
         cmp #7
         beq _airm_done
@@ -1369,6 +1370,7 @@ _msreg_to_sreg:
         bne +
         lda #1
         sta ss_dirty
+        sta $8F1B               ; Inhibit IRQ for one instruction (MOV SS shadow)
         jmp opcode_done
 +       cpx #SEG_DS_OFS
         bne +
@@ -2097,7 +2099,7 @@ _cmps_do:
         lda #5                  ; SUB
         sta extra_field         ; Tell compute_cf / compute_of_arith this is SUB
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
 
         ; Update SI, DI
         lda #1
@@ -2174,7 +2176,7 @@ _scas_src_done:
         lda #5                  ; SUB (CMP)
         sta extra_field         ; Tell compute_cf / compute_of_arith this is SUB
         jsr alu_dispatch
-        jsr compute_of_arith
+        jsr maybe_compute_of
 
         ; Update DI
         lda #1
@@ -2385,6 +2387,7 @@ op_pop_seg:
         bne +
         lda #1
         sta ss_dirty
+        sta $8F1B               ; Inhibit IRQ for one instruction (POP SS shadow)
         jmp opcode_done
 +       cpx #SEG_DS_OFS
         bne +

@@ -328,6 +328,23 @@ compute_af:
         rts
 
 ; ============================================================================
+; maybe_compute_of — Skip OF for logical ops (OR/AND/XOR already clear it)
+; ============================================================================
+; Input: extra_field = ALU sub-op
+; Logical ops (1=OR, 4=AND, 6=XOR) already set OF=0 in their alu handlers.
+; Only call compute_of_arith for arithmetic ops.
+maybe_compute_of:
+        lda extra_field
+        cmp #1                  ; OR
+        beq +
+        cmp #4                  ; AND
+        beq +
+        cmp #6                  ; XOR
+        beq +
+        jmp compute_of_arith
++       rts
+
+; ============================================================================
 ; compute_of — Overflow flag for arithmetic
 ; ============================================================================
 ; OF = sign of result differs from expected based on operand signs

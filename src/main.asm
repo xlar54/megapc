@@ -277,6 +277,7 @@ _beep_wait:
         sta ds_dirty
         lda #0
         sta $8F17
+        sta $8F1B               ; Clear interrupt inhibit flag
 
         ; Clear screen before emulation
         lda #147

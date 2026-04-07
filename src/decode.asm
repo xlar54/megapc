@@ -587,6 +587,12 @@ _od_no_rep:
         ; --- Deliver INT 8 if pending (after instruction is fully complete) ---
         lda int8_asap
         beq +
+        lda $8F1B               ; Interrupt inhibit (STI/MOV SS/POP SS shadow)
+        beq _od_no_inhibit
+        lda #0
+        sta $8F1B               ; Clear — shadow lasts one instruction only
+        bra +                   ; Skip INT 8 this time
+_od_no_inhibit:
         lda flag_if
         beq +
         ; Skip INT 8 during early kernel init (CS=$0060)
