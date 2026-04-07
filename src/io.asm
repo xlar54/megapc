@@ -26,8 +26,12 @@ io_read_port:
 
         ; Low port range (0–255) — check highest first
         lda temp32
+        cmp #$62
+        bcs _irp_kbd            ; $62+ → keyboard
+        cmp #$61
+        beq _irp_port61         ; $61 → speaker/PPI port B
         cmp #$60
-        bcs _irp_kbd            ; $60+ → keyboard
+        beq _irp_kbd_data       ; $60 → keyboard data
         cmp #$40
         bcs _irp_pit            ; $40-$5F → PIT
         cmp #$3D
@@ -37,6 +41,11 @@ io_read_port:
 
         ; Unhandled low port: return $FF
         lda #$FF
+        rts
+
+_irp_port61:
+        ; Port $61: return current speaker/PPI state
+        lda spk_port61
         rts
 
 _irp_pic:
@@ -101,8 +110,21 @@ _irp_cga_other:
 ;
 io_write_port:
         ; Input: temp32 = port number (16-bit), A = value to write
-        ; Check for CRTC index/data registers
+        ; Check port high byte first for fast dispatch
         lda temp32+1
+        bne _iow_high_ports      ; Port >= $100
+        ; Low ports ($00-$FF)
+        lda temp32
+        cmp #$43
+        beq _iow_pit_cmd
+        cmp #$42
+        beq _iow_pit_data
+        cmp #$61
+        beq _iow_port61
+        rts
+
+_iow_high_ports:
+        ; Check for CRTC index/data registers
         cmp #$03
         bne _iow_done
         lda temp32
@@ -172,6 +194,189 @@ _iow_div_done:
         lda scratch_a
         sta scr_col
         jsr cursor_update
+        rts
+
+; ============================================================================
+; PC Speaker emulation via SID chip
+; ============================================================================
+; PIT Timer 2 sets frequency, port $61 gates speaker on/off.
+; Maps PC speaker frequency to MEGA65 SID voice 1.
+;
+; State variables:
+spk_pit_lobyte  = $8FE8        ; PIT divider low byte
+spk_pit_hibyte  = $8FE9        ; PIT divider high byte
+spk_pit_latch   = $8FEA        ; 0=expecting low byte, 1=expecting high byte
+spk_port61      = $8FEB        ; Current port $61 value
+
+_iow_pit_cmd:
+        ; Port $43: PIT command register
+        ; We only care about Timer 2 (bits 7:6 = 10)
+        lda reg_al
+        and #$C0
+        cmp #$80                ; Timer 2?
+        bne _iow_pit_cmd_done
+        ; Reset latch to expect low byte first
+        lda #0
+        sta spk_pit_latch
+_iow_pit_cmd_done:
+        rts
+
+_iow_pit_data:
+        ; Port $42: PIT Timer 2 data
+        ; Two sequential writes: low byte then high byte
+        lda spk_pit_latch
+        bne _iow_pit_hi
+        ; Low byte
+        lda reg_al
+        sta spk_pit_lobyte
+        lda #1
+        sta spk_pit_latch       ; Next write is high byte
+        rts
+_iow_pit_hi:
+        ; High byte — now compute SID frequency
+        lda reg_al
+        sta spk_pit_hibyte
+        lda #0
+        sta spk_pit_latch       ; Reset for next time
+        ; Convert PC PIT divider to SID frequency
+        ; PC freq = 1193182 / divider
+        ; SID freq register = PC_freq * 65536 / 985248 (PAL)
+        ; Simplified: SID = (1193182 * 65536) / (985248 * divider)
+        ;           ≈ 79384678 / divider
+        ; For practical purposes: SID ≈ $04BD0000 / divider
+        ; But 32-bit divide is expensive. Use lookup or approximation:
+        ; SID_freq ≈ 17 * (65536 / divider) = 17 * 65536 / divider
+        ; Simpler: use hardware multiplier
+        ; SID = $04BD * $0100 / divider (approx)
+        ;
+        ; Even simpler: SID_freq = $04BD0000 / divider
+        ; Since divider is 16-bit, we can use: result = $04BD * (256 / divider_hi)
+        ; But this loses precision for small dividers.
+        ;
+        ; Pragmatic approach: use the MEGA65 hardware divider if available,
+        ; or just scale linearly. For now:
+        ; SID_freq = $FFFF * 1193182 / (985248 * divider)
+        ;          ≈ $FFFF * 1.211 / divider
+        ;          ≈ $1362E / divider (for 16-bit result)
+        ;
+        ; Use hardware multiplier for: $04BD00 / divider
+        ; $D770-$D773 = dividend, $D774-$D777 = divisor
+        ; Result at $D778-$D77B
+        ; Actually the MEGA65 math unit does multiply, not divide.
+        ; Let's just do a simple shift approximation:
+        ; If divider < 256: SID = high_table[divider]
+        ; If divider >= 256: SID = $04BD00 >> (log2(divider) - 8)
+        ;
+        ; Simplest correct approach: repeated subtraction divide
+        ; But that's slow for large dividers.
+        ;
+        ; FASTEST approach: approximate with bit shifts
+        ; SID ≈ $04BD shifted right by the position of the highest bit in divider
+        ; This gives the right order of magnitude.
+        ;
+        ; Actually, let's just compute it properly using 16-bit divide:
+        ; We want SID = $04BD * 256 / divider = $04BD00 / divider
+        ; dividend = $04BD00 (24-bit), divisor = divider (16-bit)
+        ;
+        ; 24÷16 divide via shift-subtract:
+        lda #$00
+        sta scratch_a           ; Result low
+        sta scratch_b           ; Result high
+        ; Dividend = $131700 (24-bit). Result shifted left 4 after divide.
+        lda #$00
+        sta $8FEC               ; Dividend byte 0 (low)
+        lda #$17
+        sta $8FED               ; Dividend byte 1
+        lda #$13
+        sta $8FEE               ; Dividend byte 2 (high)
+        ; Divisor in spk_pit_lobyte:spk_pit_hibyte
+        ; Check for zero divisor
+        lda spk_pit_lobyte
+        ora spk_pit_hibyte
+        beq _iow_pit_hi_done   ; Divisor zero — skip
+
+        ; 16-bit result = 24-bit dividend / 16-bit divisor
+        ; Dividend = $04BD00, Divisor = spk_pit_hibyte:spk_pit_lobyte
+        ; Using shift-subtract: 16 iterations
+        lda #0
+        sta scratch_a           ; Remainder low
+        sta scratch_b           ; Remainder high
+        sta $8FEF               ; Result low (MUST init to 0)
+        sta $8FF0               ; Result high
+        ldx #24                 ; 24 iterations for 24-bit dividend
+_iow_div_loop:
+        ; Shift dividend left (MSB into remainder)
+        asl $8FEC
+        rol $8FED
+        rol $8FEE
+        rol scratch_a
+        rol scratch_b
+        ; Shift result left
+        asl $8FEF
+        rol $8FF0
+        ; Try subtract divisor from remainder
+        sec
+        lda scratch_a
+        sbc spk_pit_lobyte
+        tay                     ; Save tentative low
+        lda scratch_b
+        sbc spk_pit_hibyte
+        bcc _iow_div_no_sub     ; Remainder < divisor, don't subtract
+        ; Remainder >= divisor: commit subtraction, set result bit
+        sta scratch_b
+        sty scratch_a
+        inc $8FEF               ; Set low bit of result
+_iow_div_no_sub:
+        dex
+        bne _iow_div_loop
+        ; Result in $8FEF:$8FF0 — shift left 4 for correct SID frequency
+        asl $8FEF
+        rol $8FF0
+        asl $8FEF
+        rol $8FF0
+        asl $8FEF
+        rol $8FF0
+        asl $8FEF
+        rol $8FF0
+        ; Write to SID voice 1 frequency
+        lda $8FEF
+        sta $D400               ; SID freq low
+        lda $8FF0
+        sta $D401               ; SID freq high
+_iow_pit_hi_done:
+        rts
+
+_iow_port61:
+        ; Port $61: speaker control
+        ; Bit 0 = PIT Timer 2 gate, Bit 1 = Speaker data
+        ; Both set = tone on
+        lda reg_al
+        sta spk_port61
+        and #$03
+        cmp #$03
+        beq _iow_spk_on
+        ; Speaker off — just clear gate bit
+        lda #$40                ; Gate off, pulse waveform
+        sta $D404
+        rts
+_iow_spk_on:
+        ; Speaker on — apply frequency and gate
+        lda #$0F
+        sta $D418               ; Volume = 15
+        lda #$08
+        sta $D402               ; Pulse width low
+        lda #$08
+        sta $D403               ; Pulse width high
+        lda #$00
+        sta $D405               ; Attack=0, Decay=0
+        lda #$F0
+        sta $D406               ; Sustain=15, Release=0
+        lda $8FEF
+        sta $D400               ; Freq low
+        lda $8FF0
+        sta $D401               ; Freq high
+        lda #$41                ; Gate ON + pulse
+        sta $D404
         rts
 
 ; ============================================================================
