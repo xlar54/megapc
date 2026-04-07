@@ -381,7 +381,7 @@ _rrm16_seg_wrap:
         lda #0
         sta temp32
         sta temp32+1
-        ldx #SEG_DS_OFS         ; Default segment (seg_ofs_to_linear handles override)
+        ldx ea_seg_ofs          ; Use correct segment for this operand
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         ldz #0
@@ -515,7 +515,7 @@ _wrm16_seg_wrap:
         lda #0
         sta temp32
         sta temp32+1
-        ldx #SEG_DS_OFS
+        ldx ea_seg_ofs          ; Use correct segment for this operand
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         lda op_result+1

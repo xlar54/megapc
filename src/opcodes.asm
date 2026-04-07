@@ -231,7 +231,12 @@ op_inc_dec_r16:
         adc #0
         sta op_result+1
         sta regs+1,x
-        ; INC/DEC don't affect CF
+        ; INC/DEC don't affect CF — set AF, ZF, SF, PF, OF
+        lda #1
+        sta op_source
+        lda #0
+        sta op_source+1
+        jsr compute_af
         jsr set_flags_logic     ; Set ZF, SF, PF
         jsr compute_of_arith   ; Set OF
         jmp opcode_done
@@ -247,6 +252,11 @@ _idr_dec:
         sbc #0
         sta op_result+1
         sta regs+1,x
+        lda #1
+        sta op_source
+        lda #0
+        sta op_source+1
+        jsr compute_af
         jsr set_flags_logic
         jsr compute_of_arith
         jmp opcode_done
@@ -3445,6 +3455,7 @@ _idr_rm_inc_w:
         sta op_result+1
 _idr_rm_w_done:
         jsr write_rm16
+        jsr compute_af
         jsr set_flags_logic
         jsr compute_of_arith
         jmp opcode_done
@@ -3479,6 +3490,7 @@ _idr_rm_b_done:
         sta op_result+1
         lda op_result
         jsr write_rm8
+        jsr compute_af
         jsr set_flags_logic
         jsr compute_of_arith
         jmp opcode_done

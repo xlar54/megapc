@@ -513,14 +513,22 @@ _i10_scroll_up:
         jsr clear_vidbuf
         rts
 _i10su_scroll:
-        ; AL>0: scroll up AL lines
+        ; AL>0: scroll up AL lines (preserve cursor position)
         sta $8FD8               ; Save line count (do_scr_scroll clobbers X)
+        lda scr_row
+        pha
+        lda scr_col
+        pha
 _i10su_loop:
         lda #SCR_ROWS
         sta scr_row
         jsr do_scr_scroll
         dec $8FD8
         bne _i10su_loop
+        pla
+        sta scr_col
+        pla
+        sta scr_row
         rts
 
 _i10_scroll_down:
@@ -533,12 +541,20 @@ _i10_scroll_down:
         jsr clear_vidbuf
         rts
 _i10sd_scroll:
-        ; AL>0: scroll down AL lines
+        ; AL>0: scroll down AL lines (preserve cursor position)
         sta $8FD8               ; Save count (do_scr_scroll_down clobbers X)
+        lda scr_row
+        pha
+        lda scr_col
+        pha
 _i10sd_loop:
         jsr do_scr_scroll_down
         dec $8FD8
         bne _i10sd_loop
+        pla
+        sta scr_col
+        pla
+        sta scr_row
         rts
 
 _i10_read_char_attr:
@@ -1089,8 +1105,8 @@ clear_vidbuf:
         sta temp_ptr2+2
         lda #$00
         sta temp_ptr2+3
-        ldx #0                  ; 256 iterations × 2 passes = 2000 chars (close enough for 80x25)
-        ldy #2                  ; 2 passes of 256
+        ldx #0                  ; 256 iterations × 8 passes = 2048 cells (covers 80x25=2000)
+        ldy #8                  ; 8 passes of 256
 _cv_outer:
 _cv_loop:
         lda #$20
@@ -1267,9 +1283,17 @@ _cwc_tab:
         ora #$07
         inc a
         cmp #SCR_COLS
-        bcc +
+        bcc _cwc_tab_ok
         lda #0
-+       sta scr_col
+        sta scr_col
+        inc scr_row
+        lda scr_row
+        cmp #SCR_ROWS
+        bcc +
+        jsr do_scr_scroll
++       jmp cursor_update
+_cwc_tab_ok:
+        sta scr_col
         jmp cursor_update
 
 _cwc_bel:
@@ -1281,6 +1305,7 @@ ascii_to_screenB:
         bcc _atsB_space
         cmp #$40
         bcc _atsB_done
+        beq _atsB_at            ; $40: @ → screen code $00
         cmp #$5B
         bcc _atsB_done          ; $41-$5A: uppercase, keep as-is
         cmp #$60
@@ -1292,6 +1317,9 @@ ascii_to_screenB:
 _atsB_space:
         lda #$20
 _atsB_done:
+        rts
+_atsB_at:
+        lda #$00
         rts
 _atsB_lower:
         sec

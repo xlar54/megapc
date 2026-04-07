@@ -1699,7 +1699,7 @@ _fsf_write_sector:
         ; Advance sector in cluster
         inc fat_sector_in_cluster
 
-        ; Decrement remaining sectors (proper 24-bit subtract)
+        ; Decrement remaining sectors (32-bit subtract)
         sec
         lda fat_remaining
         sbc #1
@@ -1710,6 +1710,9 @@ _fsf_write_sector:
         lda fat_remaining+2
         sbc #0
         sta fat_remaining+2
+        lda fat_remaining+3
+        sbc #0
+        sta fat_remaining+3
 
         jmp _fsf_write_loop
 
