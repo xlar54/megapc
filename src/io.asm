@@ -282,7 +282,7 @@ _i10_write_char_attr:
         ; AH=09/0A: Write character at cursor, CX times, no cursor advance
         lda reg_al
         jsr ascii_to_screenB
-        sta scratch_d
+        sta $8FD9               ; Save screen code (scratch_d clobbered by vidbuf calc)
         ; Save cursor position
         lda scr_row
         pha
@@ -309,7 +309,7 @@ _i10wa_loop:
         sta [temp_ptr2],z
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda scratch_d
+        lda $8FD9               ; Recover screen code (safe from vidbuf calc)
         ldz #0
         sta [temp_ptr],z
         inc scr_col
