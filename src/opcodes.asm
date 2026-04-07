@@ -2655,8 +2655,10 @@ _ii_not0_count:
         beq _ii_int29
         cmp #$15
         beq _ii_int15
+        cmp #$1A
+        beq _ii_int1a
         cmp #$19
-        beq _ii_int19
+        beq ii_int19
         cmp #$21
         beq _ii_int21
         ; Default: execute via IVT
@@ -2815,7 +2817,168 @@ _ii_int11:
         sta reg_ah
         jmp opcode_done
 
-_ii_int19:
+_ii_int1a:
+        ; INT 1Ah — Time services
+        lda reg_ah
+        bne _i1a_not_00
+        jmp _i1a_get_ticks
+_i1a_not_00:
+        ; All other AH values: pass to BIOS
+        lda #$1A
+        jsr do_sw_interrupt
+        jsr compute_cs_base
+        jmp opcode_done
+
+_i1a_get_ticks:
+        ; AH=00: Get system time — compute from MEGA65 RTC
+        ; Read RTC
+        lda #$10
+        sta temp_ptr
+        lda #$71
+        sta temp_ptr+1
+        lda #$FD
+        sta temp_ptr+2
+        lda #$0F
+        sta temp_ptr+3
+
+        ldz #0
+        lda [temp_ptr],z        ; BCD seconds
+        jsr i1a_bcd2bin
+        sta $8FA0
+
+        ldz #1
+        lda [temp_ptr],z        ; BCD minutes
+        jsr i1a_bcd2bin
+        sta $8FA1
+
+        ldz #2
+        lda [temp_ptr],z        ; BCD hours
+        and #$3F
+        jsr i1a_bcd2bin
+        sta $8FA2
+
+        ; Compute ticks = hours*65520 + minutes*1092 + seconds*18
+        ; Hours * 65520 ($FFF0)
+        lda $8FA2
+        sta $D770
+        lda #0
+        sta $D771
+        lda #$F0
+        sta $D774
+        lda #$FF
+        sta $D775
+        lda $D778
+        sta $8FA8
+        lda $D779
+        sta $8FA9
+        lda $D77A
+        sta $8FAA
+        lda #0
+        sta $8FAB
+
+        ; Minutes * 1092 ($0444)
+        lda $8FA1
+        sta $D770
+        lda #0
+        sta $D771
+        lda #$44
+        sta $D774
+        lda #$04
+        sta $D775
+        clc
+        lda $8FA8
+        adc $D778
+        sta $8FA8
+        lda $8FA9
+        adc $D779
+        sta $8FA9
+        lda $8FAA
+        adc $D77A
+        sta $8FAA
+        lda $8FAB
+        adc #0
+        sta $8FAB
+
+        ; Seconds * 18 ($12)
+        lda $8FA0
+        sta $D770
+        lda #0
+        sta $D771
+        lda #$12
+        sta $D774
+        lda #$00
+        sta $D775
+        clc
+        lda $8FA8
+        adc $D778
+        sta $8FA8
+        lda $8FA9
+        adc $D779
+        sta $8FA9
+        lda $8FAA
+        adc $D77A
+        sta $8FAA
+
+        ; Return CX:DX = tick count (CX=high, DX=low)
+        lda $8FA8
+        sta reg_dx
+        lda $8FA9
+        sta reg_dx+1
+        lda $8FAA
+        sta reg_cx
+        lda $8FAB
+        sta reg_cx+1
+
+        ; AL = midnight flag (0 = no midnight rollover)
+        lda #0
+        sta reg_al
+
+        ; Also update BDA tick counter
+        lda #$6C
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda $8FA8
+        ldz #0
+        sta [temp_ptr],z
+        lda $8FA9
+        ldz #1
+        sta [temp_ptr],z
+        lda $8FAA
+        ldz #2
+        sta [temp_ptr],z
+        lda $8FAB
+        ldz #3
+        sta [temp_ptr],z
+
+        jmp opcode_done
+
+i1a_bcd2bin:
+        pha
+        and #$F0
+        lsr
+        lsr
+        lsr
+        lsr
+        sta scratch_a
+        asl
+        asl
+        asl
+        clc
+        adc scratch_a
+        adc scratch_a
+        sta scratch_a
+        pla
+        and #$0F
+        clc
+        adc scratch_a
+        rts
+
+ii_int19:
         ; INT 19h — reboot. Print message and halt.
         lda #$0D
         jsr chrout_safe
@@ -2827,7 +2990,7 @@ _ii_int19:
         plx
         inx
         bra -
-+       jmp _ii_int19           ; Loop forever (reboot requested)
++       jmp ii_int19            ; Loop forever (reboot requested)
 _reboot_msg:
         .text "INT 19H: REBOOT REQUESTED", $0D, 0
 
@@ -2979,8 +3142,184 @@ op_emu_special:
         beq _emu_sp_showcur
         cmp #$09
         beq _emu_sp_hidecur
-        ; 0F 01 (RTC), 0F 02/03 (disk) — ignore on our emulator
+        cmp #$01
+        beq _emu_sp_rtc
+        ; 0F 02/03 (disk) — handled by BIOS natively
         jmp opcode_done
+
+_emu_sp_rtc:
+        ; 0F 01: Get RTC — fill time structure at ES:BX
+        ; Read MEGA65 RTC registers ($FFD7110-$FFD7116)
+        ; Write to guest memory at ES:BX using mem_write8
+
+        ; Set up temp_ptr to RTC base $FFD7110 (28-bit)
+        ; $0FFD7110 = byte0:$10, byte1:$71, byte2:$FD, byte3:$0F
+        lda #$10
+        sta temp_ptr
+        lda #$71
+        sta temp_ptr+1
+        lda #$FD
+        sta temp_ptr+2
+        lda #$0F
+        sta temp_ptr+3
+
+        ; Read all RTC values first (before clobbering temp_ptr)
+        ldz #0
+        lda [temp_ptr],z
+        jsr _bcd_to_bin
+        sta $8FA0               ; seconds
+
+        ldz #1
+        lda [temp_ptr],z
+        jsr _bcd_to_bin
+        sta $8FA1               ; minutes
+
+        ldz #2
+        lda [temp_ptr],z
+        and #$3F                ; Mask to BCD hour (24-hour mode)
+        jsr _bcd_to_bin
+        sta $8FA2               ; hours
+
+        ldz #3
+        lda [temp_ptr],z
+        jsr _bcd_to_bin
+        sta $8FA3               ; day
+
+        ldz #4
+        lda [temp_ptr],z
+        jsr _bcd_to_bin
+        sta $8FA4               ; month
+
+        ldz #5
+        lda [temp_ptr],z
+        jsr _bcd_to_bin
+        sta $8FA5               ; year
+
+        ldz #6
+        lda [temp_ptr],z
+        and #$07
+        sta $8FA6               ; weekday
+
+        ; Write to guest memory using mem_write8 (handles all addressing)
+        ; Each field is a 16-bit word at 4-byte intervals
+        ; Write helper: offset in X, value in $8FDC+index
+        ; Base address = ES:BX, stored fresh each time
+
+        ; Seconds at +0
+        lda $8FA0
+        ldx #0
+        jsr _rtc_write_field
+
+        ; Minutes at +4
+        lda $8FA1
+        ldx #4
+        jsr _rtc_write_field
+
+        ; Hours at +8
+        lda $8FA2
+        ldx #8
+        jsr _rtc_write_field
+
+        ; Day at +12
+        lda $8FA3
+        ldx #12
+        jsr _rtc_write_field
+
+        ; Month at +16 (BIOS expects 0-based: 0=Jan)
+        lda $8FA4
+        sec
+        sbc #1                  ; Convert 1-based RTC to 0-based
+        ldx #16
+        jsr _rtc_write_field
+
+        ; Year at +20 (RTC gives 2-digit year, add 100 for 2000+)
+        lda $8FA5
+        clc
+        adc #100                ; 26 → 126 (offset from 1900)
+        ldx #20
+        jsr _rtc_write_field
+
+        ; Weekday at +24
+        lda $8FA6
+        ldx #24
+        jsr _rtc_write_field
+
+        ; Yearday at +28 = 0
+        lda #0
+        ldx #28
+        jsr _rtc_write_field
+
+        ; DST at +32 = 0
+        lda #0
+        ldx #32
+        jsr _rtc_write_field
+
+        ; Milliseconds at +36 = 0
+        lda #0
+        ldx #36
+        jsr _rtc_write_field
+
+_emu_sp_rtc_done:
+        jmp opcode_done
+
+; Helper: write 16-bit word (A=low byte, high=0) at ES:(BX+X)
+; Bypasses ROM write protection (needed for BIOS timetable in F000 seg)
+_rtc_write_field:
+        sta $8FA8               ; Save value
+        ; Compute linear address: ES*16 + BX + X
+        txa
+        clc
+        adc reg_bx
+        sta temp32
+        lda reg_bx+1
+        adc #0
+        sta temp32+1
+        lda #0
+        sta temp32+2
+        sta temp32+3
+        sta seg_override_en
+        ldx #SEG_ES_OFS
+        jsr seg_ofs_to_linear
+        ; Write 4 bytes: value, 0, 0, 0 (BIOS uses dword-aligned fields)
+        jsr linear_to_chip
+        lda $8FA8
+        ldz #0
+        sta [temp_ptr],z
+        lda #0
+        ldz #1
+        sta [temp_ptr],z
+        ldz #2
+        sta [temp_ptr],z
+        ldz #3
+        sta [temp_ptr],z
+        ; Mark cache dirty if in cache
+        lda temp_ptr+2
+        bne +
+        jsr mark_cache_dirty
++       rts
+
+; BCD to binary conversion: A = BCD value, returns A = binary
+_bcd_to_bin:
+        pha
+        and #$F0
+        lsr
+        lsr
+        lsr
+        lsr
+        sta scratch_a           ; Tens digit
+        ; Multiply tens by 10: tens*8 + tens*2
+        asl                     ; ×2
+        asl                     ; ×4
+        asl                     ; ×8
+        clc
+        adc scratch_a           ; ×9
+        adc scratch_a           ; ×10
+        sta scratch_a
+        pla
+        and #$0F                ; Ones digit
+        clc
+        adc scratch_a           ; tens*10 + ones
+        rts
 
 _emu_sp_putchar:
         ; 0F 00: Output AL via con_write_char

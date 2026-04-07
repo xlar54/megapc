@@ -101,6 +101,7 @@ _ml_no_tab:
         adc #0
         sta [temp_ptr],z
 +
+
         ; Increment instruction-based tick counter (for BDA repair timing)
         inc tick_counter
         bne +
@@ -675,9 +676,6 @@ opcode_jump_tbl:
         .word op_pop_rm         ; $3B — POP r/m16 (8F)
         .word op_nop_unimpl    ; $3A
 
-; ============================================================================
-; Debug: print A as 2 hex digits via CHROUT
-; ============================================================================
 debug_print_hex:
         pha
         lsr
