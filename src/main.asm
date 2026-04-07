@@ -276,7 +276,7 @@ _beep_wait:
         sta ss_dirty
         sta ds_dirty
         lda #0
-        sta $8FEF
+        sta $8F17
 
         ; Clear screen before emulation
         lda #147

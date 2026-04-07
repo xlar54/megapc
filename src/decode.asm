@@ -59,17 +59,17 @@ _ml_no_tab:
         ; PC INT 8 fires at ~18.2 Hz. At 50 Hz, fire every ~3 frames.
         ; We check every instruction but only act when frame changes.
         lda $D7FA
-        cmp $8FE0               ; Last frame counter value
+        cmp $8F15               ; Last frame counter value
         beq _ml_no_tick
-        sta $8FE0               ; Update last frame value
+        sta $8F15               ; Update last frame value
 
         ; Increment sub-frame counter for ~18 Hz from 50 Hz
-        inc $8FE1               ; Sub-frame counter
-        lda $8FE1
+        inc $8F16               ; Sub-frame counter
+        lda $8F16
         cmp #3                  ; Every 3 frames ≈ 16-17 Hz (close to 18.2)
         bcc _ml_no_tick
         lda #0
-        sta $8FE1               ; Reset sub-frame counter
+        sta $8F16               ; Reset sub-frame counter
 
         ; --- BDA tick counter increment (real-time ~18 Hz) ---
         lda #$6C
@@ -108,13 +108,13 @@ _ml_no_tab:
         inc tick_counter+1
 +
         ; --- One-time BDA repair after DOS boot ---
-        lda $8FEF               ; BDA repair done flag
+        lda $8F17               ; BDA repair done flag
         bne _ml_tick_done
         lda tick_counter+1
         cmp #$08                ; Wait for enough ticks after boot
         bcc _ml_tick_done
         lda #1
-        sta $8FEF               ; Mark done — only run once
+        sta $8F17               ; Mark done — only run once
         ; Equipment word at 40:10
         lda #$10
         sta temp_ptr
@@ -148,7 +148,7 @@ _ml_no_tab:
 
 _ml_tick_done:
         ; Signal INT 8
-        lda $8FEF
+        lda $8F17
         beq _ml_no_tick
         lda #1
         sta int8_asap

@@ -225,13 +225,13 @@ _i13_read:
         ; Save sector count
         lda reg_al
         sta disk_sect_left      ; sector count (safe from seg_ofs_to_linear)
-        sta $8FF0               ; save original count for return (safe location)
+        sta $8F18               ; save original count for return (safe location)
 
         ; Save BX — real BIOS preserves BX, caller advances it
         lda reg_bx
-        sta $8FF2
+        sta $8F19
         lda reg_bx+1
-        sta $8FF3
+        sta $8F1A
 
         ; Compute LBA from CHS
         ; LBA = (C × heads + H) × SPT + (S - 1)
@@ -446,14 +446,14 @@ _i13_advance:
 
 _i13_read_done:
         ; Restore BX — real BIOS preserves BX
-        lda $8FF2
+        lda $8F19
         sta reg_bx
-        lda $8FF3
+        lda $8F1A
         sta reg_bx+1
         ; Return success
         lda #$00
         sta reg_ah
-        lda $8FF0               ; restore original sector count
+        lda $8F18               ; restore original sector count
         sta reg_al              ; AL = sectors actually read
         lda #0
         sta flag_cf
@@ -472,11 +472,11 @@ _i13_write:
         ; Save sector count and BX
         lda reg_al
         sta disk_sect_left
-        sta $8FF0
+        sta $8F18
         lda reg_bx
-        sta $8FF2
+        sta $8F19
         lda reg_bx+1
-        sta $8FF3
+        sta $8F1A
 
         ; Compute LBA from CHS (same as read)
         lda reg_ch
@@ -680,13 +680,13 @@ _i13w_dirty_done:
 
 _i13_write_done:
         ; Restore BX
-        lda $8FF2
+        lda $8F19
         sta reg_bx
-        lda $8FF3
+        lda $8F1A
         sta reg_bx+1
         lda #$00
         sta reg_ah
-        lda $8FF0
+        lda $8F18
         sta reg_al
         lda #0
         sta flag_cf
