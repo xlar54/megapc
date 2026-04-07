@@ -130,6 +130,32 @@ _ml_no_tab:
         lda #RAM_KB_HI
         ldz #1
         sta [temp_ptr],z
+        ; --- Sync cursor from BDA every tick ---
+        ; Programs that set cursor via BDA writes (not INT 10h) need this
+        ; BDA cursor at 0040:0050 = linear $40450, bank 4
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        ; temp_ptr+2/+3 still $04/$00 from tick counter above
+        ldz #0
+        lda [temp_ptr],z        ; BDA curpos_x (column)
+        cmp scr_col
+        bne _ml_cursor_sync
+        ldz #1
+        lda [temp_ptr],z        ; BDA curpos_y (row)
+        cmp scr_row
+        beq _ml_no_cursor_sync
+_ml_cursor_sync:
+        ldz #0
+        lda [temp_ptr],z
+        sta scr_col
+        ldz #1
+        lda [temp_ptr],z
+        sta scr_row
+        jsr cursor_update
+_ml_no_cursor_sync:
+
 _ml_no_tick:
 
         ; --- Signal INT 8 every ~4096 instructions after boot ---
