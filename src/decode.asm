@@ -54,13 +54,24 @@ _ml_no_tab:
         lda raw_opcode
         sta $8F00
 
-        ; --- Timer tick (INT 8 emulation) ---
-        ; Every ~256 instructions: increment BDA timer counter
-        inc tick_counter
-        bne _ml_no_tick
-        inc tick_counter+1
+        ; --- Real-time timer tick using MEGA65 frame counter ---
+        ; $D7FA increments every video frame (~50/60 Hz)
+        ; PC INT 8 fires at ~18.2 Hz. At 50 Hz, fire every ~3 frames.
+        ; We check every instruction but only act when frame changes.
+        lda $D7FA
+        cmp $8FE0               ; Last frame counter value
+        beq _ml_no_tick
+        sta $8FE0               ; Update last frame value
 
-        ; Increment 32-bit BDA tick counter at $0040:006C (bank 4 $4046C)
+        ; Increment sub-frame counter for ~18 Hz from 50 Hz
+        inc $8FE1               ; Sub-frame counter
+        lda $8FE1
+        cmp #3                  ; Every 3 frames ≈ 16-17 Hz (close to 18.2)
+        bcc _ml_no_tick
+        lda #0
+        sta $8FE1               ; Reset sub-frame counter
+
+        ; --- BDA tick counter increment (real-time ~18 Hz) ---
         lda #$6C
         sta temp_ptr
         lda #$04
@@ -90,14 +101,17 @@ _ml_no_tab:
         adc #0
         sta [temp_ptr],z
 +
+        ; Increment instruction-based tick counter (for BDA repair timing)
+        inc tick_counter
+        bne +
+        inc tick_counter+1
++
         ; --- One-time BDA repair after DOS boot ---
-        ; IBMBIO.COM relocates itself with REP MOVSW that overwrites BDA.
-        ; Re-write critical BDA fields once after boot completes (~4096 ticks).
         lda $8FEF               ; BDA repair done flag
-        bne _ml_no_tick
+        bne _ml_tick_done
         lda tick_counter+1
-        cmp #$10                ; Wait for tick_counter+1 >= $10 (~4096 ticks)
-        bcc _ml_no_tick
+        cmp #$08                ; Wait for enough ticks after boot
+        bcc _ml_tick_done
         lda #1
         sta $8FEF               ; Mark done — only run once
         ; Equipment word at 40:10
@@ -105,7 +119,7 @@ _ml_no_tab:
         sta temp_ptr
         lda #$04
         sta temp_ptr+1
-        ; temp_ptr+2/+3 still $04/$00 from tick counter above
+        ; temp_ptr+2/+3 still $04/$00
         lda #VIDEO_EQUIP
         ldz #0
         sta [temp_ptr],z
@@ -130,19 +144,15 @@ _ml_no_tab:
         lda #RAM_KB_HI
         ldz #1
         sta [temp_ptr],z
-_ml_no_tick:
 
-        ; --- Signal INT 8 every ~4096 instructions after boot ---
-        lda tick_counter
-        bne _ml_no_int8
-        lda tick_counter+1
-        and #$0F
-        bne _ml_no_int8
-        lda $8FEF               ; BDA repair done?
-        beq _ml_no_int8
+_ml_tick_done:
+        ; Signal INT 8
+        lda $8FEF
+        beq _ml_no_tick
         lda #1
         sta int8_asap
-_ml_no_int8:
+
+_ml_no_tick:
 
         ; --- Code cache check (for attic-backed CS segments) ---
         lda cs_in_attic
