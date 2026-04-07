@@ -1461,6 +1461,7 @@ _sr_cl_count:
 _sr_go:
         lda scratch_c
         beq _sr_done_jmp       ; Count=0: no operation
+        sta $8F1D               ; Save original count for OF computation
 
         ; Read operand
         lda i_w
@@ -1470,10 +1471,12 @@ _sr_go:
         sta op_dest
         lda op_source+1
         sta op_dest+1
+        sta $8F1C               ; Save original MSB (for SHR OF)
         bra _sr_loop
 _sr_byte:
         jsr read_rm8
         sta op_dest
+        sta $8F1C               ; Save original value (for SHR OF)
         lda #0
         sta op_dest+1
 
@@ -1690,8 +1693,102 @@ _sr_write_b:
         lda op_result
         jsr write_rm8
 _sr_flags:
-        jsr set_flags_logic     ; ZF, SF, PF
-        ; OF: set if sign changed on count=1 shifts (simplified: always compute)
+        ; Rotates (i_reg 0-3) only affect CF and OF — skip ZF/SF/PF
+        lda i_reg
+        cmp #4
+        bcs _sr_shift_flags
+        ; Rotate: only compute OF (CF already set per iteration)
+        bra _sr_compute_of
+
+_sr_shift_flags:
+        ; Shifts (SHL/SHR/SAR): set ZF, SF, PF
+        jsr set_flags_logic
+
+_sr_compute_of:
+        ; OF is only defined for count=1 (undefined for count>1)
+        lda $8F1D               ; Original count
+        cmp #1
+        bne _sr_of_done         ; Count != 1: leave OF unchanged
+        lda i_reg
+        cmp #4
+        beq _sr_of_shl
+        cmp #5
+        beq _sr_of_shr
+        cmp #7
+        beq _sr_of_sar
+        ; Rotates (ROL/ROR/RCL/RCR): OF = MSB(result) XOR CF
+        ; Exception: ROR uses MSB XOR next-to-MSB
+        cmp #1
+        beq _sr_of_ror
+        ; ROL/RCL/RCR: OF = MSB(result) XOR CF
+        bra _sr_of_msb_xor_cf
+
+_sr_of_shl:
+        ; SHL: OF = MSB(result) XOR CF
+_sr_of_msb_xor_cf:
+        lda i_w
+        beq _sr_of_mxc_b
+        lda op_result+1         ; High byte for word
+        bra _sr_of_mxc_go
+_sr_of_mxc_b:
+        lda op_result           ; Low byte for byte
+_sr_of_mxc_go:
+        and #$80                ; Isolate MSB
+        asl                     ; MSB → carry
+        lda #0
+        rol                     ; carry → bit 0 (0 or 1)
+        eor flag_cf             ; XOR with CF
+        sta flag_of
+        bra _sr_of_done
+
+_sr_of_shr:
+        ; SHR: OF = MSB of original operand
+        lda $8F1C               ; Saved original MSB
+        and #$80
+        beq +
+        lda #1
++       sta flag_of
+        bra _sr_of_done
+
+_sr_of_sar:
+        ; SAR: OF = 0 (sign never changes)
+        lda #0
+        sta flag_of
+        bra _sr_of_done
+
+_sr_of_ror:
+        ; ROR: OF = MSB(result) XOR next-to-MSB(result)
+        lda i_w
+        beq _sr_of_ror_b
+        lda op_result+1
+        asl                     ; bit 7 → carry
+        eor op_result+1         ; A bit 7 = old bit 6 XOR old bit 7... no
+        ; Simpler: test bits 7 and 6 of high byte
+        lda op_result+1
+        and #$C0
+        cmp #$40                ; Only one of bits 7,6 set?
+        beq _sr_of_ror_set
+        cmp #$80
+        beq _sr_of_ror_set
+        lda #0
+        sta flag_of
+        bra _sr_of_done
+_sr_of_ror_b:
+        lda op_result
+        and #$C0
+        cmp #$40
+        beq _sr_of_ror_set
+        cmp #$80
+        beq _sr_of_ror_set
+        lda #0
+        sta flag_of
+        bra _sr_of_done
+_sr_of_ror_set:
+        lda #1
+        sta flag_of
+        bra _sr_of_done
+
+_sr_of_done:
         jmp opcode_done
 
 ; ============================================================================
@@ -3763,6 +3860,7 @@ _gf_neg:
         lda #1
 +       sta flag_cf
         jsr write_rm16
+        jsr compute_af
         jsr set_flags_logic
         jsr compute_of_arith
         jmp opcode_done
@@ -3785,6 +3883,7 @@ _gfng_byte:
 +       sta flag_cf
         lda op_result
         jsr write_rm8
+        jsr compute_af
         jsr set_flags_logic
         jsr compute_of_arith
         jmp opcode_done
