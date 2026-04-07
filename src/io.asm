@@ -100,9 +100,78 @@ _irp_cga_other:
 ;         A = byte to write
 ;
 io_write_port:
-        ; Store to I/O port mirror (bank 1)
-        ; For now: just ignore most writes
-        ; TODO: handle PIC EOI, PIT setup, CGA mode changes
+        ; Input: temp32 = port number (16-bit), A = value to write
+        ; Check for CRTC index/data registers
+        lda temp32+1
+        cmp #$03
+        bne _iow_done
+        lda temp32
+        cmp #$D4                ; CGA CRTC index ($3D4)
+        beq _iow_crtc_index
+        cmp #$B4                ; MDA CRTC index ($3B4)
+        beq _iow_crtc_index
+        cmp #$D5                ; CGA CRTC data ($3D5)
+        beq _iow_crtc_data
+        cmp #$B5                ; MDA CRTC data ($3B5)
+        beq _iow_crtc_data
+_iow_done:
+        rts
+
+_iow_crtc_index:
+        ; Save the selected CRTC register index
+        lda reg_al
+        sta $8FD9               ; CRTC selected register
+        rts
+
+_iow_crtc_data:
+        ; Write to the selected CRTC register
+        lda $8FD9               ; Which register?
+        cmp #$0E
+        beq _iow_cursor_hi
+        cmp #$0F
+        beq _iow_cursor_lo
+        rts                     ; Ignore other CRTC registers
+
+_iow_cursor_hi:
+        ; Cursor address high byte
+        lda reg_al
+        sta $8FDA               ; Save cursor high byte
+        rts
+
+_iow_cursor_lo:
+        ; Cursor address low byte — compute row/col and update sprite
+        ; Cursor address = row * 80 + col (16-bit)
+        lda reg_al
+        sta $8FDB               ; Save cursor low byte
+        ; Divide cursor address by 80 to get row and col
+        ; address = $8FDA:$8FDB (high:low)
+        ; Use repeated subtraction: row = address / 80, col = address % 80
+        lda $8FDB
+        sta scratch_a           ; Working low byte
+        lda $8FDA
+        sta scratch_b           ; Working high byte
+        lda #0
+        sta scratch_c           ; Row counter
+_iow_div80:
+        ; Subtract 80 from working value
+        sec
+        lda scratch_a
+        sbc #80
+        tax                     ; Save result low
+        lda scratch_b
+        sbc #0
+        bcc _iow_div_done       ; Went negative — done
+        sta scratch_b
+        stx scratch_a
+        inc scratch_c           ; Row++
+        bra _iow_div80
+_iow_div_done:
+        ; scratch_c = row, scratch_a = col (remainder)
+        lda scratch_c
+        sta scr_row
+        lda scratch_a
+        sta scr_col
+        jsr cursor_update
         rts
 
 ; ============================================================================
@@ -207,6 +276,7 @@ _i10_set_cursor:
         sta scr_row
         lda reg_dl
         sta scr_col
+        jsr cursor_update
         rts
 
 _i10_get_cursor:
