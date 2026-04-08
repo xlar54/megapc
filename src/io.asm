@@ -1309,7 +1309,7 @@ ascii_to_screenB:
         cmp #$5B
         bcc _atsB_done          ; $41-$5A: uppercase, keep as-is
         cmp #$60
-        bcc _atsB_done
+        bcc _atsB_bracket       ; $5B-$5F: [\]^_ → screen codes $1B-$1F
         cmp #$7B
         bcc _atsB_lower
         cmp #$7F
@@ -1320,6 +1320,10 @@ _atsB_done:
         rts
 _atsB_at:
         lda #$00
+        rts
+_atsB_bracket:
+        sec
+        sbc #$40                ; $5B→$1B, $5F→$1F
         rts
 _atsB_lower:
         sec

@@ -563,9 +563,11 @@ _i13_write_loop:
         ; Flush cache before reading (data may be in cache)
         jsr cache_flush_all
 
-        ; Check if source is in attic or bank 4
+        ; Check if source is in attic ($01-$0E) or bank 4 ($00)
         lda temp32+2
         beq _i13w_bank4_read
+        cmp #$0F
+        bcs _i13w_bank4_read    ; $F0000+ (ROM) — treat as bank 4 fallback
         ; Attic source: DMA from attic to SECTOR_BUF
         lda temp32
         sta dma_src_lo
@@ -1364,6 +1366,6 @@ floppy_b_dirty:
 ; Must be at a $xx00 address, null-terminated
         .align 256
 floppy_fname_page:
-        .fill 63,0 
-        ; setnam must be less than 63 bytes
+        .fill 64,0
+        ; 63 chars max + null terminator = 64 bytes
         ; Pad rest of page is automatic from .align

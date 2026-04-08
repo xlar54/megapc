@@ -479,12 +479,17 @@ _ml_no_modrm:
         ; On real 8086, REP with CX=0 performs zero iterations
         lda rep_override_en
         beq _ml_no_rep_skip
-        ; Check if this is a string op (A4-AF)
+        ; Check if this is a string op (A4-A7, AA-AF — exclude A8/A9 TEST)
         lda raw_opcode
         cmp #$A4
         bcc _ml_no_rep_skip
+        cmp #$A8
+        bcc _ml_rep_is_string   ; $A4-$A7: MOVS/CMPS
+        cmp #$AA
+        bcc _ml_no_rep_skip     ; $A8-$A9: TEST (not a string op)
         cmp #$B0
         bcs _ml_no_rep_skip
+_ml_rep_is_string:
         ; It's a REP string op — check CX
         lda reg_cx
         ora reg_cx+1
@@ -511,13 +516,17 @@ opcode_done:
         lda rep_override_en
         beq _od_no_rep
 
-        ; REP applies to string ops: A4-A7, AA-AF
-        ; Check if the just-executed opcode was a string op
+        ; REP applies to string ops: A4-A7, AA-AF (not A8/A9 TEST)
         lda raw_opcode
         cmp #$A4
         bcc _od_clear_rep
+        cmp #$A8
+        bcc _od_rep_string      ; $A4-$A7: MOVS/CMPS
+        cmp #$AA
+        bcc _od_clear_rep       ; $A8-$A9: TEST (not a string op)
         cmp #$B0
         bcs _od_clear_rep
+_od_rep_string:
 
         ; Decrement CX
         sec

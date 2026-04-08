@@ -95,7 +95,13 @@ linear_to_chip:
         cmp #$0F
         bcs _ltc_f_seg
         cmp #$0C
-        beq _ltc_c_seg          ; $C0000-$CFFFF → video alias (8086tiny BIOS)
+        bne _ltc_not_c
+        ; $C0000-$C7FFF → video alias, $C8000-$CFFFF → unmapped (treat as bank 4)
+        lda temp32+1
+        cmp #$80
+        bcc _ltc_c_seg          ; $C0000-$C7FFF → video alias
+        bra _ltc_attic          ; $C8000-$CFFFF → attic (unmapped ROM space)
+_ltc_not_c:
         cmp #$0B
         bne _ltc_not_b
         ; $B0000-$B7FFF (MDA) and $B8000-$BFFFF (CGA) both map to video buffer
@@ -764,12 +770,13 @@ _csb_f_seg:
         rts
 
 _csb_attic:
-        ; $1xxxx–$Exxxx — can't pre-compute a fast base for attic
-        ; We'll flag this and fall through to per-access cache lookups
-        ; For now: map to bank 4 + offset (will wrap but at least won't crash)
-        ; TODO: proper attic segment base caching
-        lda #$04
-        sta temp32+2
+        ; $1xxxx–$Exxxx — can't pre-compute a fast [ptr],z base for attic
+        ; Attic is accessed via DMA cache in seg_ofs_to_linear + linear_to_chip.
+        ; Set base to $00:$00:$00:$00 (null) as a safety trap — any direct
+        ; use of this base would read ZP instead of silently corrupting data.
         lda #$00
+        sta temp32
+        sta temp32+1
+        sta temp32+2
         sta temp32+3
         rts
