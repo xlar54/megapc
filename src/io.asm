@@ -661,15 +661,55 @@ _i16_wait_key:
         beq _i16_bs
         cmp #$7F                ; ASCII DEL
         beq _i16_bs
+        cmp #$91                ; PETSCII cursor up
+        beq _i16_up
+        cmp #$11                ; PETSCII cursor down
+        beq _i16_down
+        cmp #$9D                ; PETSCII cursor left
+        beq _i16_left
+        cmp #$1D                ; PETSCII cursor right
+        beq _i16_right
+        cmp #$0D                ; Return key
+        beq _i16_return
         ; A = ASCII key code
         sta reg_al
         lda #$00
-        sta reg_ah              ; Fake scancode
+        sta reg_ah
         rts
 _i16_bs:
-        lda #$08                ; IBM PC backspace
+        lda #$08
         sta reg_al
-        lda #$0E                ; Scancode for backspace
+        lda #$0E
+        sta reg_ah
+        rts
+_i16_return:
+        lda #$0D
+        sta reg_al
+        lda #$1C
+        sta reg_ah
+        rts
+_i16_up:
+        lda #$00
+        sta reg_al
+        lda #$48
+        sta reg_ah
+        rts
+_i16_down:
+        lda #$00
+        sta reg_al
+        lda #$50
+        sta reg_ah
+        rts
+_i16_left:
+        lda #$00
+        sta reg_al
+        lda #$4B
+        sta reg_ah
+        rts
+_i16_right:
+        lda #$00
+        sta reg_al
+        lda #$4D
         sta reg_ah
         rts
 
@@ -680,19 +720,74 @@ _i16_check_key:
         beq _i16_no_key         ; $00 = no key
         cmp #$09                ; TAB key? (reserved for menu)
         beq _i16_no_key         ; Hide TAB from guest
-        ; Map MEGA65 key codes
-        cmp #$14                ; MEGA65 DELETE/backspace
-        bne +
-        lda #$08
-+       cmp #$7F                ; ASCII DEL
-        bne +
-        lda #$08
-+       ; Key available (don't dequeue — AH=00 will do that)
+        ; Map MEGA65 key codes for peek
+        cmp #$14
+        beq _i16ck_bs
+        cmp #$7F
+        beq _i16ck_bs
+        cmp #$91
+        beq _i16ck_up
+        cmp #$11
+        beq _i16ck_down
+        cmp #$9D
+        beq _i16ck_left
+        cmp #$1D
+        beq _i16ck_right
+        cmp #$0D
+        beq _i16ck_return
         sta reg_al
         lda #$00
         sta reg_ah
         lda #0
-        sta flag_zf             ; ZF=0 → key available
+        sta flag_zf
+        rts
+_i16ck_bs:
+        lda #$08
+        sta reg_al
+        lda #$0E
+        sta reg_ah
+        lda #0
+        sta flag_zf
+        rts
+_i16ck_return:
+        lda #$0D
+        sta reg_al
+        lda #$1C
+        sta reg_ah
+        lda #0
+        sta flag_zf
+        rts
+_i16ck_up:
+        lda #$00
+        sta reg_al
+        lda #$48
+        sta reg_ah
+        lda #0
+        sta flag_zf
+        rts
+_i16ck_down:
+        lda #$00
+        sta reg_al
+        lda #$50
+        sta reg_ah
+        lda #0
+        sta flag_zf
+        rts
+_i16ck_left:
+        lda #$00
+        sta reg_al
+        lda #$4B
+        sta reg_ah
+        lda #0
+        sta flag_zf
+        rts
+_i16ck_right:
+        lda #$00
+        sta reg_al
+        lda #$4D
+        sta reg_ah
+        lda #0
+        sta flag_zf
         rts
 _i16_no_key:
         lda #1

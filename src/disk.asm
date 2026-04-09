@@ -897,7 +897,7 @@ _sfd_not_found:
         ; Step 4: Create new file and write data via FAT32 writer
         pla                     ; Recover drive number
         pha
-        jsr fat_save_floppy
+;        jsr fat_save_floppy
         bcc _sfd_fail
 
         ; Success — clear dirty flag

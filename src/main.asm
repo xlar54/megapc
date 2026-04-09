@@ -299,14 +299,6 @@ _beep_wait:
         lda #147
         jsr CHROUT
 
-        ; Point VIC-IV character generator to $02A000
-        lda #$00
-        sta $D068
-        lda #$A0
-        sta $D069
-        lda #$02
-        sta $D06A
-
         ; Initialize sprite cursor
         jsr cursor_init
 
@@ -358,6 +350,14 @@ load_cp437_font:
         lda #$80
         tsb VIC_HOTREGS
 
+        ; Point VIC-IV character generator to $02A000 (must be after VIC-IV unlock)
+        lda #$00
+        sta $D068
+        lda #$A0
+        sta $D069
+        lda #$02
+        sta $D06A
+
         rts
 
 _font_fname:
@@ -406,7 +406,7 @@ _resume_restore_zp:
         sta code_cache_pg_lo
         sta code_cache_pg_hi
 
-        ; Point VIC-IV character generator to $02A000
+        ; Re-point charset to CP437 (CINT/KERNAL may have reset it)
         lda #$00
         sta $D068
         lda #$A0
@@ -443,7 +443,7 @@ emulator_exit:
         .include "opcodes.asm"  ; Opcode handlers
         .include "io.asm"       ; I/O port handlers (IN/OUT, CGA, keyboard)
         .include "disk.asm"     ; Disk I/O (INT 13h, floppy via attic)
-        .include "fat_writer.asm" ; FAT32 file writer (save floppy to SD card)
+        ;.include "fat_writer.asm" ; FAT32 file writer (disabled — will load to bank 1 separately)
         .include "display.asm"  ; CGA refresh, screen output
         .include "init.asm"     ; Initialization (tables, guest mem, regs)
         .include "menu.asm"     ; Disk mount menu system

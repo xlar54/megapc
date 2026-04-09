@@ -1,195 +1,246 @@
-MEGA8086 Emulator — Investigation Status
-==========================================
-Last updated: 2026-04-01
+MEGA8086 Emulator — Status
+===========================
+Last updated: 2026-04-08
 
-FREEDOS "SECTOR" HANG — WHAT WE KNOW
-======================================
+WORKING DOS VERSIONS
+=====================
 
-1. FreeDOS boots through kernel init, prints "InitDisk",
-   "illegal partition table - drive 00 sector" and then hangs.
-   It never prints the sector number "0" or continues.
+- PC-DOS 1.25: Boots, DIR, keyboard, EDLIN
+- MS-DOS 3.3: Boots, DIR, ECHO, most commands
+- MS-DOS 6.22: Boots, DIR, most commands
+- FreeDOS: Boots (slow startup due to kernel UPX decompression)
+  - SETUP.EXE runs partially (hits R6003 divide-by-zero, expected —
+    insufficient memory for SETUP's requirements)
+- GWBASIC: Runs, function keys display with reverse video,
+  cursor keys work, BEEP works (SID speaker emulation)
 
-2. The hang is a loop in valid kernel code at CS=$0F75, IP in
-   the $FC00-$FD00 range. The code cache loads real (non-zero)
-   instructions from attic for those pages. The CPU is executing
-   real code, not zeros.
+KNOWN ISSUES (FreeDOS)
+=======================
 
-3. The loop is in the FreeDOS printf engine. It processes the
-   "%lu" format specifier for the sector number. The format
-   dispatcher uses:
-   - DS:[BX+$1095] to look up format character indices
-   - CS:[BX+$F219] as a jump table to dispatch format handlers
+FreeDOS boots successfully but is slow during startup due to
+in-memory UPX decompression of the kernel. Once at the A:\>
+prompt, performance is normal for the emulator's speed.
 
-4. At hang time, DS=$9DCA (not $0F75). DS=$9DCA equals SS.
-   On the working emulator at the A:> prompt, DS=CS=$2902.
-
-5. The CS-based jump table at CS:$F219 reads as all zeros through
-   the emulated memory path. On the working emulator, CS:$F219
-   has non-zero data.
-
-6. DS=$0F75 (correct) at the moment CS first becomes $0F75.
-   CS enters $0F75 exactly once and never leaves.
-   No MOV sreg, POP DS, or LDS instruction changes DS while
-   CS=$0F75 (logged and confirmed).
-
-7. DS changes from $0F75 to $9DCA without any tracked 8086
-   instruction causing the change. All tracked write paths to
-   reg_ds (MOV sreg, POP seg, LDS, write_rm8, write_rm16)
-   were monitored and none fired for DS while CS=$0F75.
-
-8. The mark_cache_dirty function was confirmed to corrupt ZP
-   via cache_dirty,x with out-of-range X during early boot
-   (before CS=$0F75 was entered). Specifically, sta $98,x with
-   X=$80 wraps in ZP and writes to $18 (reg_ds). This was caught
-   by a targeted trap ($9B6A=$A2 after FLAGS push in
-   do_sw_interrupt).
-
-9. Adding bounds checks to mark_cache_dirty prevented the early
-   corruption but did NOT fix the "sector" hang. DS still ends
-   up as $9DCA at hang time, suggesting a second corruption
-   source exists.
-
-10. The corruption is not detected by watchpoints at:
-    - Top of main loop (every iteration)
-    - opcode_done (after every instruction)
-    - REP loop iterations
-    - do_sw_interrupt entry and after each push_word
-    - write_rm8/write_rm16 register paths
-    This suggests the corruption occurs within instruction
-    execution or helper functions called during instruction
-    execution, but after all current check points.
-
-11. The working emulator (IBM PC AT 5170 with same FreeDOS disk)
-    boots to A:\> successfully. It uses CS=$2902 (different from
-    our CS=$0F75 due to different memory size/layout).
-
-KERNEL BOOT SEQUENCE (confirmed)
-=================================
-
-- Boot sector loads KERNEL.SYS to ES=$1FE0 (linear $1FE00)
-- UPX decompressor runs at CS=$0060, decompresses kernel in-place
-  (~57KB of decompressed data in bank 4 at $0600-$FFFF)
-- Kernel Phase 1 relocation runs at CS=$0256:
-  - First REP MOVSW (backward, DF=1): copies INIT segment to
-    ES=$9A04 (near top of 640KB)
-  - Second REP MOVSW (backward, DF=1): copies HMA_TEXT to
-    ES=$9001
-  - Both complete successfully (confirmed by completion counter)
-- Total of 22 REP MOVSW and 170+ REP MOVSB completions during boot
-- Later MoveKernel() copies relocate the resident kernel to
-  CS=$0F75 (base $F750)
-
-WHAT IS NOT THE CAUSE
+BIOS INTERRUPT STATUS
 ======================
 
-- Cache flush mechanism (verified working via DEBUG test)
-- Cache capacity (4 and 8 lines produce same result)
-- INT 8 timer delivery (suppressing it doesn't fix the hang)
-- Missing 8086 opcodes (unimpl_count=2, both FPU ESC)
-- Divide overflow (counter stays at 0)
-- Port polling ($3DA/$3BA read counter = 0)
-- Code fetch from wrong bank (full-linear fetch fix applied)
-- INT 13h sector copy boundary crossing (safe copy path applied)
-
-REMAINING CONFIRMED BUGS
-==========================
-
-- mark_cache_dirty can write to arbitrary ZP via cache_dirty,x
-  when X is out of range (0-3 expected). This is because
-  temp_ptr+1 can be outside the CACHE_BUF range ($92-$95),
-  causing the subtraction temp_ptr+1 - $92 to produce a
-  large X value that wraps in ZP indexed addressing.
-  This bug was confirmed to corrupt reg_ds during early boot.
-  A second instance of this or similar corruption likely exists
-  but has not been identified.
-
-- CS jump table at CS:$F219 contains zeros on our emulator but
-  real data on the working emulator. Whether this is caused by
-  the DS corruption (wrong data reads) or by missing data
-  population has not been determined.
-
-PC-DOS 1.25 STATUS
-===================
-
-- Boots to A: prompt
-- DIR works
-- Keyboard input works
-- BASICA shows "HARDWARE INCOMPATIBLE" error in VIDEO_MODE=7
-- EDLIN can create files but write may have issues
-
-BIOS INTERRUPT IMPLEMENTATION STATUS (vs IBM PC XT BIOS v3)
-=============================================================
-Last compared: 2026-04-03
-
 INT 10h (Video):
-  AH=00 Set video mode              IMPLEMENTED
-  AH=01 Set cursor type             NOT IMPLEMENTED (cosmetic)
-  AH=02 Set cursor position         IMPLEMENTED
+  AH=00 Set video mode              IMPLEMENTED (updates BDA, clears screen)
+  AH=01 Set cursor type             IMPLEMENTED (sprite shape + hide bit)
+  AH=02 Set cursor position         IMPLEMENTED (sprite cursor)
   AH=03 Read cursor position        IMPLEMENTED
   AH=05 Set active display page     NOT IMPLEMENTED
-  AH=06 Scroll up                   PARTIAL (AL=0 clears; AL>0 only adjusts row)
-  AH=07 Scroll down                 NOT IMPLEMENTED
-  AH=08 Read char/attr at cursor    IMPLEMENTED (reads guest text page)
-  AH=09 Write char/attr at cursor   IMPLEMENTED
-  AH=0A Write char only at cursor   IMPLEMENTED (same as 09)
-  AH=0E Teletype output             IMPLEMENTED
+  AH=06 Scroll up                   IMPLEMENTED (full-screen only, see TODO)
+  AH=07 Scroll down                 IMPLEMENTED (full-screen only, see TODO)
+  AH=08 Read char/attr at cursor    IMPLEMENTED (reads guest vidbuf)
+  AH=09 Write char/attr at cursor   IMPLEMENTED (with reverse video via color RAM)
+  AH=0A Write char only at cursor   IMPLEMENTED (same path as 09)
+  AH=0E Teletype output             IMPLEMENTED (CR, LF, BS, TAB, BEL)
   AH=0F Get video state             IMPLEMENTED
-  AH=13 Write string (AT)           NOT IMPLEMENTED
+  AH=13 Write string (AT)           IMPLEMENTED (modes 0-3, char+attr pairs)
 
 INT 13h (Disk):
-  AH=00 Reset                       IMPLEMENTED
-  AH=01 Read status                 NOT IMPLEMENTED (last error code)
-  AH=02 Read sectors                IMPLEMENTED (dual drive)
-  AH=03 Write sectors               IMPLEMENTED (dual drive)
+  AH=00 Reset                       IMPLEMENTED (writes BDA status)
+  AH=01 Read status                 IMPLEMENTED (reads BDA 40:41)
+  AH=02 Read sectors                IMPLEMENTED (CHS validated, dual drive)
+  AH=03 Write sectors               IMPLEMENTED (CHS validated, dual drive, dirty tracking)
   AH=04 Verify                      IMPLEMENTED (always succeeds)
-  AH=08 Get drive params            IMPLEMENTED (detected geometry)
+  AH=08 Get drive params            IMPLEMENTED (auto-detected geometry)
   AH=15 Get DASD type               IMPLEMENTED
+  Validation: CHS bounds, AL!=0, ES:BX 64K boundary check
+  Status: BDA 40:41 written on every operation (success and error)
 
 INT 15h (System Services):
+  AH=87 Block move                  IMPLEMENTED (returns "not supported")
   AH=88 Extended memory size        IMPLEMENTED (returns 0)
   AH=90 Device busy                 IMPLEMENTED (returns CF=0)
   AH=91 Interrupt complete          IMPLEMENTED (returns CF=0)
-  AH=C0 Get config table            NOT IMPLEMENTED (returns CF=1)
+  AH=C0 Get config table            Passed to BIOS IVT
 
 INT 16h (Keyboard):
-  AH=00 Read key (wait)             IMPLEMENTED
-  AH=01 Check key (no wait)         IMPLEMENTED
+  AH=00 Read key (wait)             IMPLEMENTED (arrow keys, BS, Enter mapped)
+  AH=01 Check key (no wait)         IMPLEMENTED (same mappings)
   AH=02 Get shift status            NOT IMPLEMENTED
 
+INT 1Ah (Time):
+  AH=00 Get tick count              IMPLEMENTED (computed from MEGA65 RTC)
+
 INT 11h Equipment list               IMPLEMENTED
-INT 12h Memory size                   IMPLEMENTED
-INT 14h Serial port                   NOT IMPLEMENTED (not needed)
-INT 17h Printer                       NOT IMPLEMENTED (not needed)
+INT 12h Memory size                   IMPLEMENTED (640KB)
 INT 19h Reboot                        IMPLEMENTED (halts with message)
 INT 21h AH=02 Display char            INTERCEPTED → con_write_char
-INT 21h AH=06 Direct console I/O      INTERCEPTED → con_write_char
-INT 21h AH=09 Print string            INTERCEPTED → con_write_char (linear read)
-INT 21h AH=40 Write stdout/stderr     INTERCEPTED → con_write_buffer (cache flush + DMA)
+INT 21h AH=06 Direct console I/O      INTERCEPTED → con_write_char / IVT
+INT 21h AH=09 Print string            INTERCEPTED → con_write_char
 INT 29h Fast console output           INTERCEPTED → con_write_char
-CALL FAR to INT 10h/29h vectors       INTERCEPTED → int10_handler / con_write_char
+0F xx Emulator traps                  00=putchar, 01=RTC, 04-09=cursor
 
-CONSOLE RENDERER (con_write_char / con_write_buffer):
-  Single source of truth for all DOS text output.
-  Writes to both guest text page ($18000 char+attr) and MEGA65 screen ($0800).
-  Handles CR (newline), LF (ignored), BS, TAB, BEL, printable ASCII.
-  Uses ascii_to_screenB for MEGA65 charset B lowercase half.
-  con_write_buffer: cache flush → DMA from attic → print from SECTOR_BUF.
+CPU FEATURES
+=============
 
-KNOWN OUTPUT ISSUE:
-  DOS 3.3 ECHO and DIR filenames still do not display.
-  Boot text, prompts, volume labels, and file counts work.
-  Root cause: COMMAND.COM's AH=40h stdout writes use a shared
-  formatter buffer in attic RAM. con_write_buffer reads via DMA
-  after cache flush, but gets stale data for ECHO/DIR content.
-  The ECHO text exists in a different buffer region than the
-  formatter ($3F5B). Investigation ongoing — likely a cache
-  coherency issue between guest writes and DMA readback.
+8086 base instruction set             IMPLEMENTED
+80186 extensions:
+  ENTER/LEAVE                         IMPLEMENTED (nesting level 0 only)
+  PUSHA/POPA                          IMPLEMENTED
+  PUSH imm8/imm16                     IMPLEMENTED
+  Shift/rotate by imm8                IMPLEMENTED
+
+CPU correctness (fixed in audit):
+  - OF cleared after logical ops (OR/AND/XOR) via maybe_compute_of
+  - Rotate ops (ROL/ROR/RCL/RCR) no longer clobber ZF/SF/PF
+  - Shift/rotate OF computed for count=1 per 8086 spec
+  - INC/DEC/NEG set AF (auxiliary carry)
+  - MOV SS/POP SS: one-instruction interrupt inhibit
+  - STI: one-instruction interrupt shadow
+  - MOV CS, r/m16 rejected (CS only changes via far control transfer)
+  - REP prefix excludes TEST A8/A9 from string-op range
+
+DISPLAY
+========
+
+Character set: CP437 8x8 font loaded from disk (cp437.bin) to
+  character RAM at $02A000 (bank 2, ROM write-protect disabled).
+  All 256 CP437 glyphs render correctly — box drawing, accented
+  characters, block elements, etc.
+
+Color RAM: MEGA65 color RAM at $1F800 used for reverse video.
+  - Normal text: MONO_COLOR (configurable, default $05 = green)
+  - Reverse video: MONO_REVERSE (MONO_COLOR | $20)
+  - Color RAM scrolled/cleared with screen RAM in all paths
+
+Video modes: TEXT 80x25 only (mode 3 CGA or mode 7 MDA).
+  Set VIDEO_MODE in main.asm. No graphics modes.
+
+Sprite cursor: 8x8 sprite tracks CGA cursor position.
+
+KEYBOARD MAPPING
+=================
+
+Arrow keys:    MEGA65 PETSCII → IBM PC scancodes (up=$48, down=$50,
+               left=$4B, right=$4D) with AL=0 (extended key)
+Backspace:     PETSCII $14 / ASCII $7F → AL=$08, AH=$0E
+Enter:         $0D → AL=$0D, AH=$1C
+TAB:           Reserved for emulator menu (not passed to guest)
+Other keys:    Passed through as ASCII, scancode=$00
+
+SOUND
+======
+
+PC speaker emulated via SID chip. PIT Timer 2 frequency divider
+converted to SID frequency: (1193472 / divider) << 4. Port $61
+bit 0+1 gate speaker on/off. SID sustain/release for clean tones.
+
+TIMING
+=======
+
+Real-time timer tick via MEGA65 frame counter ($D7FA).
+Fires every 3 frames (~16.7 Hz at 50Hz, ~20 Hz at 60Hz).
+BDA tick counter at 40:6C incremented at ~18 Hz.
+INT 8 delivered via int8_asap flag checked at opcode_done.
+
+DISK I/O
+=========
+
+Dual floppy support (drive A and B). Images loaded to attic RAM:
+  Drive A: $8100000, Drive B: $8200000
+Auto-detect floppy geometry from BPB (360K/720K/1.2M/1.44M).
+Dirty tracking per drive. FAT32 file writer for saving to SD card
+  (implemented but disabled — jmp _sfd_end in disk.asm).
+
+MEMORY MAP (emulator)
+======================
+
+$0000-$00FF   Zero page (8086 regs, decoder, pointers)
+$0100-$01FF   6502 stack
+$0800-$0F9F   MEGA65 80-col screen RAM
+$2001-$8040   Emulator code + tables
+$8E00-$8E68   FAT writer state
+$8F00-$8FF0   Scratch RAM (see $8Fxx map below)
+$9000-$9107   Code cache (256 + 8 spill)
+$9200-$95FF   Data cache (4 lines × 256)
+$9800-$99FF   Sector buffer (512 bytes)
+$1F800-$1FF9F Color RAM (parallel to screen)
+
+$8Fxx scratch map:
+  $8F00       Previous raw_opcode (debug)
+  $8F02-$8F0D Division workspace
+  $8F0E       Division 17th-bit overflow
+  $8F14       Divide-by-zero counter (debug)
+  $8F15       Last frame counter value
+  $8F16       Sub-frame counter
+  $8F17       BDA repair done flag
+  $8F18       Saved sector count (disk I/O)
+  $8F19-$8F1A Saved BX (disk I/O)
+  $8F1B       Interrupt inhibit flag (STI/MOV SS/POP SS)
+  $8F1C       Shift/rotate original MSB
+  $8F1D       Shift/rotate original count
+  $8F1E       INT 10h AH=13 saved mode
+  $8F1F       INT 10h AH=13 saved row
+  $8F20       INT 10h AH=13 saved col
+  $8F21-$8F22 INT 10h AH=13 string counter
+  $8F48       attic_access flag
+  $8F60-$8F62 mem_read16/write16 temp
+  $8F70-$8F71 PUSHA saved SP
+  $8F72-$8F73 IDIV/IMUL sign flags
+  $8F9A-$8F9D Debug row/col/char capture
+  $8FA0-$8FA6 RTC values (sec/min/hr/day/mon/yr/wday)
+  $8FA8-$8FAB RTC tick computation temp
+  $8FD0-$8FD2 INT 21h AH=09 string pointer
+  $8FD3       Unsupported INT 13h counter (debug)
+  $8FD4-$8FD5 Display refresh counter
+  $8FD8       Scroll line count save
+  $8FD9       CRTC register index / screen code save
+  $8FDA-$8FDB CRTC cursor position
+  $8FE0-$8FE4 Active drive geometry (spt/heads/cyls/type/bank)
+  $8FE8-$8FEB Speaker PIT state (lo/hi/latch/port61)
+  $8FEC-$8FF0 Speaker divide workspace
+
+GUEST MEMORY MAP (8086)
+========================
+
+$00000-$0FFFF  Bank 4 direct (IVT, BDA, guest code/data)
+$10000-$EFFFF  Attic via DMA cache
+$B0000-$B7FFF  MDA video → bank 1 $18000
+$B8000-$BFFFF  CGA video → bank 1 $18000
+$C0000-$C7FFF  Video alias → bank 1 $18000
+$C8000-$CFFFF  Unmapped (attic)
+$F0000-$FFFFF  Bank 5 (BIOS ROM, write-protected)
+
+TODO
+=====
+
+- INT 10h AH=06/07: Implement windowed scrolling using CH/CL/DH/DL.
+  Currently scrolls entire screen. GWBASIC sets window to rows 0-23,
+  leaving row 24 as function key bar. Our scroll destroys it.
+
+- Activate FAT32 floppy save (remove jmp _sfd_end in disk.asm)
+
+- INT 16h AH=02: Get shift key status (Shift/Ctrl/Alt flags)
+
+- Function key mapping (F1-F10)
+
+- More complete scancode table for keyboard
+
+- Flush and invalidate data cache in menu_tab_handler before saving ZP.
+  Dirty cache lines are lost when KERNAL trashes $9200+ during menu.
+  On resume, stale cache tags from restored ZP could read garbage.
+
+- BINARY SIZE BUG: Adding ~100+ bytes to any source file breaks
+  restart (option 1) and resume (option 2) from TAB menu. Root cause
+  unknown. Not $8000 boundary, not CBDOS mapping, not specific code.
+  100 NOP bytes (.fill 100, $EA) reproduce the issue. Blocks all
+  pending feature additions (ENTER/LEAVE, arrow keys, INT 15h, etc.).
+
+PERFORMANCE
+============
+
+Measured ~127 empty BASIC loops/sec in GWBASIC (10000 FOR/NEXT in
+78.76 sec). Approximately 10% of a 4.77MHz IBM PC XT.
 
 CONFIGURATION
 ==============
 
 - RAM_KB = 640
-- VIDEO_MODE = 7
+- VIDEO_MODE = 7 (or 3 for CGA color)
+- MONO_COLOR = $05 (green; $08=amber, $01=white)
 - CACHE_LINES = 4
 - SECTOR_BUF = $9800
-- Floppy image: C:\Users\scott\AppData\Roaming\xemu-lgb\mega65\hdos\FD.IMG
