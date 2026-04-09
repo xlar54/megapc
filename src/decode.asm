@@ -102,6 +102,21 @@ _ml_no_tab:
         sta [temp_ptr],z
 +
 
+        ; Cursor blink: toggle every 5 ticks (~3.6 Hz at 18 Hz tick rate)
+        ; Skip blink if cursor is hidden by program (AH=01 hide)
+        lda $8F24               ; Cursor hidden flag
+        bne _ml_no_blink
+        inc $8F23               ; Blink counter
+        lda $8F23
+        cmp #5
+        bcc _ml_no_blink
+        lda #0
+        sta $8F23
+        lda $D015               ; Sprite enable register
+        eor #$01                ; Toggle sprite 0
+        sta $D015
+_ml_no_blink:
+
         ; Increment instruction-based tick counter (for BDA repair timing)
         inc tick_counter
         bne +

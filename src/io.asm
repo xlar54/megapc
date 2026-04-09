@@ -1415,8 +1415,18 @@ cursor_init:
         sta $D01C               ; Not multicolor
         sta $D017               ; No Y expand
         sta $D01D               ; No X expand
+        ; Enable H640 sprite X positioning (needed for X >= 512)
+        lda $D054
+        ora #$10                ; SPRH640
+        sta $D054
+
         lda #$01
         sta $D015               ; Enable sprite 0
+
+        ; Reset blink state
+        lda #0
+        sta $8F23               ; Blink counter
+        sta $8F24               ; Cursor hidden flag
 
         ; Position cursor at scr_row/scr_col
         jsr cursor_update
@@ -1427,47 +1437,82 @@ cursor_init:
 ; ============================================================================
 cursor_update:
         ; X = CURSOR_X_OFS + scr_col * 8
+        ; Need:
+        ;   $D000      = X bits 7..0
+        ;   $D010 bit0 = X bit 8
+        ;   $D05F bit0 = X bit 9   (MEGA65 H640 sprite mode)
+
         lda scr_col
-        asl
-        asl
-        asl                     ; × 8
+        sta $D770               ; Multiplier A byte 0
+        lda #0
+        sta $D771               ; Multiplier A byte 1
+        sta $D772               ; Multiplier A byte 2
+        sta $D773               ; Multiplier A byte 3
+
+        lda #8
+        sta $D774               ; Multiplier B byte 0
+        lda #0
+        sta $D775               ; Multiplier B byte 1
+        sta $D776               ; Multiplier B byte 2
+        sta $D777               ; Multiplier B byte 3
+
         clc
+        lda $D778               ; product low
         adc #CURSOR_X_OFS
-        sta $D000               ; Sprite 0 X low
-        ; Handle X MSB: if carry set or col >= 23, set bit 0 of $D010
-        lda scr_col
-        cmp #23                 ; col*8 + 80 > 255 when col >= 22
-        bcc _cu_no_msb
-        lda $D010
-        ora #$01
-        sta $D010
-        bra _cu_y
-_cu_no_msb:
+        sta $D000               ; sprite 0 X low
+
+        lda $D779               ; product high + carry from offset add
+        adc #0
+        sta scratch_a           ; save X bits 15..8
+
+        ; ---- X bit 8 -> $D010 bit 0 ----
         lda $D010
         and #$FE
         sta $D010
+        lda scratch_a
+        and #$01
+        beq _cu_no_bit8
+        lda $D010
+        ora #$01
+        sta $D010
+_cu_no_bit8:
+
+        ; ---- X bit 9 -> $D05F bit 0 ----
+        lda $D05F
+        and #$FE
+        sta $D05F
+        lda scratch_a
+        and #$02
+        beq _cu_y
+        lda $D05F
+        ora #$01
+        sta $D05F
 
 _cu_y:
         ; Y = CURSOR_Y_OFS + scr_row * 8
         lda scr_row
         asl
         asl
-        asl                     ; × 8
+        asl
         clc
         adc #CURSOR_Y_OFS
-        sta $D001               ; Sprite 0 Y
+        sta $D001
         rts
 
 ; ============================================================================
 ; cursor_show / cursor_hide
 ; ============================================================================
 cursor_show:
+        lda #0
+        sta $8F24               ; Clear hidden flag — blink resumes
         lda $D015
         ora #$01
         sta $D015
         rts
 
 cursor_hide:
+        lda #1
+        sta $8F24               ; Set hidden flag — blink stops
         lda $D015
         and #$FE
         sta $D015
