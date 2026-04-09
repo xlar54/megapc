@@ -126,6 +126,10 @@ VIDEO_EQUIP     = $71           ; 2 floppies + 80-col monochrome
 CRTC_PORT       = $03B4         ; MDA CRTC base port
 .endif
 
+; --- Monochrome display color ---
+MONO_COLOR      = $05
+MONO_REVERSE    = $20 | MONO_COLOR
+
 ; --- Screen / debug ---
 SECTOR_BUF      = $9800         ; 512-byte sector buffer ($9800-$99FF)
                                 ; (moved from $9600 to avoid 4-line cache at $9200-$95FF)
@@ -258,6 +262,9 @@ _beep_wait:
         lda #$00
         sta $D418
 
+        ; Load CP437 font into character RAM (before SEI — needs KERNAL)
+        jsr load_cp437_font
+
         ; Print ready message
         ldx #0
 -       lda ready_msg,x
@@ -292,37 +299,13 @@ _beep_wait:
         lda #147
         jsr CHROUT
 
-        ; Select character set B lowercase half at $03D800
-        ; Upper half ($3D000) has uppercase at $01-$1A, graphics at $41-$5A
-        ; Lower half ($3D800) has lowercase at $01-$1A, uppercase at $41-$5A
+        ; Point VIC-IV character generator to $02A000
         lda #$00
         sta $D068
-        lda #$D8
+        lda #$A0
         sta $D069
-        lda #$03
+        lda #$02
         sta $D06A
-
-        ; Patch charset: add backslash at screen code $5C
-        ; Charset B has no backslash — screen code $5C shows a pipe/pound
-        ; Overwrite the 8 bytes at $03D800 + $5C*8 = $03DAE0
-        lda #$E0
-        sta temp_ptr
-        lda #$DA
-        sta temp_ptr+1
-        lda #$03
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
-        ldx #0
--       lda backslash_char,x
-        ldz #0
-        sta [temp_ptr],z
-        inc temp_ptr
-        bne +
-        inc temp_ptr+1
-+       inx
-        cpx #8
-        bne -
 
         ; Initialize sprite cursor
         jsr cursor_init
@@ -333,21 +316,61 @@ _beep_wait:
 ready_msg:
         .text "READY. STARTING EMULATION...", 13, 0
 
-; Backslash character bitmap (8x8 pixels) for charset B patch
-backslash_char:
-        .byte %10000000
-        .byte %01000000
-        .byte %00100000
-        .byte %00010000
-        .byte %00001000
-        .byte %00000100
-        .byte %00000010
-        .byte %00000000
+; ============================================================================
+; load_cp437_font — Load CP437 font from disk to character RAM at $02A000
+; ============================================================================
+load_cp437_font:
+        ; Disable ROM write-protect for bank 2
+        lda #$70
+        sta $D640
+        clv
+
+        ; Set bank for LOAD: data bank=2, filename bank=0
+        lda #$02
+        ldx #$00
+        jsr SETBNK
+
+        ; Set file parameters: logical #0, device 8, secondary 0
+        lda #$00
+        ldx #$08
+        ldy #$00
+        jsr SETLFS
+
+        ; Set filename
+        lda #_font_fname_end-_font_fname
+        ldx #<_font_fname
+        ldy #>_font_fname
+        jsr SETNAM
+
+        ; Load to bank 2 at $A000 (linear $02A000)
+        lda #$40                ; Force load to X/Y address
+        ldx #$00                ; Load address low
+        ldy #$A0                ; Load address high ($A000 in bank 2)
+        jsr LOAD
+
+        ; Re-unlock VIC-IV (KERNAL LOAD resets it)
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031               ; Re-enable 40MHz
+        lda #$80
+        tsb VIC_HOTREGS
+
+        rts
+
+_font_fname:
+        .text "cp437.bin"
+_font_fname_end:
 
 ; ============================================================================
 ; resume_emulation — Called from menu when returning to running emulation
 ; ============================================================================
 resume_emulation:
+        ; Load CP437 font BEFORE sei (KERNAL LOAD needs IRQs)
+        jsr load_cp437_font
+
         ; Disable IRQs FIRST to stop KERNAL from trashing ZP
         sei
 
@@ -383,33 +406,13 @@ _resume_restore_zp:
         sta code_cache_pg_lo
         sta code_cache_pg_hi
 
-        ; Restore ASCII charset B lowercase half at $03D800
+        ; Point VIC-IV character generator to $02A000
         lda #$00
         sta $D068
-        lda #$D8
+        lda #$A0
         sta $D069
-        lda #$03
+        lda #$02
         sta $D06A
-
-        ; Patch charset: backslash at screen code $5C
-        lda #$E0
-        sta temp_ptr
-        lda #$DA
-        sta temp_ptr+1
-        lda #$03
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
-        ldx #0
--       lda backslash_char,x
-        ldz #0
-        sta [temp_ptr],z
-        inc temp_ptr
-        bne +
-        inc temp_ptr+1
-+       inx
-        cpx #8
-        bne -
 
         ; Re-init sprite cursor (CINT trashes VIC-IV sprite state)
         jsr cursor_init

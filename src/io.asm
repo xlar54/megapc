@@ -571,8 +571,7 @@ _i10_read_char_attr:
 
 _i10_write_char_attr:
         ; AH=09/0A: Write character at cursor, CX times, no cursor advance
-        lda reg_al
-        jsr ascii_to_screenB
+        lda reg_al              ; CP437 font: ASCII = screen code directly
         sta $8FD9               ; Save screen code (scratch_d clobbered by vidbuf calc)
         ; Save cursor position
         lda scr_row
@@ -1225,9 +1224,9 @@ _cwc_no_dbg:
         sta [temp_ptr2],z
 
         ; Write to MEGA65 screen
+        ; Write to MEGA65 screen (CP437 font: ASCII = screen code)
         jsr calc_scr_ptr
         pla
-        jsr ascii_to_screenB
         ldz #0
         sta [temp_ptr],z
 
@@ -1297,37 +1296,6 @@ _cwc_tab_ok:
         jmp cursor_update
 
 _cwc_bel:
-        rts
-
-; Convert ASCII to screen code for charset B lowercase half
-ascii_to_screenB:
-        cmp #$20
-        bcc _atsB_space
-        cmp #$40
-        bcc _atsB_done
-        beq _atsB_at            ; $40: @ → screen code $00
-        cmp #$5B
-        bcc _atsB_done          ; $41-$5A: uppercase, keep as-is
-        cmp #$60
-        bcc _atsB_bracket       ; $5B-$5F: [\]^_ → screen codes $1B-$1F
-        cmp #$7B
-        bcc _atsB_lower
-        cmp #$7F
-        bcc _atsB_done
-_atsB_space:
-        lda #$20
-_atsB_done:
-        rts
-_atsB_at:
-        lda #$00
-        rts
-_atsB_bracket:
-        sec
-        sbc #$40                ; $5B→$1B, $5F→$1F
-        rts
-_atsB_lower:
-        sec
-        sbc #$60                ; $61→$01, $7A→$1A
         rts
 
 ; Calculate guest video buffer pointer

@@ -57,8 +57,7 @@ _rc_loop:
         ; Read ASCII char from CGA buffer (skip attribute at +1)
         ldz #0
         lda [temp_ptr],z
-        ; Convert ASCII to screen code
-        jsr ascii_to_screen
+        ; CP437 font: ASCII value IS the screen code — no conversion needed
         ; Write to MEGA65 screen RAM
         ldz #0
         sta [temp_ptr2],z
@@ -86,46 +85,7 @@ _rc_loop:
         bne _rc_loop
         rts
 
-; ============================================================================
-; ascii_to_screen — Convert ASCII to MEGA65 screen code
-; ============================================================================
-; Input: A = ASCII character
-; Output: A = screen code for MEGA65 (lowercase charset mode)
-;
-ascii_to_screen:
-        cmp #$00
-        beq _ats_space          ; NUL → space
-        cmp #$20
-        bcc _ats_space          ; Control chars → space
-        cmp #$40
-        bcc _ats_done           ; $20-$3F: same as screen code
-        cmp #$60
-        bcc _ats_upper          ; $40-$5F: uppercase letters
-        cmp #$7B
-        bcc _ats_lower          ; $60-$7A: lowercase letters
-        cmp #$7F
-        bcc _ats_done           ; $7B-$7E: as-is
-_ats_space:
-        lda #$20                ; Space
-_ats_done:
-        rts
-_ats_upper:
-        ; ASCII $40-$5F → screen codes $00-$1F (uppercase in lowercase charset)
-        cmp #$5C
-        bne +
-        lda #$2F                ; Backslash -> forward slash (no \ in C64 charset)
-        rts
-+       sec
-        sbc #$40
-        rts
-_ats_lower:
-        ; ASCII $60-$7A → screen codes $01-$1A? No.
-        ; In MEGA65 lowercase charset: lowercase a-z = screen codes $01-$1A
-        sec
-        sbc #$60
-        clc
-        adc #$01
-        rts
+; (ascii_to_screen removed — CP437 font makes ASCII = screen code)
 
 ; ============================================================================
 ; ascii_to_pet — Convert ASCII character to PETSCII
