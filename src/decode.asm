@@ -704,7 +704,8 @@ opcode_jump_tbl:
         .word op_hlt            ; $39 — HLT (F4)
         .word op_nop_unimpl    ; $3A
         .word op_pop_rm         ; $3B — POP r/m16 (8F)
-        .word op_nop_unimpl    ; $3A
+        .word op_enter          ; $3C — ENTER imm16, imm8 (C8)
+        .word op_leave          ; $3D — LEAVE (C9)
 
 debug_print_hex:
         pha

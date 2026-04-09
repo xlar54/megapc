@@ -104,7 +104,7 @@ opcode_dispatch:
         ;         C0    C1    C2    C3    C4    C5    C6    C7
         .byte   $0C,  $0C,  $13,  $13,  $25,  $25,  $14,  $14  ; Shift, RET imm, RET, LES, LDS, MOV rm/imm
         ;         C8    C9    CA    CB    CC    CD    CE    CF
-        .byte   $31,  $31,  $13,  $13,  $26,  $27,  $28,  $34  ; ENTER, LEAVE, RETF, INT3, INT, INTO, IRET
+        .byte   $3C,  $3D,  $13,  $13,  $26,  $27,  $28,  $34  ; ENTER, LEAVE, RETF, INT3, INT, INTO, IRET
 
         ; Dx row: Shift/rotate, AAM, AAD, SALC, XLAT, FPU escape
         ;         D0    D1    D2    D3    D4    D5    D6    D7

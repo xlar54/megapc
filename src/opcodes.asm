@@ -1113,6 +1113,48 @@ op_popa:
         jmp opcode_done
 
 ; ============================================================================
+; op_enter — ENTER imm16, imm8 (opcode $C8)
+; ============================================================================
+op_enter:
+        jsr fetch_word          ; A = size low, scratch_a = size high
+        sta scratch_c
+        lda scratch_a
+        sta scratch_d
+        jsr fetch_byte          ; nesting level (ignored — level 0 only)
+        lda reg_bp86
+        sta op_result
+        lda reg_bp86+1
+        sta op_result+1
+        jsr push_word
+        lda reg_sp86
+        sta reg_bp86
+        lda reg_sp86+1
+        sta reg_bp86+1
+        sec
+        lda reg_sp86
+        sbc scratch_c
+        sta reg_sp86
+        lda reg_sp86+1
+        sbc scratch_d
+        sta reg_sp86+1
+        jmp opcode_done
+
+; ============================================================================
+; op_leave — LEAVE (opcode $C9)
+; ============================================================================
+op_leave:
+        lda reg_bp86
+        sta reg_sp86
+        lda reg_bp86+1
+        sta reg_sp86+1
+        jsr pop_word
+        lda op_result
+        sta reg_bp86
+        lda op_result+1
+        sta reg_bp86+1
+        jmp opcode_done
+
+; ============================================================================
 ; op_push_imm16 — PUSH imm16 (opcode $68)
 ; ============================================================================
 op_push_imm16:
@@ -1178,10 +1220,6 @@ op_nop_unimpl:
         sta unimpl_last
         ; Some unimplemented opcodes have operands we must skip
         ; to keep the instruction stream aligned
-        cmp #$C8                ; ENTER imm16, imm8 (4 bytes total)
-        beq _nop_skip3
-        cmp #$C9                ; LEAVE (1 byte, no operands)
-        beq _nop_done
         cmp #$0F                ; 0F prefix (2-byte opcode, already consumed by emu_special)
         beq _nop_done
         ; D8-DF = FPU ESC — these have ModR/M (already decoded)
@@ -1352,6 +1390,12 @@ op_mov_sreg:
 
 _msreg_to_sreg:
         ; 8E: sreg ← r/m
+        ; Reject MOV CS, r/m (i_reg=1) — CS only changes via far control transfer
+        lda i_reg
+        and #$03
+        cmp #$01
+        beq _msreg_cs_reject
+
         phx                     ; Save segment register offset
         jsr read_rm16
         plx                     ; Restore segment register offset
@@ -1360,13 +1404,8 @@ _msreg_to_sreg:
         lda op_source+1
         sta regs+1,x
 
-        ; Mark appropriate segment dirty
-        cpx #SEG_CS_OFS
-        bne +
-        lda #1
-        sta cs_dirty
-        jmp opcode_done
-+       cpx #SEG_SS_OFS
+        ; Mark appropriate segment dirty (CS already rejected above)
+        cpx #SEG_SS_OFS
         bne +
         lda #1
         sta ss_dirty
@@ -1377,6 +1416,10 @@ _msreg_to_sreg:
         lda #1
         sta ds_dirty
 +       jmp opcode_done
+
+_msreg_cs_reject:
+        jsr read_rm16           ; Consume operand but discard
+        jmp opcode_done
 
 ; ============================================================================
 ; $0B — MOV acc, mem (A0–A3)
@@ -2888,6 +2931,8 @@ _ii_int15:
         jmp opcode_done
 _i15_not88:
         lda reg_ah
+        cmp #$87
+        beq _i15_block_move     ; AH=87: Block move (not supported)
         cmp #$90
         beq _i15_device_wait    ; AH=90: Device busy (wait)
         cmp #$91
@@ -2904,6 +2949,14 @@ _i15_device_wait:
         ; to allow multitasking hooks. Must succeed or callers hang.
         lda #0
         sta flag_cf             ; CF=0 success
+        jmp opcode_done
+
+_i15_block_move:
+        ; AH=87: Block move — requires protected mode, not supported
+        lda #$86
+        sta reg_ah
+        lda #1
+        sta flag_cf
         jmp opcode_done
 
 _ii_int12:

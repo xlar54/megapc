@@ -125,6 +125,7 @@ _i13_reset:
         ; AH=00: Reset — always succeed
         lda #$00
         sta reg_ah
+        jsr _i13_set_status
         lda #0
         sta flag_cf
         rts
@@ -186,6 +187,7 @@ _i13_no_drive:
         ; Floppy drive > 0 — return timeout error
         lda #$80                ; Timeout / drive not ready
         sta reg_ah
+        jsr _i13_set_status
         lda #0
         sta reg_al              ; 0 sectors transferred
         lda #$01
@@ -199,6 +201,7 @@ _i13_hard_disk:
         ; Return error for all functions
         lda #$01                ; Invalid function / no drive
         sta reg_ah
+        jsr _i13_set_status
         lda #0
         sta reg_dl              ; 0 hard drives
         lda #1
@@ -206,6 +209,92 @@ _i13_hard_disk:
         rts
 
         ; (_i13_hd_read removed — no hard drives emulated)
+
+; ============================================================================
+; _i13_set_status — Write last disk status to BDA 0040:0041
+; ============================================================================
+; Input: A = status code (0=success, nonzero=error)
+_i13_set_status:
+        pha
+        lda #$41
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        pla
+        ldz #0
+        sta [temp_ptr],z
+        rts
+
+; ============================================================================
+; _i13_validate_chs — Validate CHS parameters against drive geometry
+; ============================================================================
+; Input: reg_al, reg_ch, reg_cl, reg_dh, i13_cur_* set by _i13_select_drive
+; Output: carry set = OK, carry clear = error (AH/CF already set)
+_i13_validate_chs:
+        lda reg_al
+        beq _i13v_bad_cmd
+        lda reg_cl
+        and #$3F
+        beq _i13v_bad_sector
+        cmp i13_cur_spt
+        beq _i13v_sec_ok
+        bcs _i13v_bad_sector
+_i13v_sec_ok:
+        lda reg_dh
+        cmp i13_cur_heads
+        bcs _i13v_bad_sector
+        lda reg_ch
+        cmp i13_cur_cyls
+        bcs _i13v_bad_sector
+        ; Check ES:BX + count*512 doesn't cross 64K
+        lda reg_al
+        asl
+        clc
+        adc reg_bx+1
+        bcs _i13v_dma_cross
+        lda reg_bx
+        beq _i13v_ok
+        lda reg_al
+        asl
+        clc
+        adc reg_bx+1
+        cmp #$00
+        bne _i13v_ok
+        bra _i13v_dma_cross
+_i13v_ok:
+        sec
+        rts
+_i13v_bad_cmd:
+        lda #$01
+        sta reg_ah
+        lda #1
+        sta flag_cf
+        lda #$01
+        jsr _i13_set_status
+        clc
+        rts
+_i13v_bad_sector:
+        lda #$04
+        sta reg_ah
+        lda #1
+        sta flag_cf
+        lda #$04
+        jsr _i13_set_status
+        clc
+        rts
+_i13v_dma_cross:
+        lda #$09
+        sta reg_ah
+        lda #1
+        sta flag_cf
+        lda #$09
+        jsr _i13_set_status
+        clc
+        rts
 
 ; ============================================================================
 ; _i13_read — Read sectors from floppy image
@@ -221,6 +310,8 @@ _i13_hard_disk:
 _i13_read:
         jsr _i13_select_drive
         bcc _i13_no_drive       ; Invalid drive or not loaded
+        jsr _i13_validate_chs
+        bcc _i13_read_bail
 
         ; Save sector count
         lda reg_al
@@ -444,6 +535,9 @@ _i13_advance:
         dec disk_sect_left
         jmp _i13_read_loop
 
+_i13_read_bail:
+        rts
+
 _i13_read_done:
         ; Restore BX — real BIOS preserves BX
         lda $8F19
@@ -453,6 +547,7 @@ _i13_read_done:
         ; Return success
         lda #$00
         sta reg_ah
+        jsr _i13_set_status
         lda $8F18               ; restore original sector count
         sta reg_al              ; AL = sectors actually read
         lda #0
@@ -468,6 +563,8 @@ _i13_read_done:
 _i13_write:
         jsr _i13_select_drive
         bcc _i13_no_drive       ; Invalid drive or not loaded
+        jsr _i13_validate_chs
+        bcc _i13_write_bail
 
         ; Save sector count and BX
         lda reg_al
@@ -680,6 +777,9 @@ _i13w_dirty_done:
         dec disk_sect_left
         jmp _i13_write_loop
 
+_i13_write_bail:
+        rts
+
 _i13_write_done:
         ; Restore BX
         lda $8F19
@@ -688,6 +788,7 @@ _i13_write_done:
         sta reg_bx+1
         lda #$00
         sta reg_ah
+        jsr _i13_set_status
         lda $8F18
         sta reg_al
         lda #0
