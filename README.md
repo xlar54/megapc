@@ -1,25 +1,21 @@
 **MegaPC 8086 PC XT Emulator**
 
-This is a simple DOS 8086 emulator for the Mega65 computer,
+This is a simple DOS 8086 PC XT emulator for the Mega65 computer,
 with 640kb of RAM, and an A and B floppy drive.
 
 ***Usage***
-Place disk images on your sd-card in the root, named in ALL CAPS.  After that, its pretty self explanatory.  It will handle disks
+Place disk images on your sd-card in the root, named in ALL CAPS and must be 8.3 length (does not support long filenames).  After that, its pretty self explanatory.  It will handle disks
 of varying sizes (160k, 180k, 320k, 360k, 720k, 1.44MB)
 
 The source code has a core switch from MDA to CGA but implementing
 this fully is low priority.
 
-Different version of DOS give mixed results. Im working on improving. Please leave issues as you may find them.
-
 ***Known issues***
 * Freedos does some decompression and writing to higher ram, and is initially slow in loading.  Be patient.
 
-* Due to the bios implementations, some dos disks may work, others - especially OEM versions - may not.
+* Due to the bios implementations, some dos disks may work, others - especially OEM versions - may not.  PC life.
 
 * CGA is in the code, available by switching VIDEO_MODE.  I didnt bother creating a switch in the menu as Im focused more on accuracy with monochrome first.
-
-* The emulator uses the Mega65 characterset that is IBM-like. I believe some chars are still not translated properly.  Eventually we may implement a true codepage 37 characterset.
 
 * The IBM PC XT could not originally read 1.44MB disks.  Some addons and bios upgrades allowed this.  I cant say for certain of success reading or writing these disks. Beware. 360k and 720k should be safe.
 
