@@ -941,7 +941,7 @@ inta:
 	push	ds
 	push	si
 
-	call	vmem_driver_entry	; CGA text mode driver - documented later
+	call	vmem_driver_entry	; CGA text mode driver
 
 	; Increment 32-bit BIOS timer tick counter, once every 18.2 ms
 
@@ -1096,12 +1096,14 @@ int10:
 	je	int10_charatcur
 	cmp	ah, 0x09 ; Write char and attribute
 	je	int10_write_char_attrib
+	cmp	ah, 0x0a ; Write char only (preserve attribute)
+	je	int10_write_char_only
 	cmp	ah, 0x0e ; Write character at cursor position
 	je	int10_write_char
 	cmp	ah, 0x0f ; Get video mode
 	je	int10_get_vm
-	; cmp	ah, 0x1a ; Feature check
-	; je	int10_features
+	cmp	ah, 0x13 ; Write string
+	je	int10_write_string
 
 	iret
 
@@ -1359,6 +1361,10 @@ int10_scroll_up_vmem_update:
 	pop	bx
 	mov	bl, al
 
+	; AL=0 means clear window, not scroll — handle separately
+	cmp	bl, 0
+	je	cls_vmem_clear_window
+
     cls_vmem_scroll_up_next_line:
 
 	cmp	bl, 0
@@ -1411,13 +1417,72 @@ vmem_scroll_up_copy_next_row:
 	push	cx
 	mov	cx, ax		; CX is now the length (in words) of the row to copy
 	mov	ah, bh		; Attribute for new line
-	mov	al, 0		; Write 0 to video memory for new characters
+	mov	al, 0x20	; Space char for cleared cells
 	cld
 	rep	stosw
 	pop	cx
 
 	dec	bl		; Scroll whole text block another line
 	jmp	cls_vmem_scroll_up_next_line	
+
+    cls_vmem_clear_window:
+
+	; AL=0 means clear window (not scroll) — fill rectangle with null+attr
+	; CH/CL = top row/col, DH/DL = bottom row/col, BH = attribute
+	; Use BP to save start column, CH as row counter
+
+	push	bp
+	mov	bp, 0
+	mov	bp, cx		; Save original CX (CH=start row, CL=start col)
+				; BP low byte = start col, BP high byte = start row
+
+    cls_vmem_clear_next_row:
+
+	; Compute DI = (CH * 80 + start_col) * 2
+	; Note: MUL trashes DX, so compute width BEFORE the multiply
+
+	push	bx
+
+	; Compute width = DL - start_col + 1 (before MUL trashes DX)
+	mov	bx, bp
+	and	bx, 0x00FF	; BX = start column (from saved CL)
+	mov	ax, 0
+	mov	al, dl
+	sub	ax, bx		; AX = DL - start_col
+	inc	ax		; AX = width in words
+	push	ax		; Save width on stack
+
+	; Now compute DI = (CH * 80 + start_col) * 2
+	mov	ax, 0
+	mov	al, ch		; Current row
+	push	dx		; Save DX before MUL trashes it
+	mov	dx, 0
+	push	bx		; Save start_col
+	mov	bx, 80
+	mul	bx		; AX = row * 80 (DX trashed)
+	pop	bx		; Restore start_col
+	pop	dx		; Restore DX
+	add	ax, bx		; AX = row * 80 + col
+	shl	ax, 1		; AX = byte offset (* 2)
+	mov	di, ax
+
+	pop	cx		; CX = width (from saved AX earlier)
+	pop	bx
+
+	mov	al, 0x20	; Space char for cleared cells
+	mov	ah, bh		; Fill attribute
+	cld
+	rep	stosw		; Fill row
+
+	; Restore CL from BP, advance CH
+	mov	cx, bp		; Restore original CH/CL
+	inc	ch		; Next row
+	mov	bp, cx		; Save updated row counter
+	cmp	ch, dh
+	jbe	cls_vmem_clear_next_row
+
+	pop	bp		; Restore caller's BP
+	jmp	cls_vmem_scroll_up_done
 
     cls_vmem_scroll_up_done:
 
@@ -1489,6 +1554,10 @@ int10_scroll_down_vmem_update:
 	pop	bx
 	mov	bl, al
 
+	; AL=0 means clear window, not scroll — handle separately
+	cmp	bl, 0
+	je	cls_vmem_clear_window_down
+
     cls_vmem_scroll_down_next_line:
 
 	cmp	bl, 0
@@ -1538,12 +1607,63 @@ int10_scroll_down_vmem_update:
 	push	cx
 	mov	cx, ax		; CX is now the length (in words) of the row to copy
 	mov	ah, bh		; Attribute for new line
-	mov	al, 0		; Write 0 to video memory for new characters
+	mov	al, 0x20	; Space char for cleared cells
 	rep	stosw
 	pop	cx
 
 	dec	bl		; Scroll whole text block another line
 	jmp	cls_vmem_scroll_down_next_line	
+
+    cls_vmem_clear_window_down:
+
+	; AL=0 means clear window — reuse scroll-up's clear routine
+	; CH/CL and DH/DL still have the window coords, BH has attribute
+	push	bp
+	mov	bp, 0
+	mov	bp, cx		; Save original CX
+
+    cls_vmem_clear_down_next_row:
+
+	push	bx
+
+	; Compute width first (before MUL trashes DX)
+	mov	bx, bp
+	and	bx, 0x00FF	; BX = start column
+	mov	ax, 0
+	mov	al, dl
+	sub	ax, bx		; AX = DL - start_col
+	inc	ax		; AX = width
+	push	ax		; Save width
+
+	; Compute DI = (CH * 80 + start_col) * 2
+	mov	ax, 0
+	mov	al, ch		; Current row
+	push	dx		; Save DX before MUL
+	push	bx		; Save start_col
+	mov	bx, 80
+	mul	bx		; AX = row * 80 (DX trashed)
+	pop	bx		; Restore start_col
+	pop	dx		; Restore DX
+	add	ax, bx		; AX = row * 80 + col
+	shl	ax, 1		; AX = byte offset
+	mov	di, ax
+
+	pop	cx		; CX = width
+	pop	bx
+
+	mov	al, 0x20	; Space char for cleared cells
+	mov	ah, bh
+	cld
+	rep	stosw
+
+	mov	cx, bp
+	inc	ch
+	mov	bp, cx
+	cmp	ch, dh
+	jbe	cls_vmem_clear_down_next_row
+
+	pop	bp
+	jmp	cls_vmem_scroll_down_done
 
     cls_vmem_scroll_down_done:
 
@@ -1569,10 +1689,9 @@ int10_scroll_down_vmem_update:
 
   int10_charatcur:
 
-	; This returns the character at the cursor. It is completely dysfunctional,
-	; and only works at all if the character has previously been written following
-	; an int 10/ah = 2 call to set the cursor position. Added just to support
-	; GWBASIC.
+	; AH=08: Read character and attribute at cursor position.
+	; Returns: AL = character, AH = attribute
+	; Reads directly from B800 (consistent with AH=09/0A write target).
 
 	push	ds
 	push	es
@@ -1582,7 +1701,7 @@ int10_scroll_down_vmem_update:
 	mov	bx, 0x40
 	mov	es, bx
 
-	mov	bx, 0xc000
+	mov	bx, 0xb800
 	mov	ds, bx
 
 	mov	bx, 160
@@ -1596,8 +1715,8 @@ int10_scroll_down_vmem_update:
 	add	ax, bx
 	mov	bx, ax
 
-	mov	ah, 7
-	mov	al, [bx]
+	mov	al, [bx]	; Character
+	mov	ah, [bx+1]	; Attribute (read real value, not hardcoded 7)
 
 	pop	dx
 	pop	bx
@@ -1612,9 +1731,9 @@ int10_scroll_down_vmem_update:
 
   int10_write_char:
 
-	; First write the character to a buffer at C000:0. This is so that
-	; we can later retrieve it using the get character at cursor function,
-	; which GWBASIC uses.
+	; AH=0E: Teletype output — write char at cursor, advance cursor.
+	; Writes directly to B800 (video buffer) and C000 (shadow).
+	; Handles control chars (CR, LF, BS) via cursor advance code.
 
 	push	ds
 	push	es
@@ -1626,39 +1745,102 @@ int10_scroll_down_vmem_update:
 
 	push	ax
 
-	mov	cl, al
-	mov	ch, 7
-
 	mov	bx, 0x40
-	mov	es, bx
+	mov	es, bx		; ES = BDA segment (needed for cursor advance later)
 
-	mov	bx, 0xc000
-	mov	ds, bx
+	; For control chars (CR, LF, BS), skip the VRAM write — just do cursor movement
+	cmp	al, 0x0D
+	je	int10_wc_skip_vram
+	cmp	al, 0x0A
+	je	int10_wc_skip_vram
+	cmp	al, 0x08
+	je	int10_wc_skip_vram
+
+	; Compute VRAM offset = (curpos_y * 80 + curpos_x) * 2
+	mov	cl, al		; Save char in CL
+	mov	ch, 7		; Default attribute for teletype
 
 	mov	bx, 160
 	mov	ax, 0
 	mov	al, [es:curpos_y-bios_data]
 	mul	bx
-
 	mov	bx, 0
 	mov	bl, [es:curpos_x-bios_data]
 	shl	bx, 1
-	add	bx, ax
+	add	bx, ax		; BX = VRAM byte offset
 
-	mov	[bx], cx
-	
+	; Write to C000 shadow
+	push	ds
+	mov	ax, 0xc000
+	mov	ds, ax
+	mov	[bx], cx	; char + attr
+	pop	ds
+
+	; Write to B800 video buffer
+	mov	ax, 0xb800
+	mov	ds, ax
+	mov	[bx], cx	; char + attr
+
+    int10_wc_skip_vram:
+
+	; Use 0F 00 trap so native mode vidbuf ($18000) is also updated
 	pop	ax
 	push	ax
-
 	extended_putchar_al
 
 	jmp	int10_write_char_skip_lines
+
+  int10_write_char_only:
+
+	; AH=0A: Write CX copies of char AL at cursor, preserving existing attributes.
+	; Does NOT advance the cursor.
+	; Writes only the character byte in B800, leaves attribute alone.
+
+	push	ds
+	push	es
+	push	cx
+	push	dx
+	push	ax
+	push	bp
+	push	bx
+	push	si
+
+	mov	si, cx		; SI = repeat count
+	mov	dl, al		; DL = char to write (save before mul trashes AX)
+
+	; Compute DI = (curpos_y * 80 + curpos_x) * 2
+	mov	bx, 0x40
+	mov	es, bx
+	mov	ax, 0
+	mov	al, [es:curpos_y-bios_data]
+	mov	bx, 80
+	mul	bx		; AX = row * 80
+	mov	bx, 0
+	mov	bl, [es:curpos_x-bios_data]
+	add	ax, bx		; AX = row * 80 + col
+	shl	ax, 1		; AX = byte offset
+	mov	di, ax		; DI = offset into video buffer
+
+	; Set up ES = B800 for video writes
+	mov	bx, 0xb800
+	mov	es, bx
+
+	mov	al, dl		; Restore char
+
+    int10_wco_loop:
+	mov	byte [es:di], al ; Write char byte only, preserve attribute at di+1
+	add	di, 2		; Next cell
+	dec	si
+	jnz	int10_wco_loop
+
+	pop	si
+	jmp	int10_write_char_attrib_done
 
   int10_write_char_attrib:
 
-	; First write the character to a buffer at C000:0. This is so that
-	; we can later retrieve it using the get character at cursor function,
-	; which GWBASIC uses.
+	; AH=09: Write CX copies of char AL with attribute BL at cursor.
+	; Also advances cursor (non-standard but matches original BIOS behavior).
+	; Writes directly to B800:offset.
 
 	push	ds
 	push	es
@@ -1668,51 +1850,36 @@ int10_scroll_down_vmem_update:
 	push	bp
 	push	bx
 
-	push	ax
-	push	cx
+	; Save char and attribute
+	mov	ah, bl		; AH = attribute, AL = char (AX = attr:char)
+	push	si
+	mov	si, cx		; SI = repeat count
 
-	mov	cl, al
-	mov	ch, bl
-
+	; Compute DI = (curpos_y * 80 + curpos_x) * 2
+	push	ax		; Save char+attr
 	mov	bx, 0x40
 	mov	es, bx
-
-	mov	bx, 0xc000
-	mov	ds, bx
-
-	mov	bx, 160
 	mov	ax, 0
 	mov	al, [es:curpos_y-bios_data]
-	mul	bx
-
+	mov	bx, 80
+	mul	bx		; AX = row * 80
 	mov	bx, 0
 	mov	bl, [es:curpos_x-bios_data]
-	shl	bx, 1
-	add	bx, ax
+	add	ax, bx		; AX = row * 80 + col
+	shl	ax, 1		; AX = byte offset
+	mov	di, ax		; DI = offset into video buffer
+	pop	ax		; Restore char+attr
 
-	mov	[bx], cx
+	; --- Write CX copies to B800:offset (video buffer) ---
+	mov	bx, 0xb800
+	mov	es, bx
+	mov	cx, si		; CX = repeat count
+	cld
+	rep	stosw		; Write CX words of AX to ES:DI
 
-	; Skip ANSI color codes — just output character CX times via trap
-	pop	cx
-	pop	ax
-	push	ax
-
-    out_another_char:
-
-	extended_putchar_al
-	dec	cx
-	cmp	cx, 0
-	jne	out_another_char
-
-	; Skip ANSI attribute reset (no longer needed)
-	jmp	int10_write_char_skip_lines
-	; Dead code below kept for size compatibility
-	mov	al, '['		; ANSI
-	extended_putchar_al
-	mov	al, '0'		; Reset attributes
-	extended_putchar_al
-	mov	al, 'm'
-	extended_putchar_al
+	; Do NOT advance cursor — AH=09 per BIOS spec
+	pop	si
+	jmp	int10_write_char_attrib_done
 
     int10_write_char_skip_lines:
 
@@ -1798,6 +1965,135 @@ int10_scroll_down_vmem_update:
 	mov	bh, 0
 
 	pop	es
+
+	iret
+
+; ************************* INT 10h AH=13 — Write string
+
+  int10_write_string:
+
+	; AH=13: Write string directly to B800 VRAM with proper attributes.
+	; AL = mode: 0/1 = chars only (attr in BL), 2/3 = char+attr pairs
+	; AL bit 0: 1 = update cursor position after write
+	; BL = attribute (modes 0/1 only)
+	; CX = string length (character count)
+	; DH/DL = starting row/col
+	; ES:BP = pointer to string
+
+	push	ds
+	push	si
+	push	di
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+
+	mov	si, bp		; SI = string offset (ES:SI to read from)
+	mov	di, ax		; Save mode in DI (low byte = AL)
+
+	; Compute VRAM offset from DH/DL: (row * 80 + col) * 2
+	push	bx
+	mov	ax, 0
+	mov	al, dh		; Row
+	mov	bx, 80
+	mul	bx		; AX = row * 80
+	mov	bx, 0
+	mov	bl, dl		; Column
+	add	ax, bx		; AX = row * 80 + col
+	shl	ax, 1		; AX = byte offset
+	mov	bp, ax		; BP = VRAM write offset
+	pop	bx
+
+	; Save starting position for cursor restore
+	push	dx		; Save original DH/DL
+
+	; Set up DS = B800 for VRAM writes
+	push	es		; Save caller's ES (string segment)
+	mov	ax, 0xb800
+	mov	ds, ax		; DS = B800 for VRAM writes
+	pop	ax		; AX = caller's ES (string segment)
+	push	es		; Re-save (still caller's ES on stack for reading string)
+	mov	es, ax		; ES = caller's ES (string pointer segment)
+
+	; Check mode
+	test	di, 0x02	; Bit 1: char+attr pairs?
+	jnz	int10_ws_charattr
+
+	; --- Modes 0/1: chars only, attribute in BL ---
+	mov	ah, bl		; AH = attribute for all chars
+
+    int10_ws_charonly_loop:
+	cmp	cx, 0
+	je	int10_ws_write_done
+
+	mov	al, [es:si]	; Read char from string
+	inc	si
+	mov	[ds:bp], ax	; Write char+attr to B800:offset (AL=char, AH=attr)
+	add	bp, 2		; Next cell
+	dec	cx
+	jmp	int10_ws_charonly_loop
+
+    int10_ws_charattr:
+	; --- Modes 2/3: char+attr pairs ---
+    int10_ws_charattr_loop:
+	cmp	cx, 0
+	je	int10_ws_write_done
+
+	mov	al, [es:si]	; Read char
+	mov	ah, [es:si+1]	; Read attr
+	add	si, 2
+	mov	[ds:bp], ax	; Write char+attr to B800:offset
+	add	bp, 2		; Next cell
+	dec	cx
+	jmp	int10_ws_charattr_loop
+
+    int10_ws_write_done:
+	pop	es		; Restore caller's ES
+
+	; Compute final cursor position from BP (VRAM offset)
+	; BP / 2 = character position, then row = pos / 80, col = pos % 80
+	shr	bp, 1		; BP = character position
+	mov	ax, bp
+	mov	bx, 80
+	mov	dx, 0
+	div	bx		; AX = row, DX = col
+	mov	dh, al		; DH = final row
+	mov	dl, dl		; DL = final col (already there from div remainder)
+
+	; Check if we should update cursor (bit 0 of mode)
+	test	di, 0x01
+	jz	int10_ws_restore_cursor
+
+	; Mode 1 or 3: update cursor to final position
+	push	bx
+	push	cx
+	mov	ah, 0x02
+	mov	bh, 0
+	int	0x10
+	pop	cx
+	pop	bx
+	pop	ax		; Discard saved original DH/DL
+	jmp	int10_ws_exit
+
+    int10_ws_restore_cursor:
+	; Mode 0 or 2: restore original cursor position
+	pop	dx		; Original DH/DL
+	push	bx
+	push	cx
+	mov	ah, 0x02
+	mov	bh, 0
+	int	0x10
+	pop	cx
+	pop	bx
+
+    int10_ws_exit:
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	pop	di
+	pop	si
+	pop	ds
 
 	iret
 
@@ -2801,7 +3097,7 @@ clear_screen:
 	mov	ax, 0xb800
 	mov	es, ax
 	mov	di, 0
-	mov	al, 0
+	mov	al, 0x20	; Space char for cleared cells
 	mov	ah, bh
 	mov	cx, 80*25
 	rep	stosw
@@ -3299,8 +3595,7 @@ lpt1addr	dw	0
 lpt2addr	dw	0
 lpt3addr	dw	0
 lpt4addr	dw	0
-equip		dw	0b0000000000100001
-;equip		dw	0b0000000100100001
+equip		dw	0b0000000000110001	; Bit 0=floppy, bits 4-5=11 (mono 80x25)
 		db	0
 memsize		dw	0x280
 		db	0

@@ -143,6 +143,33 @@ _menu_opt2_done:
         bne -
 +
 
+        ; [T] - Toggle Fast Console
+        ldx #0
+-       lda menu_fastcon_txt,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       ; Show ON or OFF
+        lda $8F29
+        beq _menu_fc_off
+        ldx #0
+-       lda menu_on_txt,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       bra _menu_fc_done
+_menu_fc_off:
+        ldx #0
+-       lda menu_off_txt,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+_menu_fc_done:
+
         ; --- Drive Options ---
         ldx #0
 -       lda menu_drv_hdr,x
@@ -224,6 +251,10 @@ _menu_wait_key:
         beq menu_do_drive_b
         cmp #$42                ; 'B' uppercase
         beq menu_do_drive_b
+        cmp #$74                ; 't' lowercase
+        beq menu_do_toggle_fc
+        cmp #$54                ; 'T' uppercase
+        beq menu_do_toggle_fc
         bra _menu_wait_key
 
 menu_do_start:
@@ -239,6 +270,13 @@ _menu_first_start:
         lda #1
         sta menu_emu_started
         jmp start_emulation
+
+menu_do_toggle_fc:
+        ; Toggle fast console flag
+        lda $8F29
+        eor #$01                ; Flip 0↔1
+        sta $8F29
+        jmp show_menu           ; Redraw menu to show new state
 
 menu_do_resume:
         ; Resume — only if running
@@ -794,6 +832,13 @@ menu_resume_na_txt:
 
 menu_quit_txt:
         .text $9f, "[X] - Quit Emulator", 13, 0
+
+menu_fastcon_txt:
+        .text $9f, "[T] - Fast Console = ", 0
+menu_on_txt:
+        .text "ON", 13, 0
+menu_off_txt:
+        .text "OFF", 13, 0
 
 menu_drv_hdr:
         .text 13

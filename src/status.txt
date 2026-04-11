@@ -1,6 +1,6 @@
 MEGA8086 Emulator — Status
 ===========================
-Last updated: 2026-04-08
+Last updated: 2026-04-11
 
 WORKING DOS VERSIONS
 =====================
@@ -13,6 +13,7 @@ WORKING DOS VERSIONS
     insufficient memory for SETUP's requirements)
 - GWBASIC: Runs, function keys display with reverse video,
   cursor keys work, BEEP works (SID speaker emulation)
+- WordStar 3.x: Partially working — see WORDSTAR section below
 
 KNOWN ISSUES (FreeDOS)
 =======================
@@ -24,20 +25,34 @@ prompt, performance is normal for the emulator's speed.
 BIOS INTERRUPT STATUS
 ======================
 
-INT 10h (Video):
+INT 10h (Video) — BIOS (bios.asm, native mode):
   AH=00 Set video mode              IMPLEMENTED (updates BDA, clears screen)
   AH=01 Set cursor type             IMPLEMENTED (sprite shape + hide bit)
   AH=02 Set cursor position         IMPLEMENTED (sprite cursor)
-  AH=03 Read cursor position        IMPLEMENTED
+  AH=03 Read cursor position        IMPLEMENTED (returns CX=$0607 hardcoded)
   AH=05 Set active display page     NOT IMPLEMENTED
-  AH=06 Scroll up                   IMPLEMENTED (full-screen only, see TODO)
-  AH=07 Scroll down                 IMPLEMENTED (full-screen only, see TODO)
-  AH=08 Read char/attr at cursor    IMPLEMENTED (reads guest vidbuf)
-  AH=09 Write char/attr at cursor   IMPLEMENTED (with reverse video via color RAM)
-  AH=0A Write char only at cursor   IMPLEMENTED (same path as 09)
-  AH=0E Teletype output             IMPLEMENTED (CR, LF, BS, TAB, BEL)
-  AH=0F Get video state             IMPLEMENTED
-  AH=13 Write string (AT)           IMPLEMENTED (modes 0-3, char+attr pairs)
+  AH=06 Scroll up                   IMPLEMENTED (windowed, with vmem update)
+  AH=07 Scroll down                 IMPLEMENTED (windowed, with vmem update)
+  AH=08 Read char/attr at cursor    IMPLEMENTED (reads from B800 vidbuf)
+  AH=09 Write char+attr at cursor   IMPLEMENTED (REP STOSW to B800, no cursor advance)
+  AH=0A Write char only at cursor   IMPLEMENTED (byte writes to B800, preserves attr)
+  AH=0E Teletype output             IMPLEMENTED (writes to B800 + C000 + 0F00 trap)
+  AH=0F Get video state             IMPLEMENTED (reads BDA 40:49)
+  AH=13 Write string (AT)           IMPLEMENTED (direct B800 writes, modes 0-3)
+
+INT 10h (Video) — Emulator (io.asm, fast console mode):
+  AH=00 Set video mode              IMPLEMENTED (clears screen, updates BDA)
+  AH=01 Set cursor type             IMPLEMENTED (cursor shape + hide)
+  AH=02 Set cursor position         IMPLEMENTED
+  AH=03 Read cursor position        IMPLEMENTED
+  AH=06 Scroll up                   IMPLEMENTED (do_clear_window + do_clear_window_scr)
+  AH=07 Scroll down                 IMPLEMENTED (do_clear_window + do_clear_window_scr)
+  AH=08 Read char/attr at cursor    IMPLEMENTED (reads vidbuf)
+  AH=09 Write char+attr at cursor   IMPLEMENTED (writes vidbuf + screen RAM)
+  AH=0A Write char only             IMPLEMENTED (same path as 09)
+  AH=0E Teletype output             IMPLEMENTED (con_write_char)
+  AH=0F Get video state             IMPLEMENTED (reads BDA 40:49)
+  AH=13 Write string                IMPLEMENTED (con_write_char loop)
 
 INT 13h (Disk):
   AH=00 Reset                       IMPLEMENTED (writes BDA status)
@@ -58,7 +73,7 @@ INT 15h (System Services):
   AH=C0 Get config table            Passed to BIOS IVT
 
 INT 16h (Keyboard):
-  AH=00 Read key (wait)             IMPLEMENTED (arrow keys, BS, Enter mapped)
+  AH=00 Read key (wait)             IMPLEMENTED (with screen refresh during wait)
   AH=01 Check key (no wait)         IMPLEMENTED (same mappings)
   AH=02 Get shift status            NOT IMPLEMENTED
 
@@ -73,6 +88,160 @@ INT 21h AH=06 Direct console I/O      INTERCEPTED → con_write_char / IVT
 INT 21h AH=09 Print string            INTERCEPTED → con_write_char
 INT 29h Fast console output           INTERCEPTED → con_write_char
 0F xx Emulator traps                  00=putchar, 01=RTC, 04-09=cursor
+
+FAST CONSOLE MODE
+==================
+
+Runtime toggle at $8F29: 1=fast (emulator intercepts INT 10h/21h/29h),
+0=native (all INT 10h goes through BIOS IVT, refresh_cga copies vidbuf
+to screen every tick).
+
+Key difference: Fast mode writes to BOTH vidbuf ($18000) and screen RAM
+($0800) directly. Native mode writes only to vidbuf via B800 mapping,
+then refresh_cga copies to screen at ~18Hz.
+
+The _i16_wait_key polling loop (io.asm) includes screen refresh and
+cursor blink when fast console is OFF. Without this, the screen freezes
+during keyboard waits because the 45GS02-level key poll blocks the
+8086 decode loop (which is where the timer tick runs).
+
+CLS works in both modes:
+  - Fast mode: do_clear_window (vidbuf) + do_clear_window_scr (screen RAM)
+  - Native mode: BIOS cls_vmem_clear_window fills B800 via REP STOSW
+
+DISPLAY
+========
+
+Character set: CP437 8x8 font loaded from disk (cp437.bin) to
+  character RAM at $02A000 (bank 2, ROM write-protect disabled).
+  All 256 CP437 glyphs render correctly — box drawing, accented
+  characters, block elements, etc.
+
+Color RAM: MEGA65 color RAM at $1F800 used for reverse video.
+  - Normal text: MONO_COLOR (configurable, default $05 = green)
+  - Reverse video: MONO_REVERSE (MONO_COLOR | $20)
+  - Color RAM scrolled/cleared with screen RAM in all paths
+
+Video modes: TEXT 80x25 only (mode 3 CGA or mode 7 MDA).
+  Set VIDEO_MODE in main.asm. No graphics modes.
+
+Sprite cursor: 8x8 sprite tracks CGA cursor position.
+
+refresh_cga (display.asm): Copies 2000 chars from vidbuf ($18000) to
+  screen RAM ($0800), skipping attribute bytes (stride 2→1). Chars < $20
+  are skipped (DMA fill pre-clears screen with $20/space). Runs at
+  ~18Hz during timer tick AND during _i16_wait_key polling.
+
+WORDSTAR STATUS
+================
+
+WordStar 3.x (WS.COM from WORDSTAR.IMG) partially works.
+
+WORKING (fast console ON):
+  - Opening menu displays correctly (text + function key bar)
+  - CLS works
+  - Screen clears between menus
+
+BROKEN (fast console OFF / native mode):
+  - Function key bar on row 24 shows garbled characters
+  - Menu text area displays correctly (after many fixes)
+  - CLS works
+
+ROOT CAUSE ANALYSIS (row 24 garbled in native mode):
+  WordStar writes DIFFERENT characters depending on mode. With fast
+  console ON, it writes "1HELP..." (ASCII $31 $48 $45 $4C $50) with
+  attributes $0F/$70. With fast console OFF, it writes $31 $EB $8D
+  $EE $E8 with attributes $0F $E1 $1E $4A $F2.
+
+  The garbled bytes ($EB E1 8D 1E EE 4A E8 F2) are an EXACT MATCH for
+  WordStar's own code at CS:0F03. This means WordStar is choosing a
+  different rendering path and using different character data.
+
+  We confirmed:
+  - The bar writer at CS:5040 always uses the SAME data table at CS:5067
+    containing "1HELP 2INDENT..." in ASCII with interleaved attributes
+  - But with fast console OFF, a DIFFERENT code path writes to row 24
+    using AH=09 with char=$EB, attr=$E1 (confirmed via mem_write8 trap)
+  - The AH=09 write comes from the BIOS's int10_write_char_attrib
+    handler at F000:0BB5 (REP STOSW), called by WordStar's general
+    character output routine at CS:2E52
+  - WordStar's general writer at CS:2E52 is the BIOS fallback path,
+    used when direct video access is not active
+  - WordStar detects display type by reading BDA equipment word at 40:10,
+    masking bits 4-5: $30=mono→B000, else→B800 (detection at CS:4FA0)
+  - Detection code also reads config bytes at [02B3], [02D4], [02D5]
+  - INSTALL.COM needed to configure terminal type but reports "too
+    little memory" — may need more RAM or different DOS version
+
+  UNSOLVED: Why does WordStar choose different output paths between
+  fast console ON and OFF? Both modes return the same equipment word,
+  video mode, and BDA values. The INT 10h handler behavior must differ
+  in some subtle way that WordStar detects. Possible causes:
+  - Timing: BDA repair runs at different times relative to WS startup
+  - AH=02 cursor positioning behaves differently
+  - AH=09 cursor advance behavior differs (fast mode doesn't advance,
+    BIOS mode doesn't advance — should be the same)
+  - Some other INT 10h function returns different values
+  - WordStar may do a direct B800/B000 write-then-read test that
+    fails differently in one mode
+
+  NEXT STEPS for debugging:
+  - Try running INSTALL.COM with more RAM or different DOS version
+  - Add trap on WordStar's detection code at CS:4FA0 to see what
+    values it reads from BDA in each mode
+  - Check if the "general writer" at CS:2E52 is ONLY used in native
+    mode (suggesting WS detected no direct video access)
+  - Check [44CE] (stored video segment) and [44D1] (direct video flag)
+    after WS startup in both modes
+
+BUGS FIXED THIS SESSION (2026-04-11)
+======================================
+
+1. BIOS AH=09 wrote CX chars to same cell (looped 0F00 trap)
+   → Fixed: REP STOSW directly to B800, no cursor advance
+
+2. BIOS AH=0A missing entirely
+   → Added: byte writes to B800 preserving existing attributes
+
+3. BIOS AH=13 missing, then routed through AH=0E teletype
+   → Fixed: direct B800 writes with proper attributes (BIOS)
+   → Added: io.asm fast mode handler via con_write_char
+
+4. BIOS AH=08 read from C000 shadow instead of B800
+   → Fixed: reads from B800 (consistent with AH=09/0A writes)
+
+5. BIOS AH=08 hardcoded attribute $07
+   → Fixed: reads real attribute from B800
+
+6. BIOS scroll/clear fill char was $00 instead of $20
+   → Fixed: all paths use $20 (space) for cleared cells
+
+7. BIOS AL=0 vmem clear skipped (BL=0 jumped to done)
+   → Fixed: cls_vmem_clear_window fills rectangle via REP STOSW
+   → Also fixed: BL=0 check at entry vs loop exit (was clearing
+     after every completed scroll)
+
+8. MUL BX trashes DX — cls_vmem_clear_window computed width=1
+   → Fixed: compute width BEFORE MUL, save on stack
+   → Same fix applied to cls_vmem_clear_window_down
+
+9. BIOS AH=0E didn't write to B800 (relied on 0F00 trap only)
+   → Fixed: writes to B800 AND C000 before 0F00 trap
+
+10. Screen froze during keyboard wait (_i16_wait_key)
+    → Root cause: 45GS02-level tight poll loop blocked decode loop
+    → Fixed: added refresh_cga + cursor blink to poll loop
+      (only when fast console OFF)
+
+11. Fast mode CLS didn't clear screen RAM ($0800)
+    → Fixed: added do_clear_window_scr after do_clear_window
+      in _i10_scroll_up and _i10_scroll_down AL=0 paths
+
+12. BIOS equipment word ($0021) inconsistent with VIDEO_MODE=7
+    → Fixed: BIOS equip word now $0031 (mono) matching VIDEO_MODE
+
+13. _i10_get_mode returned hardcoded VIDEO_MODE instead of BDA
+    → Fixed: reads from BDA 40:49
 
 CPU FEATURES
 =============
@@ -93,24 +262,6 @@ CPU correctness (fixed in audit):
   - STI: one-instruction interrupt shadow
   - MOV CS, r/m16 rejected (CS only changes via far control transfer)
   - REP prefix excludes TEST A8/A9 from string-op range
-
-DISPLAY
-========
-
-Character set: CP437 8x8 font loaded from disk (cp437.bin) to
-  character RAM at $02A000 (bank 2, ROM write-protect disabled).
-  All 256 CP437 glyphs render correctly — box drawing, accented
-  characters, block elements, etc.
-
-Color RAM: MEGA65 color RAM at $1F800 used for reverse video.
-  - Normal text: MONO_COLOR (configurable, default $05 = green)
-  - Reverse video: MONO_REVERSE (MONO_COLOR | $20)
-  - Color RAM scrolled/cleared with screen RAM in all paths
-
-Video modes: TEXT 80x25 only (mode 3 CGA or mode 7 MDA).
-  Set VIDEO_MODE in main.asm. No graphics modes.
-
-Sprite cursor: 8x8 sprite tracks CGA cursor position.
 
 KEYBOARD MAPPING
 =================
@@ -158,6 +309,7 @@ $8F00-$8FF0   Scratch RAM (see $8Fxx map below)
 $9000-$9107   Code cache (256 + 8 spill)
 $9200-$95FF   Data cache (4 lines × 256)
 $9800-$99FF   Sector buffer (512 bytes)
+$18000-$18F9F Video buffer (vidbuf, CGA/MDA text, 80x25x2=4000 bytes)
 $1F800-$1FF9F Color RAM (parallel to screen)
 
 $8Fxx scratch map:
@@ -173,10 +325,11 @@ $8Fxx scratch map:
   $8F1B       Interrupt inhibit flag (STI/MOV SS/POP SS)
   $8F1C       Shift/rotate original MSB
   $8F1D       Shift/rotate original count
-  $8F1E       INT 10h AH=13 saved mode
-  $8F1F       INT 10h AH=13 saved row
-  $8F20       INT 10h AH=13 saved col
-  $8F21-$8F22 INT 10h AH=13 string counter
+  $8F23       Cursor blink counter
+  $8F24       Cursor hidden flag
+  $8F26       Clear window current row
+  $8F27       Clear window screen current row
+  $8F29       Fast console flag (0=native, 1=fast)
   $8F48       attic_access flag
   $8F60-$8F62 mem_read16/write16 temp
   $8F70-$8F71 PUSHA saved SP
@@ -184,12 +337,12 @@ $8Fxx scratch map:
   $8F9A-$8F9D Debug row/col/char capture
   $8FA0-$8FA6 RTC values (sec/min/hr/day/mon/yr/wday)
   $8FA8-$8FAB RTC tick computation temp
+  $8FDA-$8FDC INT 10h AH=13 fast mode state
   $8FD0-$8FD2 INT 21h AH=09 string pointer
   $8FD3       Unsupported INT 13h counter (debug)
   $8FD4-$8FD5 Display refresh counter
   $8FD8       Scroll line count save
-  $8FD9       CRTC register index / screen code save
-  $8FDA-$8FDB CRTC cursor position
+  $8FD9       Screen code save
   $8FE0-$8FE4 Active drive geometry (spt/heads/cyls/type/bank)
   $8FE8-$8FEB Speaker PIT state (lo/hi/latch/port61)
   $8FEC-$8FF0 Speaker divide workspace
@@ -201,18 +354,18 @@ $00000-$0FFFF  Bank 4 direct (IVT, BDA, guest code/data)
 $10000-$EFFFF  Attic via DMA cache
 $B0000-$B7FFF  MDA video → bank 1 $18000
 $B8000-$BFFFF  CGA video → bank 1 $18000
-$C0000-$C7FFF  Video alias → bank 1 $18000
-$C8000-$CFFFF  Unmapped (attic)
+$C0000-$CFFFF  Attic (BIOS shadow, NOT aliased to video)
 $F0000-$FFFFF  Bank 5 (BIOS ROM, write-protected)
 
 TODO
 =====
 
-- INT 10h AH=06/07: Implement windowed scrolling using CH/CL/DH/DL.
-  Currently scrolls entire screen. GWBASIC sets window to rows 0-23,
-  leaving row 24 as function key bar. Our scroll destroys it.
+- WordStar native mode: debug why row 24 function key bar is garbled
+  (see WORDSTAR section for detailed analysis)
 
-- Activate FAT32 floppy save (remove jmp _sfd_end in disk.asm)
+- INT 10h AH=03: Return actual cursor shape instead of hardcoded $0607
+
+- INT 10h AH=01: Track real start/end scanlines
 
 - INT 16h AH=02: Get shift key status (Shift/Ctrl/Alt flags)
 
@@ -224,11 +377,13 @@ TODO
   Dirty cache lines are lost when KERNAL trashes $9200+ during menu.
   On resume, stale cache tags from restored ZP could read garbage.
 
-- BINARY SIZE BUG: Adding ~100+ bytes to any source file breaks
-  restart (option 1) and resume (option 2) from TAB menu. Root cause
-  unknown. Not $8000 boundary, not CBDOS mapping, not specific code.
-  100 NOP bytes (.fill 100, $EA) reproduce the issue. Blocks all
-  pending feature additions (ENTER/LEAVE, arrow keys, INT 15h, etc.).
+- Fast console AH=06/07 AL>0: windowed scroll not implemented.
+  do_scr_scroll always scrolls the full screen regardless of CH/CL/DH/DL.
+  Only AL=0 (clear) respects window coords via do_clear_window.
+  Breaks GWBASIC function key bar and any app using windowed scrolling
+  in fast console mode. BIOS native mode handles windowed scroll correctly.
+
+- Activate FAT32 floppy save (remove jmp _sfd_end in disk.asm)
 
 PERFORMANCE
 ============
@@ -244,3 +399,4 @@ CONFIGURATION
 - MONO_COLOR = $05 (green; $08=amber, $01=white)
 - CACHE_LINES = 4
 - SECTOR_BUF = $9800
+- FAST_CONSOLE_DEFAULT = 1 (runtime toggle via TAB menu [T] option)

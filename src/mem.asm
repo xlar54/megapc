@@ -94,13 +94,8 @@ linear_to_chip:
         lda temp32+2
         cmp #$0F
         bcs _ltc_f_seg
-        cmp #$0C
-        bne _ltc_not_c
-        ; $C0000-$C7FFF → video alias, $C8000-$CFFFF → unmapped (treat as bank 4)
-        lda temp32+1
-        cmp #$80
-        bcc _ltc_c_seg          ; $C0000-$C7FFF → video alias
-        bra _ltc_attic          ; $C8000-$CFFFF → attic (unmapped ROM space)
+        ; $C0000-$CFFFF → attic (BIOS shadow buffer + option ROM space)
+        ; NOT aliased to video — keeps vidbuf clean
 _ltc_not_c:
         cmp #$0B
         bne _ltc_not_b
@@ -154,20 +149,7 @@ _ltc_cga:
         sta temp_ptr+3
         rts
 
-_ltc_c_seg:
-        ; --- $C0000–$C7FFF: Video alias used by 8086tiny BIOS ---
-        ; Maps to same buffer as MDA/CGA at bank 1 $18000
-        ; $C0000 + offset → $01:8000 + offset
-        lda temp32
-        sta temp_ptr
-        lda temp32+1
-        clc
-        adc #$80                ; $00 + $80 = $80 → $18000
-        sta temp_ptr+1
-        lda #$01
-        sta temp_ptr+2
-        lda #$00
-        sta temp_ptr+3
+        ; (_ltc_c_seg removed — $C0000 no longer aliased to video buffer)
         rts
 
 _ltc_f_seg:

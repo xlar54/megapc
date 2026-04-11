@@ -2796,24 +2796,32 @@ _ii_not0_count:
         ; Check for emulator hooks
         cmp #$13
         beq _ii_int13
+        pha                     ; Save INT number for fast_console check
+        lda $8F29               ; fast_console_flag
+        beq _ii_skip_fast       ; 0 = native mode, skip fast console hooks
+        pla
         cmp #$10
         beq _ii_int10
+        cmp #$29
+        beq _ii_int29
+        cmp #$21
+        beq _ii_int21
+        bra _ii_continue
+_ii_skip_fast:
+        pla
+_ii_continue:
         cmp #$16
         beq _ii_int16
         cmp #$12
         beq _ii_int12
         cmp #$11
         beq _ii_int11
-        cmp #$29
-        beq _ii_int29
         cmp #$15
         beq _ii_int15
         cmp #$1A
         beq _ii_int1a
         cmp #$19
         beq ii_int19
-        cmp #$21
-        beq _ii_int21
         ; Default: execute via IVT
         jsr do_sw_interrupt
         jsr compute_cs_base
@@ -3485,11 +3493,76 @@ _bcd_to_bin:
         rts
 
 _emu_sp_putchar:
-        ; 0F 00: Output AL via con_write_char
+        ; 0F 00: Output AL
+        lda $8F29               ; fast_console_flag
+        beq _emu_sp_put_native
+        ; Fast mode: use con_write_char (writes to vidbuf + screen)
         lda reg_al
-        cmp #$1B                ; ESC — ignore
+        cmp #$1B
         beq _emu_sp_ret
         jsr con_write_char
+        jmp opcode_done
+
+_emu_sp_put_native:
+        ; Native mode: write char to vidbuf at BDA cursor position
+        ; BIOS writes chars to $C000:0 (shadow) and relies on 0F 00 for display.
+        ; Skip control chars — BIOS handles cursor movement via $B8000.
+        lda reg_al
+        cmp #$20
+        bcc _emu_sp_ret         ; Control char — BIOS handles it
+
+        ; Read BDA cursor position (40:50/51)
+        pha
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #1
+        lda [temp_ptr],z        ; curpos_y
+        sta scratch_a
+        ldz #0
+        lda [temp_ptr],z        ; curpos_x
+        sta scratch_b
+
+        ; vidbuf offset = (row * 80 + col) * 2 + $18000
+        lda scratch_a
+        sta $D770
+        lda #0
+        sta $D771
+        lda #80
+        sta $D774
+        lda #0
+        sta $D775
+        clc
+        lda $D778
+        adc scratch_b
+        sta scratch_a
+        lda $D779
+        adc #0
+        sta scratch_b
+        asl scratch_a
+        rol scratch_b
+        lda scratch_a
+        sta temp_ptr2
+        lda scratch_b
+        clc
+        adc #$80
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+
+        pla
+        ldz #0
+        sta [temp_ptr2],z
+        lda #$07
+        ldz #1
+        sta [temp_ptr2],z
         jmp opcode_done
 
 _emu_sp_setcursor:
@@ -3502,12 +3575,15 @@ _emu_sp_setcursor:
         jmp opcode_done
 
 _emu_sp_scrollup:
-        ; 0F 05: Scroll up — AL=lines, CH/CL=start, DH/DL=end, BH=attr
-        ; DEAD CODE NOTE: forced scroll (lda #SCR_ROWS / sta scr_row) was from
-        ; native BIOS output testing. Reverted to standard check.
+        ; 0F 05: Scroll up — BIOS handles via $B8000 writes
+        ; Skip entirely in native mode; fast mode still needs it
+        lda $8F29
+        bne _emu_sp_scrollup_fast
+        jmp opcode_done
+_emu_sp_scrollup_fast:
         lda reg_al
-        beq _emu_sp_ret         ; 0 lines = no-op
-        sta $8FD8               ; Save count (do_scr_scroll clobbers X)
+        beq _emu_sp_scrollup_clear
+        sta $8FD8
 _emu_sp_scrollup_loop:
         lda #SCR_ROWS
         sta scr_row
@@ -3515,14 +3591,31 @@ _emu_sp_scrollup_loop:
         dec $8FD8
         bne _emu_sp_scrollup_loop
         jmp opcode_done
+_emu_sp_scrollup_clear:
+        jsr do_clear_window
+        jmp opcode_done
 
 _emu_sp_scrolldown:
         ; 0F 06: Scroll down — not implemented yet, just ignore
         jmp opcode_done
 
 _emu_sp_clearscr:
-        ; 0F 07: Clear screen — BH=fill attribute
-        lda #$93                ; PETSCII clear screen
+        ; 0F 07: Clear screen
+        ; In native mode, BIOS handles via $B8000 writes — skip
+        lda $8F29
+        bne _emu_sp_clearscr_fast
+        jmp opcode_done
+_emu_sp_clearscr_fast:
+        ; Fast mode: clear both screen and vidbuf
+        lda #0
+        sta reg_ch
+        sta reg_cl
+        lda #24
+        sta reg_dh
+        lda #79
+        sta reg_dl
+        jsr do_clear_window
+        lda #$93
         jsr chrout_safe
         lda #0
         sta scr_row
@@ -3530,6 +3623,7 @@ _emu_sp_clearscr:
         jsr cursor_update
         jmp opcode_done
 
+; ============================================================================
 _emu_sp_showcur:
         ; 0F 08: Show cursor
         jsr cursor_show

@@ -117,6 +117,43 @@ _ml_no_tab:
         sta $D015
 _ml_no_blink:
 
+        ; If native console mode, clear screen and refresh from vidbuf
+        lda $8F29               ; fast_console_flag
+        bne _ml_no_refresh      ; 1 = fast mode, skip refresh
+
+        ; Clear screen RAM first (prevents stale data from scroll artifacts)
+        lda #$00
+        sta $D707
+        .byte $80, $00
+        .byte $81, $00
+        .byte $00
+        .byte $03               ; FILL
+        .word 2000              ; 80x25
+        .word $0020             ; Space
+        .byte $00
+        .word $0800             ; Screen RAM
+        .byte $00
+        .byte $00, $00, $00
+        ; Now copy vidbuf to screen
+        jsr refresh_cga
+        ; Sync sprite cursor from BDA cursor position
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z        ; BDA curpos_x (40:50)
+        sta scr_col
+        ldz #1
+        lda [temp_ptr],z        ; BDA curpos_y (40:51)
+        sta scr_row
+        jsr cursor_update
+_ml_no_refresh:
+
         ; Increment instruction-based tick counter (for BDA repair timing)
         inc tick_counter
         bne +

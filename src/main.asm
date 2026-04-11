@@ -126,13 +126,17 @@ VIDEO_EQUIP     = $71           ; 2 floppies + 80-col monochrome
 CRTC_PORT       = $03B4         ; MDA CRTC base port
 .endif
 
+; --- Console interception ---
+; fast_console_flag: runtime toggle (1=fast, 0=native for ANSI.SYS)
+; Default set during init, toggled via menu [T] option
+FAST_CONSOLE_DEFAULT = 1        ; Compile-time default
+
 ; --- Monochrome display color ---
 MONO_COLOR      = $05
 MONO_REVERSE    = $20 | MONO_COLOR
 
 ; --- Screen / debug ---
 SECTOR_BUF      = $9800         ; 512-byte sector buffer ($9800-$99FF)
-                                ; (moved from $9600 to avoid 4-line cache at $9200-$95FF)
 CGA_ROWS        = 25
 CGA_COLS        = 80
 
@@ -190,6 +194,10 @@ entry:
         lda #0
         sta floppy_a_loaded
         sta floppy_b_loaded
+
+        ; Set fast console default (only on cold boot)
+        lda #FAST_CONSOLE_DEFAULT
+        sta $8F29
 
         ; Initialize BIOS tables
         jsr init_tables
@@ -279,6 +287,8 @@ _beep_wait:
         ; Now disable IRQs for emulation loop
         sei
 
+        ; Preserve fast console flag across restart (don't reset it)
+
         ; Re-init cache & segment state
         jsr init_cache
         lda #1
@@ -289,9 +299,10 @@ _beep_wait:
         sta $8F17
         sta $8F1B               ; Clear interrupt inhibit flag
 
-        ; Clear screen before emulation
+        ; Clear screen and vidbuf before emulation
         lda #147
         jsr CHROUT
+        jsr clear_vidbuf
 
 .if VIDEO_MODE == 7
         lda #30

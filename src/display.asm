@@ -57,10 +57,12 @@ _rc_loop:
         ; Read ASCII char from CGA buffer (skip attribute at +1)
         ldz #0
         lda [temp_ptr],z
-        ; CP437 font: ASCII value IS the screen code — no conversion needed
+        ; Skip control characters (< $20)
+        cmp #$20
+        bcc _rc_skip
         ; Write to MEGA65 screen RAM
-        ldz #0
         sta [temp_ptr2],z
+_rc_skip:
 
         ; Advance CGA pointer by 2 (char + attr pair)
         clc

@@ -408,6 +408,8 @@ int10_handler:
         beq _i10_write_char_attr  ; AH=0A: same as 09 (we ignore attributes anyway)
         cmp #$0F
         beq _i10_get_mode
+        cmp #$13
+        beq _i10_write_string
         ; Unsupported: return silently
         rts
 
@@ -503,14 +505,13 @@ _i10_get_cursor:
         rts
 
 _i10_scroll_up:
-        ; AH=06: Scroll up — AL=lines (0=clear entire window)
+        ; AH=06: Scroll up — AL=lines (0=clear window)
         lda reg_al
         bne _i10su_scroll
-        ; AL=0: clear window — clear screen
-        lda #$93
-        jsr chrout_safe
-        ; Also clear guest video buffer
-        jsr clear_vidbuf
+        ; AL=0: clear window (CH,CL)-(DH,DL) — respects window boundaries
+        jsr do_clear_window
+        ; Also clear MEGA65 screen RAM for the same region
+        jsr do_clear_window_scr
         rts
 _i10su_scroll:
         ; AL>0: scroll up AL lines (preserve cursor position)
@@ -535,10 +536,9 @@ _i10_scroll_down:
         ; AH=07: Scroll down — AL=lines (0=clear entire window)
         lda reg_al
         bne _i10sd_scroll
-        ; AL=0: clear window
-        lda #$93
-        jsr chrout_safe
-        jsr clear_vidbuf
+        ; AL=0: clear window (CH,CL)-(DH,DL) — respects window boundaries
+        jsr do_clear_window
+        jsr do_clear_window_scr
         rts
 _i10sd_scroll:
         ; AL>0: scroll down AL lines (preserve cursor position)
@@ -618,10 +618,98 @@ _i10wa_restore:
         sta scr_row
         rts
 
+_i10_write_string:
+        ; AH=13: Write string — ES:BP=string, CX=length, DH/DL=row/col
+        ; AL bit 0: update cursor after. AL bit 1: string has char+attr pairs
+        ; BL=attribute (modes 0/1)
+        ; Save mode and original cursor
+        lda reg_al
+        sta $8FDA               ; Save mode
+        lda scr_row
+        pha
+        lda scr_col
+        pha
+        ; Set cursor to DH/DL
+        lda reg_dh
+        sta scr_row
+        lda reg_dl
+        sta scr_col
+        ; Set up pointer to string at ES:BP
+        lda reg_bp86
+        sta temp32
+        lda reg_bp86+1
+        sta temp32+1
+        ; Read string length
+        lda reg_cx
+        sta $8FDB               ; Count low
+        lda reg_cx+1
+        sta $8FDC               ; Count high
+_i10ws_loop:
+        lda $8FDB
+        ora $8FDC
+        beq _i10ws_done
+        ; Read char from ES:BP
+        ldx #SEG_ES_OFS
+        jsr mem_read8
+        sta $8FDD               ; Save char
+        inc temp32
+        bne +
+        inc temp32+1
++
+        ; Check mode bit 1: char+attr pairs?
+        lda $8FDA
+        and #$02
+        beq _i10ws_use_bl
+        ; Mode 2/3: read attr from next byte
+        ldx #SEG_ES_OFS
+        jsr mem_read8
+        sta reg_bl              ; Use as attribute
+        inc temp32
+        bne +
+        inc temp32+1
++
+_i10ws_use_bl:
+        ; Write char via con_write_char (handles screen + vidbuf + cursor advance)
+        lda $8FDD
+        jsr con_write_char
+        ; Decrement count
+        lda $8FDB
+        bne +
+        dec $8FDC
++       dec $8FDB
+        bra _i10ws_loop
+_i10ws_done:
+        ; Check if we should restore cursor (mode bit 0 = 0)
+        lda $8FDA
+        and #$01
+        bne _i10ws_exit         ; Bit 0 set: leave cursor at final position
+        ; Restore original cursor
+        pla
+        sta scr_col
+        pla
+        sta scr_row
+        jsr cursor_update
+        rts
+_i10ws_exit:
+        ; Discard saved cursor
+        pla
+        pla
+        jsr cursor_update
+        rts
+
 _i10_get_mode:
-        ; AH=0F: Get current video mode
+        ; AH=0F: Get current video mode — read from BDA 40:49
         ; AL=mode, AH=columns(80), BH=page(0)
-        lda #VIDEO_MODE
+        lda #$49
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z
         sta reg_al
         lda #80
         sta reg_ah
@@ -649,8 +737,52 @@ _i16_wait_key:
         ; AH=00: Wait for key.
         ; Use MEGA65 hardware typing queue at $D610 (ASCII direct!)
         ; No KERNAL needed — no IRQs, no ZP save/restore!
--       lda $D610               ; Read ASCII key from hardware queue
-        beq -                   ; $00 = queue empty, keep polling
+_i16_poll:
+        lda $D610               ; Read ASCII key from hardware queue
+        bne _i16_got_key
+        ; No key — refresh screen if native mode (fast_console off)
+        lda $8F29
+        bne _i16_poll           ; Fast mode, just poll again
+        ; Check if a new frame has elapsed
+        lda $D7FA
+        cmp $8F15
+        beq _i16_poll           ; Same frame, poll again
+        sta $8F15               ; Update frame counter
+        inc $8F16
+        lda $8F16
+        cmp #3
+        bcc _i16_poll           ; Not time for tick yet
+        lda #0
+        sta $8F16
+        ; Clear screen RAM before refresh
+        lda #$00
+        sta $D707
+        .byte $80, $00
+        .byte $81, $00
+        .byte $00
+        .byte $03               ; FILL
+        .word 2000              ; 80x25
+        .word $0020             ; Space
+        .byte $00
+        .word $0800             ; Screen RAM
+        .byte $00
+        .byte $00, $00, $00
+        ; Do screen refresh
+        jsr refresh_cga
+        ; Cursor blink
+        lda $8F24
+        bne _i16_poll
+        inc $8F23
+        lda $8F23
+        cmp #5
+        bcc _i16_poll
+        lda #0
+        sta $8F23
+        lda $D015
+        eor #$01
+        sta $D015
+        bra _i16_poll
+_i16_got_key:
         cmp #$09                ; TAB key? (reserved for menu)
         bne +
         sta $D610               ; Dequeue the TAB
@@ -982,6 +1114,134 @@ calc_scr_ptr:
         lda #$00
         sta temp_ptr+2
         sta temp_ptr+3
+        rts
+
+; ============================================================================
+; do_clear_window — Clear a rectangular region in vidbuf
+; ============================================================================
+; Input: reg_ch=top row, reg_cl=left col, reg_dh=bottom row, reg_dl=right col
+;        reg_bh=fill attribute
+; Clears vidbuf at $18000 (char+attr pairs, 160 bytes/row)
+;
+do_clear_window:
+        lda reg_ch
+        sta $8F26               ; Current row
+
+_dcw_row_loop:
+        lda $8F26
+        sta $D770
+        lda #0
+        sta $D771
+        lda #80
+        sta $D774
+        lda #0
+        sta $D775
+        clc
+        lda $D778
+        adc reg_cl
+        sta scratch_a
+        lda $D779
+        adc #0
+        sta scratch_b
+        asl scratch_a
+        rol scratch_b
+        lda scratch_a
+        sta temp_ptr2
+        lda scratch_b
+        clc
+        adc #$80
+        sta temp_ptr2+1
+        lda #$01
+        sta temp_ptr2+2
+        lda #$00
+        sta temp_ptr2+3
+
+        sec
+        lda reg_dl
+        sbc reg_cl
+        sta scratch_c
+        inc scratch_c
+
+        ldx scratch_c
+        ldz #0
+_dcw_col_loop:
+        lda #$20
+        sta [temp_ptr2],z
+        inz
+        lda reg_bh
+        sta [temp_ptr2],z
+        inz
+        dex
+        bne _dcw_col_loop
+
+        lda $8F26
+        cmp reg_dh
+        bcs _dcw_done
+        inc $8F26
+        bra _dcw_row_loop
+_dcw_done:
+        rts
+
+; ============================================================================
+; do_clear_window_scr — Clear rectangle in MEGA65 screen RAM ($0800)
+; ============================================================================
+; Same window coords as do_clear_window: reg_ch/cl/dh/dl
+; Writes space ($20) to screen RAM (1 byte per cell, no attributes)
+;
+do_clear_window_scr:
+        lda reg_ch
+        sta $8F27               ; Current row
+
+_dcws_row_loop:
+        ; Compute screen offset = row * 80 + col
+        lda $8F27
+        sta $D770
+        lda #0
+        sta $D771
+        lda #80
+        sta $D774
+        lda #0
+        sta $D775
+        clc
+        lda $D778
+        adc reg_cl
+        sta scratch_a
+        lda $D779
+        adc #0
+        sta scratch_b
+        ; Add SCREEN_BASE ($0800)
+        clc
+        lda scratch_a
+        adc #<SCREEN_BASE
+        sta temp_ptr2
+        lda scratch_b
+        adc #>SCREEN_BASE
+        sta temp_ptr2+1
+        lda #$00
+        sta temp_ptr2+2
+        sta temp_ptr2+3
+
+        sec
+        lda reg_dl
+        sbc reg_cl
+        sta scratch_c
+        inc scratch_c
+
+        ldx scratch_c
+        ldz #0
+_dcws_col_loop:
+        lda #$20
+        sta [temp_ptr2],z
+        inz
+        dex
+        bne _dcws_col_loop
+
+        lda $8F27
+        cmp reg_dh
+        bcs _dcws_done
+        inc $8F27
+        bra _dcws_row_loop
+_dcws_done:
         rts
 
 ; --- Scroll screen up one line via DMA ---
@@ -1318,7 +1578,6 @@ _cwc_no_dbg:
         ldz #1
         sta [temp_ptr2],z
 
-        ; Write to MEGA65 screen
         ; Write to MEGA65 screen (CP437 font: ASCII = screen code)
         jsr calc_scr_ptr
         pla
