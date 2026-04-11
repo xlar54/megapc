@@ -970,9 +970,6 @@ _lfd_fail:
 ; Flow: Hyppo setname → findfile → rmfile → fat_save_floppy
 ;
 save_floppy_drive:
-        ; --- DISABLED: jmp over save logic until tested on real hardware ---
-        jmp _sfd_end
-
         pha                     ; Save drive number
 
         ; Step 1: Set filename via Hyppo setname
@@ -995,10 +992,11 @@ save_floppy_drive:
         ; Ignore rmfile errors — file may already be gone
 
 _sfd_not_found:
-        ; Step 4: Create new file and write data via FAT32 writer
+        ; Step 4: Create new file and write data via FAT32 writer (bank 1)
         pla                     ; Recover drive number
         pha
-;        jsr fat_save_floppy
+        sta $8F25               ; Pass drive number via scratch
+        jsr call_fat_save_floppy
         bcc _sfd_fail
 
         ; Success — clear dirty flag
@@ -1171,6 +1169,33 @@ _dfg_320k:
 
 _dfg_match_sectors:
         ; Match total sectors against known formats
+        ; 160K: 320 sectors ($0140)
+        lda scratch_b
+        cmp #$01
+        bne _dfg_ns_not_160
+        lda scratch_a
+        cmp #$40
+        bne _dfg_ns_not_160
+        jmp _dfg_160k
+_dfg_ns_not_160:
+        ; 180K: 360 sectors ($0168)
+        lda scratch_b
+        cmp #$01
+        bne _dfg_ns_not_180
+        lda scratch_a
+        cmp #$68
+        bne _dfg_ns_not_180
+        jmp _dfg_180k
+_dfg_ns_not_180:
+        ; 320K: 640 sectors ($0280)
+        lda scratch_b
+        cmp #$02
+        bne _dfg_ns_not_320
+        lda scratch_a
+        cmp #$80
+        bne _dfg_ns_not_320
+        jmp _dfg_320k
+_dfg_ns_not_320:
         ; 360K: 720 sectors ($02D0)
         lda scratch_b
         cmp #$02

@@ -250,9 +250,49 @@ menu_do_drive_a:
         ; Drive A: mount or unmount
         lda floppy_a_loaded
         beq menu_mount_drive_var_a
-        ; Unmount Drive A
+        ; Unmount Drive A — check if dirty first
+        lda floppy_a_dirty
+        beq _unmount_a_clean
+        ; Dirty — ask to save
+        ldx #0
+-       lda msg_save_changes,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       jsr menu_yes_no
+        bcc _unmount_a_clean    ; User said no
+        ; Save floppy A
+        ldx #0
+-       lda msg_saving,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       lda #0                  ; Drive A
+        jsr save_floppy_drive
+        bcs _unmount_a_saved
+        ; Save failed
+        ldx #0
+-       lda msg_save_err,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       jsr menu_press_any_key
+        jmp show_menu
+_unmount_a_saved:
+        ldx #0
+-       lda msg_save_ok,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+_unmount_a_clean:
         lda #0
         sta floppy_a_loaded
+        sta floppy_a_dirty
         ldx #0
 -       lda msg_unmounted,x
         beq +
@@ -271,9 +311,49 @@ menu_do_drive_b:
         ; Drive B: mount or unmount
         lda floppy_b_loaded
         beq menu_mount_drive_var_b
-        ; Unmount Drive B
+        ; Unmount Drive B — check if dirty first
+        lda floppy_b_dirty
+        beq _unmount_b_clean
+        ; Dirty — ask to save
+        ldx #0
+-       lda msg_save_changes,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       jsr menu_yes_no
+        bcc _unmount_b_clean    ; User said no
+        ; Save floppy B
+        ldx #0
+-       lda msg_saving,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       lda #1                  ; Drive B
+        jsr save_floppy_drive
+        bcs _unmount_b_saved
+        ; Save failed
+        ldx #0
+-       lda msg_save_err,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++       jsr menu_press_any_key
+        jmp show_menu
+_unmount_b_saved:
+        ldx #0
+-       lda msg_save_ok,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+_unmount_b_clean:
         lda #0
         sta floppy_b_loaded
+        sta floppy_b_dirty
         ldx #0
 -       lda msg_unmounted,x
         beq +
@@ -471,9 +551,9 @@ _mrf_loop:
         cmp #$7F
         bcs _mrf_loop           ; High chars, ignore
 
-        ; Check length limit
+        ; Check length limit (8.3 format: max 12 chars including dot)
         ldx menu_fname_len
-        cpx #63
+        cpx #12
         bcs _mrf_loop           ; At max length
 
         ; Store character
@@ -532,6 +612,37 @@ _mpak_wait:
         lda $D610
         beq _mpak_wait
         sta $D610               ; Dequeue
+        rts
+
+; ============================================================================
+; menu_yes_no — Wait for Y or N keypress
+; ============================================================================
+; Output: carry set = Y, carry clear = N
+menu_yes_no:
+        lda #$00
+        sta $D610               ; Drain queue
+_myn_wait:
+        lda $D610
+        beq _myn_wait
+        sta $D610               ; Dequeue
+        cmp #$59                ; 'Y'
+        beq _myn_yes
+        cmp #$79                ; 'y'
+        beq _myn_yes
+        cmp #$4E                ; 'N'
+        beq _myn_no
+        cmp #$6E                ; 'n'
+        beq _myn_no
+        bra _myn_wait           ; Not Y or N — wait again
+_myn_yes:
+        lda #$0D
+        jsr CHROUT
+        sec
+        rts
+_myn_no:
+        lda #$0D
+        jsr CHROUT
+        clc
         rts
 
 ; ============================================================================
@@ -658,60 +769,62 @@ menu_restore_screen:
 ; ============================================================================
 menu_header:
         .text 13
-        .text "MegaPC - 8086 PC Emulator", 13
-        .text "By Scott Hutter - xlar54", 13, 0
+        .text $9a, "MegaPC - 8086 PC XT Emulator - 640KB", 13
+        .text $9F, "By Scott Hutter - xlar54", 13, 0
 
 hex_tbl:
         .text "0123456789ABCDEF"
 
 menu_emu_hdr:
         .text 13
-        .text "Emulation Options:", 13
-        .text "--------------------------------------", 13, 0
+        .text $9e,"Emulation Options:", 13
+        .text $9e,"--------------------------------------", 13, 0
 
 menu_start_txt:
-        .text "[1] - Start Emulation", 13, 0
+        .text $9f, "[1] - Start Emulation", 13, 0
 
 menu_restart_txt:
-        .text "[1] - Restart Emulation", 13, 0
+        .text $9f, "[1] - Restart Emulation", 13, 0
 
 menu_resume_txt:
-        .text "[2] - Resume Emulation", 13, 0
+        .text $9f, "[2] - Resume Emulation", 13, 0
 
 menu_resume_na_txt:
-        .text "[2] - Resume Emulation (unavailable)", 13, 0
+        .text $9f, "[2] - Resume Emulation (unavailable)", 13, 0
 
 menu_quit_txt:
-        .text "[X] - Quit Emulator", 13, 0
+        .text $9f, "[X] - Quit Emulator", 13, 0
 
 menu_drv_hdr:
         .text 13
-        .text "Drive Options:", 13
-        .text "--------------------------------------", 13, 0
+        .text $9e,"Drive Options", 13
+        .text $9e,"--------------------------------------", 13, 0
 
 menu_mount_a_txt:
-        .text "[A] - Mount Drive A", 13, 0
+        .text $9f, "[A] - Mount Drive A", 13, 0
 
 menu_unmount_a_txt:
-        .text "[A] - Unmount Drive A", 13, 0
+        .text $9f, "[A] - Unmount Drive A", 13, 0
 
 menu_mount_b_txt:
-        .text "[B] - Mount Drive B", 13, 0
+        .text $9f, "[B] - Mount Drive B", 13, 0
 
 menu_unmount_b_txt:
-        .text "[B] - Unmount Drive B", 13, 0
+        .text $9f, "[B] - Unmount Drive B", 13, 0
 
 menu_keys_hdr:
         .text 13
-        .text "Special Keys While In Emulation:", 13
-        .text "--------------------------------------", 13
-        .text "[TAB] - Return to this menu", 13, 0
+        .text $9e, "Special Keys While In Emulation:", 13
+        .text $9e, "--------------------------------------", 13
+        .text $9f, "[TAB] - Return to this menu", 13, 0
 
 msg_filename:
         .text "Filename: ", 0
 
 msg_save_changes:
-        .text "Disk modified. Save? (Y/N) ", 0
+        .byte 13, $12           ; CR + reverse on
+        .text "Disk modified. Save? (Y/N) "
+        .byte $92, 0            ; Reverse off + null
 msg_saving:
         .text "Saving...", 0
 msg_save_ok:
@@ -726,7 +839,7 @@ msg_mounted:
         .text "Disk Mounted.", 0
 
 msg_unmounted:
-        .text 13, "Disk unmounted (changes not saved).", 0
+        .text 13, "Disk unmounted.", 0
 
 msg_disk_error:
         .text "Disk Read Error", 0

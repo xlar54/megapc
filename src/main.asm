@@ -194,6 +194,9 @@ entry:
         ; Initialize BIOS tables
         jsr init_tables
 
+        ; Load fat_writer module to bank 1 at $13400
+        jsr load_fat_writer
+
         ; Show the disk mount menu (user mounts disks, then selects Start)
         jmp show_menu
 
@@ -363,6 +366,161 @@ load_cp437_font:
 _font_fname:
         .text "cp437.bin"
 _font_fname_end:
+
+; ============================================================================
+; load_fat_writer — Load fat_writer module to bank 1 at $13400
+; ============================================================================
+load_fat_writer:
+        ; Set bank for LOAD: data bank=1, filename bank=0
+        lda #$01
+        ldx #$00
+        jsr SETBNK
+
+        ; Set file parameters: logical #0, device 8, secondary 0
+        lda #$00
+        ldx #$08
+        ldy #$00
+        jsr SETLFS
+
+        ; Set filename
+        lda #fw_fname_end-fw_fname
+        ldx #<fw_fname
+        ldy #>fw_fname
+        jsr SETNAM
+
+        ; Load to bank 1 at $3400 (linear $13400)
+        lda #$40                ; Force load to X/Y address
+        ldx #$00                ; Load address low
+        ldy #$34                ; Load address high ($3400 in bank 1)
+        jsr LOAD
+
+        ; Re-unlock VIC-IV (KERNAL LOAD resets it)
+        lda #$47
+        sta VIC_KEY
+        lda #$53
+        sta VIC_KEY
+        lda #$40
+        tsb $D031
+        lda #$80
+        tsb VIC_HOTREGS
+
+        rts
+
+; ============================================================================
+; call_fat_writer — Call fat_writer_test in bank 1 via JSRFAR
+; ============================================================================
+; JSRFAR ($FF6E) reads target from ZP $02-$05:
+;   $02 = bank byte, $03 = addr high, $04 = addr low, $05 = flags/SP
+; These overlap 8086 registers (reg_ax, reg_cx) — save/restore them.
+;
+call_fat_save_floppy:
+        ; Copy parameters into fat_writer parameter block in bank 1
+        ; Parameter block at $13403 (bank 1, offset $3403)
+        ; Set up temp_ptr to point to bank 1 parameter block
+        lda #$03
+        sta temp_ptr
+        lda #$34
+        sta temp_ptr+1
+        lda #$01
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+
+        ; Write drive number
+        lda $8F25
+        ldz #0
+        sta [temp_ptr],z        ; fw_drive_num
+
+        ; Write geometry for the selected drive
+        lda $8F25
+        bne _cfsf_drive_b
+        ; Drive A
+        lda floppy_a_cyls
+        ldz #1
+        sta [temp_ptr],z        ; fw_cylinders
+        lda floppy_a_heads
+        ldz #2
+        sta [temp_ptr],z        ; fw_heads
+        lda floppy_a_spt
+        ldz #3
+        sta [temp_ptr],z        ; fw_spt
+        bra _cfsf_copy_fname
+_cfsf_drive_b:
+        lda floppy_b_cyls
+        ldz #1
+        sta [temp_ptr],z
+        lda floppy_b_heads
+        ldz #2
+        sta [temp_ptr],z
+        lda floppy_b_spt
+        ldz #3
+        sta [temp_ptr],z
+
+_cfsf_copy_fname:
+        ; Copy filename to fw_filename (offset 4 from param block start)
+        ; Advance temp_ptr by 4 to point to fw_filename
+        clc
+        lda temp_ptr
+        adc #4
+        sta temp_ptr
+        ldx #0
+        ldz #0
+_cfsf_fname_loop:
+        lda floppy_fname_page,x
+        sta [temp_ptr],z
+        beq _cfsf_fname_done    ; Null terminator copied
+        inx
+        inz
+        cpx #63
+        bcc _cfsf_fname_loop
+        lda #0
+        sta [temp_ptr],z        ; Force null terminate
+_cfsf_fname_done:
+
+        ; Save ZP $02-$05 (8086 reg_ax and reg_cx)
+        lda $02
+        pha
+        lda $03
+        pha
+        lda $04
+        pha
+        lda $05
+        pha
+
+        ; Target: bank 1, address $3400 (jump table entry 0: fat_save_floppy)
+        lda #$01                ; Bank 1
+        sta $02
+        lda #$34                ; Address high
+        sta $03
+        lda #$00                ; Address low
+        sta $04
+        lda #$00                ; Flags
+        sta $05
+
+        jsr $FF6E               ; JSRFAR
+
+        ; Restore ZP $02-$05
+        pla
+        sta $05
+        pla
+        sta $04
+        pla
+        sta $03
+        pla
+        sta $02
+
+        ; Convert scratch result to carry flag (JSRFAR doesn't preserve carry)
+        lda $8F25
+        beq _cfsf_fail
+        sec                     ; Success
+        rts
+_cfsf_fail:
+        clc                     ; Failure
+        rts
+
+fw_fname:
+        .text "ftwriter.bin"
+fw_fname_end:
 
 ; ============================================================================
 ; resume_emulation — Called from menu when returning to running emulation
