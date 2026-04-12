@@ -2057,8 +2057,7 @@ int10_scroll_down_vmem_update:
 	mov	bx, 80
 	mov	dx, 0
 	div	bx		; AX = row, DX = col
-	mov	dh, al		; DH = final row
-	mov	dl, dl		; DL = final col (already there from div remainder)
+	mov	dh, al		; DH = final row, DL = col (from DIV remainder)
 
 	; Check if we should update cursor (bit 0 of mode)
 	test	di, 0x01
