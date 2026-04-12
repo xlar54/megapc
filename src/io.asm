@@ -1896,6 +1896,21 @@ _cu_y:
         clc
         adc #CURSOR_Y_OFS
         sta $D001
+        ; Sync cursor position to BDA 40:50/51 (keeps BDA in sync for mode switches)
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda scr_col
+        ldz #0
+        sta [temp_ptr],z        ; BDA curpos_x (40:50)
+        lda scr_row
+        ldz #1
+        sta [temp_ptr],z        ; BDA curpos_y (40:51)
         rts
 
 ; ============================================================================

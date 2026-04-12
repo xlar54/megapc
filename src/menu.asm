@@ -14,6 +14,10 @@ menu_emu_started .byte 0
 ; Fast console flag: 1=fast (INT 10h/21h/29h intercepted), 0=native (BIOS IVT)
 fast_console_flag .byte FAST_CONSOLE_DEFAULT
 
+; Saved cursor position (preserved across TAB menu)
+saved_scr_row   .byte 0
+saved_scr_col   .byte 0
+
 ; ============================================================================
 ; show_menu — Display the main menu and handle input
 ; ============================================================================
@@ -692,6 +696,12 @@ _myn_no:
 ; Saves screen RAM to attic, enables IRQs, shows menu.
 ;
 menu_tab_handler:
+        ; Save cursor position (menu/KERNAL will clobber scr_row/scr_col)
+        lda scr_row
+        sta saved_scr_row
+        lda scr_col
+        sta saved_scr_col
+
         ; Hide sprite cursor before saving screen
         jsr cursor_hide
 

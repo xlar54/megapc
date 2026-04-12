@@ -583,6 +583,12 @@ _resume_restore_zp:
 
         ; Re-init sprite cursor (CINT trashes VIC-IV sprite state)
         jsr cursor_init
+        ; Restore cursor position saved by menu_tab_handler
+        lda saved_scr_row
+        sta scr_row
+        lda saved_scr_col
+        sta scr_col
+        jsr cursor_update
 
         ; Resume main loop (segment bases intact from ZP restore)
         jmp main_loop
