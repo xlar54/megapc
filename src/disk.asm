@@ -46,6 +46,8 @@ int13_handler:
         beq _i13_verify
         cmp #$08
         beq _i13_get_params
+        cmp #$05
+        beq _i13_format
         cmp #$15
         beq _i13_get_type
 
@@ -82,6 +84,14 @@ _i13_get_status:
 
 _i13_verify:
         ; AH=04: Verify sectors — always succeed (no actual verification)
+        lda #$00
+        sta reg_ah
+        lda #0
+        sta flag_cf
+        rts
+
+_i13_format:
+        ; AH=05: Format track — no-op success (images are pre-sized)
         lda #$00
         sta reg_ah
         lda #0
