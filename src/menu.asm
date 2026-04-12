@@ -18,6 +18,10 @@ fast_console_flag .byte FAST_CONSOLE_DEFAULT
 saved_scr_row   .byte 0
 saved_scr_col   .byte 0
 
+; Mounted disk filenames (null-terminated, max 16 chars + null)
+drive_a_fname:  .fill 17, 0
+drive_b_fname:  .fill 17, 0
+
 ; ============================================================================
 ; show_menu — Display the main menu and handle input
 ; ============================================================================
@@ -199,10 +203,27 @@ _menu_fc_done:
 _menu_show_unmount_a:
         ldx #0
 -       lda menu_unmount_a_txt,x
-        beq _menu_opta_done
+        beq +
         jsr CHROUT
         inx
         bne -
++       ; Print filename: " - filename"
+        lda drive_a_fname
+        beq _menu_opta_skip_name
+        lda #'-'
+        jsr CHROUT
+        lda #' '
+        jsr CHROUT
+        ldx #0
+-       lda drive_a_fname,x
+        beq _menu_opta_skip_name
+        jsr CHROUT
+        inx
+        cpx #16
+        bcc -
+_menu_opta_skip_name:
+        lda #$0D
+        jsr CHROUT
 _menu_opta_done:
 
         ; [B] - Mount or Unmount Drive B
@@ -218,10 +239,27 @@ _menu_opta_done:
 _menu_show_unmount_b:
         ldx #0
 -       lda menu_unmount_b_txt,x
-        beq _menu_optb_done
+        beq +
         jsr CHROUT
         inx
         bne -
++       ; Print filename: " - filename"
+        lda drive_b_fname
+        beq _menu_optb_skip_name
+        lda #'-'
+        jsr CHROUT
+        lda #' '
+        jsr CHROUT
+        ldx #0
+-       lda drive_b_fname,x
+        beq _menu_optb_skip_name
+        jsr CHROUT
+        inx
+        cpx #16
+        bcc -
+_menu_optb_skip_name:
+        lda #$0D
+        jsr CHROUT
 _menu_optb_done:
 
         ; --- Special Keys ---
@@ -338,6 +376,7 @@ _unmount_a_clean:
         lda #0
         sta floppy_a_loaded
         sta floppy_a_dirty
+        sta drive_a_fname       ; Clear filename (null first byte)
         ldx #0
 -       lda msg_unmounted,x
         beq +
@@ -399,6 +438,7 @@ _unmount_b_clean:
         lda #0
         sta floppy_b_loaded
         sta floppy_b_dirty
+        sta drive_b_fname       ; Clear filename (null first byte)
         ldx #0
 -       lda msg_unmounted,x
         beq +
@@ -535,7 +575,32 @@ _mdm_not_dirty:
         lda #$80
         tsb VIC_HOTREGS
 
-        ; Success
+        ; Success — copy filename to drive's name storage
+        lda menu_mount_drive_var
+        beq _mount_save_name_a
+        ; Drive B
+        ldx #0
+-       lda floppy_fname_page,x
+        sta drive_b_fname,x
+        beq +
+        inx
+        cpx #16
+        bcc -
+        lda #0
+        sta drive_b_fname,x
++       bra _mount_name_done
+_mount_save_name_a:
+        ldx #0
+-       lda floppy_fname_page,x
+        sta drive_a_fname,x
+        beq +
+        inx
+        cpx #16
+        bcc -
+        lda #0
+        sta drive_a_fname,x
++
+_mount_name_done:
         lda #$0D
         jsr CHROUT
         ldx #0
@@ -862,13 +927,13 @@ menu_mount_a_txt:
         .text $9f, "[A] - Mount Drive A", 13, 0
 
 menu_unmount_a_txt:
-        .text $9f, "[A] - Unmount Drive A", 13, 0
+        .text $9f, "[A] - Unmount Drive A ", 0
 
 menu_mount_b_txt:
         .text $9f, "[B] - Mount Drive B", 13, 0
 
 menu_unmount_b_txt:
-        .text $9f, "[B] - Unmount Drive B", 13, 0
+        .text $9f, "[B] - Unmount Drive B ", 0
 
 menu_keys_hdr:
         .text 13
