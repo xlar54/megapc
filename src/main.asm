@@ -197,7 +197,7 @@ entry:
 
         ; Set fast console default (only on cold boot)
         lda #FAST_CONSOLE_DEFAULT
-        sta $8F29
+        sta fast_console_flag
 
         ; Initialize BIOS tables
         jsr init_tables
@@ -286,8 +286,6 @@ _beep_wait:
 +
         ; Now disable IRQs for emulation loop
         sei
-
-        ; Preserve fast console flag across restart (don't reset it)
 
         ; Re-init cache & segment state
         jsr init_cache

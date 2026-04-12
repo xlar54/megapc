@@ -2797,7 +2797,7 @@ _ii_not0_count:
         cmp #$13
         beq _ii_int13
         pha                     ; Save INT number for fast_console check
-        lda $8F29               ; fast_console_flag
+        lda fast_console_flag               ; fast_console_flag
         beq _ii_skip_fast       ; 0 = native mode, skip fast console hooks
         pla
         cmp #$10
@@ -3494,7 +3494,7 @@ _bcd_to_bin:
 
 _emu_sp_putchar:
         ; 0F 00: Output AL
-        lda $8F29               ; fast_console_flag
+        lda fast_console_flag               ; fast_console_flag
         beq _emu_sp_put_native
         ; Fast mode: use con_write_char (writes to vidbuf + screen)
         lda reg_al
@@ -3577,7 +3577,7 @@ _emu_sp_setcursor:
 _emu_sp_scrollup:
         ; 0F 05: Scroll up — BIOS handles via $B8000 writes
         ; Skip entirely in native mode; fast mode still needs it
-        lda $8F29
+        lda fast_console_flag
         bne _emu_sp_scrollup_fast
         jmp opcode_done
 _emu_sp_scrollup_fast:
@@ -3602,7 +3602,7 @@ _emu_sp_scrolldown:
 _emu_sp_clearscr:
         ; 0F 07: Clear screen
         ; In native mode, BIOS handles via $B8000 writes — skip
-        lda $8F29
+        lda fast_console_flag
         bne _emu_sp_clearscr_fast
         jmp opcode_done
 _emu_sp_clearscr_fast:

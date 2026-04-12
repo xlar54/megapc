@@ -118,7 +118,7 @@ _ml_no_tab:
 _ml_no_blink:
 
         ; If native console mode, clear screen and refresh from vidbuf
-        lda $8F29               ; fast_console_flag
+        lda fast_console_flag               ; fast_console_flag
         bne _ml_no_refresh      ; 1 = fast mode, skip refresh
 
         ; Clear screen RAM first (prevents stale data from scroll artifacts)

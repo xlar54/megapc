@@ -11,6 +11,9 @@
 ; State flag: nonzero if emulation has been started at least once
 menu_emu_started .byte 0
 
+; Fast console flag: 1=fast (INT 10h/21h/29h intercepted), 0=native (BIOS IVT)
+fast_console_flag .byte FAST_CONSOLE_DEFAULT
+
 ; ============================================================================
 ; show_menu — Display the main menu and handle input
 ; ============================================================================
@@ -151,7 +154,7 @@ _menu_opt2_done:
         inx
         bne -
 +       ; Show ON or OFF
-        lda $8F29
+        lda fast_console_flag
         beq _menu_fc_off
         ldx #0
 -       lda menu_on_txt,x
@@ -273,9 +276,9 @@ _menu_first_start:
 
 menu_do_toggle_fc:
         ; Toggle fast console flag
-        lda $8F29
+        lda fast_console_flag
         eor #$01                ; Flip 0↔1
-        sta $8F29
+        sta fast_console_flag
         jmp show_menu           ; Redraw menu to show new state
 
 menu_do_resume:

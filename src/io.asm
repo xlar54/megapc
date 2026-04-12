@@ -786,7 +786,7 @@ _i16_poll:
         lda $D610               ; Read ASCII key from hardware queue
         bne _i16_got_key
         ; No key — refresh screen if native mode (fast_console off)
-        lda $8F29
+        lda fast_console_flag
         bne _i16_poll           ; Fast mode, just poll again
         ; Check if a new frame has elapsed
         lda $D7FA
