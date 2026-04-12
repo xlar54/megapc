@@ -405,7 +405,7 @@ int10_handler:
         cmp #$09
         beq _i10_write_char_attr
         cmp #$0A
-        beq _i10_write_char_attr  ; AH=0A: same as 09 (we ignore attributes anyway)
+        beq _i10_write_char_only
         cmp #$0F
         beq _i10_get_mode
         cmp #$13
@@ -570,10 +570,9 @@ _i10_read_char_attr:
         rts
 
 _i10_write_char_attr:
-        ; AH=09/0A: Write character at cursor, CX times, no cursor advance
-        lda reg_al              ; CP437 font: ASCII = screen code directly
-        sta $8FD9               ; Save screen code (scratch_d clobbered by vidbuf calc)
-        ; Save cursor position
+        ; AH=09: Write char+attr at cursor, CX times, no cursor advance
+        lda reg_al
+        sta $8FD9               ; Save screen code
         lda scr_row
         pha
         lda scr_col
@@ -589,17 +588,17 @@ _i10wa_cap:
 _i10wa_go:
         tax
 _i10wa_loop:
-        ; Write to guest video buffer (for AH=08 readback)
+        ; Write char+attr to guest video buffer
         jsr cwc_calc_vidbuf
         lda reg_al
         ldz #0
         sta [temp_ptr2],z
-        lda reg_bl              ; Attribute from BL (AH=09) or default (AH=0A)
+        lda reg_bl              ; Attribute from BL
         ldz #1
         sta [temp_ptr2],z
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda $8FD9               ; Recover screen code (safe from vidbuf calc)
+        lda $8FD9
         ldz #0
         sta [temp_ptr],z
         inc scr_col
@@ -612,6 +611,52 @@ _i10wa_loop:
 +       dex
         bne _i10wa_loop
 _i10wa_restore:
+        pla
+        sta scr_col
+        pla
+        sta scr_row
+        rts
+
+_i10_write_char_only:
+        ; AH=0A: Write char only at cursor, CX times, preserve existing attr
+        lda reg_al
+        sta $8FD9               ; Save screen code
+        lda scr_row
+        pha
+        lda scr_col
+        pha
+        ; Get repeat count (cap at 255)
+        lda reg_cx+1
+        bne _i10wo_cap
+        lda reg_cx
+        beq _i10wo_restore
+        bra _i10wo_go
+_i10wo_cap:
+        lda #255
+_i10wo_go:
+        tax
+_i10wo_loop:
+        ; Write char only to guest video buffer (leave attr byte alone)
+        jsr cwc_calc_vidbuf
+        lda reg_al
+        ldz #0
+        sta [temp_ptr2],z
+        ; Do NOT write attribute — preserve existing byte at z=1
+        ; Write to MEGA65 screen
+        jsr calc_scr_ptr
+        lda $8FD9
+        ldz #0
+        sta [temp_ptr],z
+        inc scr_col
+        lda scr_col
+        cmp #SCR_COLS
+        bcc +
+        lda #0
+        sta scr_col
+        inc scr_row
++       dex
+        bne _i10wo_loop
+_i10wo_restore:
         pla
         sta scr_col
         pla
