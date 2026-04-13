@@ -572,6 +572,10 @@ _resume_restore_zp:
         lda #CACHE_INVALID
         sta code_cache_pg_lo
         sta code_cache_pg_hi
+        ; Note: do NOT call cache_invalidate_all here — it discards dirty
+        ; cache lines that contain guest program state, causing the first
+        ; command after resume to fail. Disk swap DMA goes to floppy attic
+        ; ($8100000+) which is a separate address range from guest RAM cache.
 
         ; Re-point charset to CP437 (CINT/KERNAL may have reset it)
         lda #$00
