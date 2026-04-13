@@ -782,6 +782,22 @@ _i16_wait_key:
         ; AH=00: Wait for key.
         ; Use MEGA65 hardware typing queue at $D610 (ASCII direct!)
         ; No KERNAL needed — no IRQs, no ZP save/restore!
+        ; Sync cursor from BDA (native mode updates BDA but not scr_row/scr_col)
+        lda #$50
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z
+        sta scr_col
+        ldz #1
+        lda [temp_ptr],z
+        sta scr_row
+        jsr cursor_update
         ; Ensure cursor is visible when waiting for input
         lda #$01
         sta $D015               ; Enable sprite 0
