@@ -782,6 +782,9 @@ _i16_wait_key:
         ; AH=00: Wait for key.
         ; Use MEGA65 hardware typing queue at $D610 (ASCII direct!)
         ; No KERNAL needed — no IRQs, no ZP save/restore!
+        ; Ensure cursor is visible when waiting for input
+        lda #$01
+        sta $D015               ; Enable sprite 0
 _i16_poll:
         lda $D610               ; Read ASCII key from hardware queue
         bne _i16_got_key
@@ -815,14 +818,14 @@ _i16_poll:
         ; Do screen refresh
         jsr refresh_cga
         ; Cursor blink
-        lda $8F24
+        lda cursor_hidden
         bne _i16_poll
-        inc $8F23
-        lda $8F23
+        inc cursor_blink_ctr
+        lda cursor_blink_ctr
         cmp #5
         bcc _i16_poll
         lda #0
-        sta $8F23
+        sta cursor_blink_ctr
         lda $D015
         eor #$01
         sta $D015
@@ -1824,8 +1827,8 @@ cursor_init:
 
         ; Reset blink state
         lda #0
-        sta $8F23               ; Blink counter
-        sta $8F24               ; Cursor hidden flag
+        sta cursor_blink_ctr               ; Blink counter
+        sta cursor_hidden               ; Cursor hidden flag
 
         ; Position cursor at scr_row/scr_col
         jsr cursor_update
@@ -1918,7 +1921,7 @@ _cu_y:
 ; ============================================================================
 cursor_show:
         lda #0
-        sta $8F24               ; Clear hidden flag — blink resumes
+        sta cursor_hidden               ; Clear hidden flag — blink resumes
         lda $D015
         ora #$01
         sta $D015
@@ -1926,7 +1929,7 @@ cursor_show:
 
 cursor_hide:
         lda #1
-        sta $8F24               ; Set hidden flag — blink stops
+        sta cursor_hidden               ; Set hidden flag — blink stops
         lda $D015
         and #$FE
         sta $D015

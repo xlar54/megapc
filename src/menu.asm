@@ -18,6 +18,10 @@ fast_console_flag .byte FAST_CONSOLE_DEFAULT
 saved_scr_row   .byte 0
 saved_scr_col   .byte 0
 
+; Cursor blink state (moved from $8F23/$8F24 — KERNAL clobbers $8Fxx)
+cursor_blink_ctr .byte 0
+cursor_hidden    .byte 0
+
 ; Mounted disk filenames (null-terminated, max 16 chars + null)
 drive_a_fname:  .fill 17, 0
 drive_b_fname:  .fill 17, 0
