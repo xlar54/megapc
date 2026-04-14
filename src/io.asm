@@ -867,7 +867,10 @@ _i16_got_key:
         beq _i16_right
         cmp #$0D                ; Return key
         beq _i16_return
-        ; A = ASCII key code
+        cmp #$A3                ; PETSCII £ → backslash \
+        bne +
+        lda #$5C                ; ASCII backslash
++       ; A = ASCII key code
         sta reg_al
         lda #$00
         sta reg_ah
@@ -931,7 +934,10 @@ _i16_check_key:
         beq _i16ck_right
         cmp #$0D
         beq _i16ck_return
-        sta reg_al
+        cmp #$A3                ; PETSCII £ → backslash \
+        bne +
+        lda #$5C
++       sta reg_al
         lda #$00
         sta reg_ah
         lda #0
