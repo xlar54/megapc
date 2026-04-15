@@ -6089,25 +6089,34 @@ int21_handler:
 	iret
 .i21_4a_shrink:
 	; Shrinking — adjust size, create free block after
-	mov	word [es:0x03], bx
-	mov	cx, bx			; CX = new size
+	; CX = old size, BX = new size, ES = MCB
+	; If equal, nothing to do
+	cmp	bx, cx
+	je	.i21_4a_done
+	; Need at least 1 para for new MCB header
+	mov	ax, cx
+	sub	ax, bx			; AX = old - new = freed paras
+	cmp	ax, 1
+	jbe	.i21_4a_done		; Not enough room for a free MCB
+	; Set new size
+	mov	[es:0x03], bx
+	; Save original block type
+	mov	dl, [es:0x00]
+	mov	byte [es:0x00], 'M'	; This block is no longer last
+	; Create free MCB after this block
 	mov	ax, es
 	add	ax, bx
-	inc	ax			; AX = new MCB segment after this block
+	inc	ax			; AX = segment of new free MCB
 	push	es
-	push	ax
 	mov	es, ax
-	mov	byte [es:0x00], 'Z'	; Last for now
-	mov	word [es:0x01], 0	; Free
-	; Remaining = old_size - new_size - 1 (for the new MCB)
-	pop	ax
+	mov	[es:0x00], dl		; Inherit original type ('M' or 'Z')
+	mov	word [es:0x01], 0	; Free (no owner)
+	mov	ax, cx
+	sub	ax, bx
+	dec	ax			; Remaining = old_size - new_size - 1 (MCB header)
+	mov	[es:0x03], ax		; Set free block size
 	pop	es
-	push	es
-	mov	ax, [es:0x03]		; This is already the new size (BX)
-	pop	es
-	; Recalculate: remaining = old_cx - bx - 1
-	; We already set new size = bx. old was cx. But cx was overwritten.
-	; Simpler: just set the new free block size and merge
+.i21_4a_done:
 	pop	es
 	pop	cx
 	pop	ax
