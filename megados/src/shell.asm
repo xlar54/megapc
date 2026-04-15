@@ -44,14 +44,14 @@ start:
 	; Install interrupt vectors
 	xor	ax, ax
 	mov	es, ax
-	; INT 20h — program terminate → return to shell
-	mov	word [es:0x80], cmd_loop
+	; INT 20h — program terminate
+	mov	word [es:0x80], int20_handler
 	mov	word [es:0x82], SHELL_SEG
 	; INT 21h — DOS services
 	mov	word [es:0x84], int21_handler
 	mov	word [es:0x86], SHELL_SEG
-	; INT 22h — Terminate address (shell command loop)
-	mov	word [es:0x88], cmd_loop
+	; INT 22h — Terminate address
+	mov	word [es:0x88], int20_handler
 	mov	word [es:0x8A], SHELL_SEG
 	; INT 23h — Ctrl-C handler
 	mov	word [es:0x8C], int23_handler
@@ -4094,6 +4094,28 @@ do_exec:
 	cmp	ax, 0xFF8
 	jb	.load_cluster
 
+	; Save BIOS vectors before launching program
+	push	ds
+	xor	ax, ax
+	mov	ds, ax
+	mov	ax, [ds:0x20]
+	mov	[cs:saved_int08], ax
+	mov	ax, [ds:0x22]
+	mov	[cs:saved_int08+2], ax
+	mov	ax, [ds:0x24]
+	mov	[cs:saved_int09], ax
+	mov	ax, [ds:0x26]
+	mov	[cs:saved_int09+2], ax
+	mov	ax, [ds:0x40]
+	mov	[cs:saved_int10], ax
+	mov	ax, [ds:0x42]
+	mov	[cs:saved_int10+2], ax
+	mov	ax, [ds:0x70]
+	mov	[cs:saved_int1c], ax
+	mov	ax, [ds:0x72]
+	mov	[cs:saved_int1c+2], ax
+	pop	ds
+
 	; Check if .EXE by looking at first two bytes (MZ signature)
 	mov	ax, [exec_seg]
 	mov	es, ax
@@ -4106,12 +4128,12 @@ do_exec:
 	mov	ax, [exec_seg]
 	mov	[exec_jmp_cs], ax
 
-	; Update INT 20h to return to shell
+	; Update INT 20h to use cleanup handler
 	push	ax
 	xor	ax, ax
 	push	es
 	mov	es, ax
-	mov	word [es:0x80], cmd_loop
+	mov	word [es:0x80], int20_handler
 	mov	word [es:0x82], SHELL_SEG
 	pop	es
 	pop	ax
@@ -8032,8 +8054,49 @@ int21_handler:
 	call	.mcb_merge_free
 .i21_4c_go:
 	pop	es
-	; Return to shell command loop
-	jmp	SHELL_SEG:cmd_loop
+	; Fall through to int20_handler
+
+; Entry point for INT 20h / INT 22h program termination
+int20_handler:
+	; Restore BIOS vectors
+	xor	ax, ax
+	mov	es, ax
+	mov	ax, [cs:saved_int08]
+	mov	[es:0x20], ax
+	mov	ax, [cs:saved_int08+2]
+	mov	[es:0x22], ax
+	mov	ax, [cs:saved_int09]
+	mov	[es:0x24], ax
+	mov	ax, [cs:saved_int09+2]
+	mov	[es:0x26], ax
+	mov	ax, [cs:saved_int10]
+	mov	[es:0x40], ax
+	mov	ax, [cs:saved_int10+2]
+	mov	[es:0x42], ax
+	mov	ax, [cs:saved_int1c]
+	mov	[es:0x70], ax
+	mov	ax, [cs:saved_int1c+2]
+	mov	[es:0x72], ax
+	; Restore DOS vectors
+	mov	word [es:0x80], int20_handler
+	mov	word [es:0x82], SHELL_SEG
+	mov	word [es:0x84], int21_handler
+	mov	word [es:0x86], SHELL_SEG
+	mov	word [es:0x88], int20_handler
+	mov	word [es:0x8A], SHELL_SEG
+	mov	word [es:0x8C], int23_handler
+	mov	word [es:0x8E], SHELL_SEG
+	mov	word [es:0x90], int24_handler
+	mov	word [es:0x92], SHELL_SEG
+	; Restore shell state and return
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	jmp	cmd_loop
 
 ; ============================================================================
 ; Utility: print null-terminated string at DS:SI
@@ -8565,8 +8628,13 @@ dir_hdr_path:	times 65 db 0			; Path string for DIR header display
 ; ============================================================================
 ; Buffers (must be after all code/data)
 ; ============================================================================
+saved_int08:	dd	0
+saved_int09:	dd	0
+saved_int10:	dd	0
+saved_int1c:	dd	0
+
 		; Buffers at fixed high address in SHELL_SEG — well past code/data
-dir_buffer	equ	0x4000			; Fixed at SHELL_SEG:4000
-fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:4E00
-batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:5600 (max ~8KB batch file)
+dir_buffer	equ	0x5000			; Fixed at SHELL_SEG:5000
+fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:5E00
+batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:6600 (max ~8KB batch file)
 		; FAT: 2 * 512 = 1024 bytes
