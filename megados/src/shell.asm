@@ -227,6 +227,10 @@ cmd_dispatch:
 	call	str_compare_cmd
 	je	do_rmdir
 
+	mov	di, cmd_set
+	call	str_compare_cmd
+	je	do_set
+
 	; Check for drive switch (A: or B:)
 	mov	si, cmd_buffer
 	call	skip_spaces
@@ -2682,6 +2686,270 @@ do_rmdir:
 	jmp	cmd_loop
 
 ; ============================================================================
+; SET — view or set environment variables
+; ============================================================================
+do_set:
+	call	skip_spaces
+	cmp	byte [si], 0
+	jne	.set_has_arg
+
+	; No argument — display all environment variables
+	push	es
+	push	si
+	mov	es, [env_seg]
+	xor	si, si
+.set_show_loop:
+	cmp	byte [es:si], 0		; Double null = end of env
+	je	.set_show_done
+.set_show_str:
+	mov	al, [es:si]
+	or	al, al
+	jz	.set_show_next
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	inc	si
+	jmp	.set_show_str
+.set_show_next:
+	inc	si			; Skip null terminator
+	; Print newline
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.set_show_loop
+.set_show_done:
+	pop	si
+	pop	es
+	jmp	cmd_loop
+
+.set_has_arg:
+	; Check if there's an '=' sign
+	push	si
+	mov	di, si
+.set_find_eq:
+	mov	al, [di]
+	cmp	al, 0
+	je	.set_no_eq
+	cmp	al, '='
+	je	.set_has_eq
+	inc	di
+	jmp	.set_find_eq
+
+.set_no_eq:
+	; No '=' — display variables that start with the given prefix
+	pop	si
+	push	es
+	push	si
+	mov	es, [env_seg]
+	xor	di, di
+.set_prefix_loop:
+	cmp	byte [es:di], 0
+	je	.set_prefix_done
+	; Compare prefix
+	push	si
+	push	di
+.set_prefix_cmp:
+	mov	al, [si]
+	cmp	al, 0
+	je	.set_prefix_match	; End of prefix = match
+	cmp	al, ' '
+	je	.set_prefix_match
+	; Uppercase the input char
+	cmp	al, 'a'
+	jb	.set_prefix_noupper
+	cmp	al, 'z'
+	ja	.set_prefix_noupper
+	sub	al, 0x20
+.set_prefix_noupper:
+	cmp	al, [es:di]
+	jne	.set_prefix_skip
+	inc	si
+	inc	di
+	jmp	.set_prefix_cmp
+.set_prefix_match:
+	pop	di
+	pop	si
+	; Print this env string
+	push	di
+.set_prefix_print:
+	mov	al, [es:di]
+	or	al, al
+	jz	.set_prefix_printed
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	inc	di
+	jmp	.set_prefix_print
+.set_prefix_printed:
+	pop	di
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.set_prefix_advance
+.set_prefix_skip:
+	pop	di
+	pop	si
+.set_prefix_advance:
+	; Advance to next string
+	cmp	byte [es:di], 0
+	je	.set_prefix_next
+	inc	di
+	jmp	.set_prefix_advance
+.set_prefix_next:
+	inc	di
+	jmp	.set_prefix_loop
+.set_prefix_done:
+	pop	si
+	pop	es
+	jmp	cmd_loop
+
+.set_has_eq:
+	; DI points to '='
+	pop	si			; SI = start of argument
+	; Save argument pointer
+	mov	[.set_arg], si
+	; Calculate name length
+	mov	cx, di
+	sub	cx, si			; CX = name length (not including '=')
+	mov	[.set_namelen], cx
+
+	; Set up ES for env block
+	push	es
+	mov	es, [env_seg]
+
+	; Search for and remove existing variable with this name
+	xor	di, di
+.set_find_old:
+	cmp	byte [es:di], 0
+	je	.set_old_done
+	; Compare name
+	mov	si, [.set_arg]
+	mov	cx, [.set_namelen]
+	mov	bx, di			; Save entry start
+.set_cmp_name:
+	cmp	cx, 0
+	je	.set_cmp_eq
+	mov	al, [si]
+	cmp	al, 'a'
+	jb	.set_cmp_noupper
+	cmp	al, 'z'
+	ja	.set_cmp_noupper
+	sub	al, 0x20
+.set_cmp_noupper:
+	cmp	al, [es:di]
+	jne	.set_cmp_fail
+	inc	si
+	inc	di
+	dec	cx
+	jmp	.set_cmp_name
+.set_cmp_eq:
+	cmp	byte [es:di], '='
+	jne	.set_cmp_fail
+	; Found — remove by shifting rest of env down
+	mov	di, bx			; DI = start of this entry
+	mov	bx, di
+.set_skip_old:
+	cmp	byte [es:bx], 0
+	je	.set_skipped_old
+	inc	bx
+	jmp	.set_skip_old
+.set_skipped_old:
+	inc	bx			; BX = start of next entry
+.set_shift:
+	mov	al, [es:bx]
+	mov	[es:di], al
+	cmp	al, 0
+	jne	.set_shift_next
+	cmp	byte [es:bx+1], 0
+	je	.set_shift_done
+.set_shift_next:
+	inc	bx
+	inc	di
+	jmp	.set_shift
+.set_shift_done:
+	mov	byte [es:di+1], 0
+	jmp	.set_old_done		; Don't advance, re-check at same pos
+.set_cmp_fail:
+	mov	di, bx			; Restore to entry start
+.set_advance_old:
+	cmp	byte [es:di], 0
+	je	.set_advance_next
+	inc	di
+	jmp	.set_advance_old
+.set_advance_next:
+	inc	di
+	jmp	.set_find_old
+.set_old_done:
+
+	; Check if value is empty (SET VAR= means delete only)
+	mov	si, [.set_arg]
+	mov	cx, [.set_namelen]
+	add	si, cx			; SI past name
+	inc	si			; Skip '='
+	cmp	byte [si], 0
+	je	.set_done
+	cmp	byte [si], ' '
+	je	.set_done
+
+	; Find end of env block
+	xor	bx, bx
+.set_find_end2:
+	cmp	byte [es:bx], 0
+	je	.set_at_end2
+.set_skip2:
+	cmp	byte [es:bx], 0
+	je	.set_skip2_null
+	inc	bx
+	jmp	.set_skip2
+.set_skip2_null:
+	inc	bx
+	jmp	.set_find_end2
+.set_at_end2:
+	; BX = position to write new entry
+	; Copy VAR=VALUE, uppercasing the name part
+	mov	si, [.set_arg]
+	mov	byte [.set_in_name], 1
+.set_copy_new:
+	mov	al, [si]
+	cmp	al, 0
+	je	.set_copy_done
+	cmp	al, ' '
+	je	.set_copy_done
+	cmp	al, '='
+	jne	.set_copy_not_eq
+	mov	byte [.set_in_name], 0
+.set_copy_not_eq:
+	cmp	byte [.set_in_name], 0
+	je	.set_copy_store
+	cmp	al, 'a'
+	jb	.set_copy_store
+	cmp	al, 'z'
+	ja	.set_copy_store
+	sub	al, 0x20
+.set_copy_store:
+	mov	[es:bx], al
+	inc	si
+	inc	bx
+	jmp	.set_copy_new
+.set_copy_done:
+	mov	byte [es:bx], 0
+	inc	bx
+	mov	byte [es:bx], 0
+.set_done:
+	pop	es
+	jmp	cmd_loop
+
+.set_arg:	dw	0
+.set_namelen:	dw	0
+.set_in_name:	db	0
+
+; ============================================================================
 ; save_drive_state — Save cur_dir_* to the current drive's slot
 ; ============================================================================
 save_drive_state:
@@ -3959,8 +4227,16 @@ do_exec:
 	mov	byte [es:0x00], 0xCD	; INT
 	mov	byte [es:0x01], 0x20	; 20h
 
-	; PSP:02 — Memory top segment
-	mov	word [es:0x02], 0xA000
+	; PSP:02 — Memory top segment (exec_seg + block size from MCB)
+	push	es
+	mov	ax, [exec_seg]
+	dec	ax
+	mov	es, ax			; ES = MCB
+	mov	ax, [es:0x03]		; Block size in paragraphs
+	add	ax, [exec_seg]
+	inc	ax			; Top = exec_seg + size + 1
+	pop	es
+	mov	[es:0x02], ax
 
 	; PSP:05 — FAR CALL to DOS (CP/M compat: CALL 5 → INT 21h)
 	mov	byte [es:0x05], 0xCD	; INT
@@ -5677,7 +5953,10 @@ int21_handler:
 	jbe	.i21_48_take_all
 	; Split: shrink this block, create new MCB after
 	mov	word [es:0x03], cx	; Resize current block
-	mov	word [es:0x01], PROG_SEG ; Owner = program (use PROG_SEG as placeholder)
+	push	ax
+	inc	ax			; Owner = allocated segment (MCB+1)
+	mov	[es:0x01], ax		; Owner = the PSP/program that owns this block
+	pop	ax
 	; New free MCB at (current_seg + 1 + cx)
 	push	ax
 	add	ax, cx
@@ -5694,7 +5973,10 @@ int21_handler:
 	pop	ax
 	jmp	.i21_48_ok
 .i21_48_take_all:
-	mov	word [es:0x01], PROG_SEG
+	push	ax
+	inc	ax
+	mov	[es:0x01], ax		; Owner = allocated segment (MCB+1)
+	pop	ax
 	jmp	.i21_48_ok_nosplit
 .i21_48_next:
 	; Save block type before moving on
@@ -8028,9 +8310,10 @@ int21_handler:
 	xor	ah, ah
 	mov	[cs:last_return_code], ax
 	; Free program's memory before returning to shell
-	; The program's PSP segment is in the current CS or was set at exec
-	; For simplicity, free all blocks owned by PROG_SEG
+	; Free all blocks owned by exec_seg (the program's PSP segment)
 	push	es
+	push	dx
+	mov	dx, [cs:exec_seg]	; DX = program's PSP segment
 	mov	ax, [cs:mcb_first]
 .i21_4c_free_loop:
 	mov	es, ax
@@ -8040,7 +8323,7 @@ int21_handler:
 	je	.i21_4c_check
 	jmp	.i21_4c_go		; Corrupt MCB — just exit
 .i21_4c_check:
-	cmp	word [es:0x01], PROG_SEG
+	cmp	[es:0x01], dx		; Owner == program's PSP?
 	jne	.i21_4c_next
 	mov	word [es:0x01], 0	; Free it
 .i21_4c_next:
@@ -8053,6 +8336,7 @@ int21_handler:
 .i21_4c_merge:
 	call	.mcb_merge_free
 .i21_4c_go:
+	pop	dx
 	pop	es
 	; Fall through to int20_handler
 
@@ -8518,6 +8802,7 @@ cmd_copy	db	'COPY', 0
 cmd_cd		db	'CD', 0
 cmd_mkdir	db	'MKDIR', 0
 cmd_rmdir	db	'RMDIR', 0
+cmd_set		db	'SET', 0
 
 ; ============================================================================
 ; Variables
