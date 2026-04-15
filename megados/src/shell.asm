@@ -44,14 +44,14 @@ start:
 	; Install interrupt vectors
 	xor	ax, ax
 	mov	es, ax
-	; INT 20h — program terminate → return to shell
-	mov	word [es:0x80], cmd_loop
+	; INT 20h — program terminate
+	mov	word [es:0x80], int20_handler
 	mov	word [es:0x82], SHELL_SEG
 	; INT 21h — DOS services
 	mov	word [es:0x84], int21_handler
 	mov	word [es:0x86], SHELL_SEG
-	; INT 22h — Terminate address (shell command loop)
-	mov	word [es:0x88], cmd_loop
+	; INT 22h — Terminate address (goes through cleanup handler)
+	mov	word [es:0x88], int20_handler
 	mov	word [es:0x8A], SHELL_SEG
 	; INT 23h — Ctrl-C handler
 	mov	word [es:0x8C], int23_handler
@@ -3985,13 +3985,23 @@ do_exec:
 	; PSP:16 — Parent PSP segment (shell's own segment)
 	mov	word [es:0x16], SHELL_SEG
 
-	; PSP:18 — File handle table (20 bytes)
-	mov	byte [es:0x18], 0x01	; stdin
-	mov	byte [es:0x19], 0x01	; stdout
-	mov	byte [es:0x1A], 0x01	; stderr
-	mov	byte [es:0x1B], 0x00	; stdaux
-	mov	byte [es:0x1C], 0x02	; stdprn
-	; Handles 5-19 already zeroed (closed)
+	; PSP:18 — Job File Table (20 bytes)
+	; Maps PSP handles to SFT indices. 0xFF = closed.
+	; First fill all 20 with 0xFF (closed)
+	push	di
+	push	cx
+	mov	di, 0x18
+	mov	al, 0xFF
+	mov	cx, 20
+	rep	stosb
+	pop	cx
+	pop	di
+	; Set standard handles (SFT indices 0-4)
+	mov	byte [es:0x18], 0x00	; handle 0 = stdin  (SFT 0, CON)
+	mov	byte [es:0x19], 0x01	; handle 1 = stdout (SFT 1, CON)
+	mov	byte [es:0x1A], 0x02	; handle 2 = stderr (SFT 2, CON)
+	mov	byte [es:0x1B], 0x03	; handle 3 = stdaux (SFT 3, AUX)
+	mov	byte [es:0x1C], 0x04	; handle 4 = stdprn (SFT 4, PRN)
 
 	; PSP:2C — Environment segment
 	mov	ax, [env_seg]
@@ -4081,6 +4091,29 @@ do_exec:
 	cmp	ax, 0xFF8
 	jb	.load_cluster
 
+	; Save BIOS interrupt vectors before launching program
+	; Programs may hook these and not restore them on exit
+	push	ds
+	xor	ax, ax
+	mov	ds, ax
+	mov	ax, [ds:0x20]		; INT 08h (timer)
+	mov	[cs:saved_int08], ax
+	mov	ax, [ds:0x22]
+	mov	[cs:saved_int08+2], ax
+	mov	ax, [ds:0x24]		; INT 09h (keyboard)
+	mov	[cs:saved_int09], ax
+	mov	ax, [ds:0x26]
+	mov	[cs:saved_int09+2], ax
+	mov	ax, [ds:0x40]		; INT 10h (video)
+	mov	[cs:saved_int10], ax
+	mov	ax, [ds:0x42]
+	mov	[cs:saved_int10+2], ax
+	mov	ax, [ds:0x70]		; INT 1Ch (timer tick)
+	mov	[cs:saved_int1c], ax
+	mov	ax, [ds:0x72]
+	mov	[cs:saved_int1c+2], ax
+	pop	ds
+
 	; Check if .EXE by looking at first two bytes (MZ signature)
 	mov	ax, [exec_seg]
 	mov	es, ax
@@ -4098,7 +4131,7 @@ do_exec:
 	xor	ax, ax
 	push	es
 	mov	es, ax
-	mov	word [es:0x80], cmd_loop
+	mov	word [es:0x80], int20_handler
 	mov	word [es:0x82], SHELL_SEG
 	pop	es
 	pop	ax
@@ -4176,12 +4209,10 @@ do_exec:
 	mov	sp, dx			; SP from header
 	sti
 
-	; DS = CS for tiny model (program can change it)
-	mov	ax, [exec_jmp_cs]
-	mov	ds, ax
+	; DS = ES = PSP segment (standard DOS .EXE convention)
 	mov	ax, [exec_seg]
-	mov	es, ax			; ES = PSP
-
+	mov	ds, ax
+	mov	es, ax
 	; Far jump to CS:IP
 	jmp	far [cs:exec_jmp_ip]
 
@@ -4308,6 +4339,8 @@ int21_handler:
 	je	.i21_4c
 	cmp	ah, 0x4D
 	je	.i21_4d
+	cmp	ah, 0x0D
+	je	.i21_0d
 	cmp	ah, 0x0E
 	je	.i21_0e
 	cmp	ah, 0x26
@@ -4334,6 +4367,8 @@ int21_handler:
 	je	.i21_57
 	cmp	ah, 0x33
 	je	.i21_33
+	cmp	ah, 0x37
+	je	.i21_37
 	cmp	ah, 0x38
 	je	.i21_38
 	cmp	ah, 0x54
@@ -5100,11 +5135,15 @@ int21_handler:
 .i21_3f_cx_ok:
 
 	; Read loop: read from current cluster, advance
-	mov	cx, [cs:.i21_3f_cx]
 	mov	word [cs:.i21_3f_read], 0	; Bytes read so far
 
 	; Load FAT for cluster chain traversal
+	push	si
 	call	read_fat
+	pop	si
+
+	; Load byte count AFTER read_fat (which clobbers CX)
+	mov	cx, [cs:.i21_3f_cx]
 
 .i21_3f_read_loop:
 	cmp	cx, 0
@@ -5120,6 +5159,7 @@ int21_handler:
 	mov	al, [cs:file_handles + si + 1]	; Drive
 	mov	[resolved_drive], al
 	mov	ax, [cs:file_handles + si + 4]
+	push	cx			; Save byte count — cluster_to_chs/INT 13h clobber CX
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
@@ -5127,7 +5167,10 @@ int21_handler:
 	mov	ah, 0x02
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
+	push	si
 	int	0x13
+	pop	si
+	pop	cx			; Restore byte count
 	jc	.i21_3f_done
 
 	; Copy bytes from dir_buffer + cluster_offset to caller's buffer
@@ -5181,22 +5224,75 @@ int21_handler:
 	iret
 
 .i21_3f_stdin:
-	; Read from keyboard (one char at a time)
+	; Read from keyboard into DS:DX buffer, up to CX bytes
+	; Returns line input terminated by CR (0x0D)
 	push	bx
-	mov	bx, dx			; DS:BX = buffer
-	xor	ax, ax
+	push	si
+	mov	si, dx			; DS:SI = caller's buffer
+	xor	bx, bx			; BX = bytes read count
 .i21_3f_stdin_loop:
-	cmp	ax, cx
-	jge	.i21_3f_stdin_done
-	push	ax
+	cmp	bx, cx
+	jge	.i21_3f_stdin_done	; Buffer full
+	push	bx
 	push	cx
 	mov	ah, 0x00
-	int	0x16
+	int	0x16			; Wait for key, AL = char
 	pop	cx
-	pop	ax			; AX was interrupted, but we pushed it
-	; Actually this is wrong — let me simplify
-	jmp	.i21_3f_stdin_done
+	pop	bx
+	cmp	al, 0			; Extended key?
+	je	.i21_3f_stdin_loop	; Skip extended keys
+	; Echo the character
+	push	ax
+	push	bx
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	pop	bx
+	pop	ax
+	; Handle backspace
+	cmp	al, 0x08
+	jne	.i21_3f_stdin_not_bs
+	cmp	bx, 0
+	je	.i21_3f_stdin_loop	; Nothing to delete
+	dec	bx
+	dec	si
+	; Erase character on screen
+	push	ax
+	push	bx
+	mov	al, ' '
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x08
+	mov	ah, 0x0E
+	int	0x10
+	pop	bx
+	pop	ax
+	jmp	.i21_3f_stdin_loop
+.i21_3f_stdin_not_bs:
+	; Store character
+	mov	[si], al
+	inc	si
+	inc	bx
+	; If CR, also add LF and stop
+	cmp	al, 0x0D
+	jne	.i21_3f_stdin_loop
+	; Echo LF
+	push	ax
+	push	bx
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	pop	bx
+	pop	ax
+	; Add LF to buffer if room
+	cmp	bx, cx
+	jge	.i21_3f_stdin_done
+	mov	byte [si], 0x0A
+	inc	bx
 .i21_3f_stdin_done:
+	mov	ax, bx			; AX = bytes read
+	pop	si
 	pop	bx
 	push	bp
 	mov	bp, sp
@@ -5225,11 +5321,13 @@ int21_handler:
 ; Input: BX = handle, CX = bytes, DS:DX = buffer
 ; Output: AX = bytes written
 .i21_40:
-	; Handle stdout/stderr — print to screen
+	; Handle console devices — print to screen
+	cmp	bx, 0
+	je	.i21_40_stdout	; stdin (some programs write here)
 	cmp	bx, 1
-	je	.i21_40_stdout
+	je	.i21_40_stdout	; stdout
 	cmp	bx, 2
-	je	.i21_40_stdout
+	je	.i21_40_stdout	; stderr
 	cmp	bx, MAX_HANDLES
 	jae	.i21_40_bad
 
@@ -5477,22 +5575,26 @@ int21_handler:
 	push	bx
 	push	dx
 
+	; Set resolved_drive from file handle
+	mov	al, [cs:file_handles + si + 1]
+	mov	[cs:resolved_drive], al
+
+	push	si			; Save handle offset — read_fat may clobber SI
 	mov	ax, SHELL_SEG
 	push	ds
 	mov	ds, ax
 	call	read_fat
 	pop	ds
+	pop	si
 
 	mov	ax, [cs:file_handles + si + 2]	; Start cluster
 	mov	[cs:file_handles + si + 4], ax	; Reset current cluster
 
 	; Calculate how many clusters to skip
 	; clusters_to_skip = position / (SECS_PER_CLUST * 512)
-	mov	ax, cx			; CX = position high
-	mov	dx, SECS_PER_CLUST * 512
-	; For simplicity, handle only positions < 64K for now
+	; Use 32-bit divide: DX:AX / 1024
+	mov	dx, [cs:file_handles + si + 10]	; Position high
 	mov	ax, [cs:file_handles + si + 8]	; Position low
-	xor	dx, dx
 	mov	bx, SECS_PER_CLUST * 512
 	div	bx			; AX = clusters to skip, DX = position in cluster
 	mov	[cs:file_handles + si + 6], dx	; Position within cluster
@@ -5509,6 +5611,8 @@ int21_handler:
 	call	fat12_next_cluster
 	pop	ds
 	pop	cx
+	cmp	ax, 0xFF8
+	jae	.i21_42_positioned	; Hit end of chain
 	mov	[cs:file_handles + si + 4], ax
 	dec	cx
 	jnz	.i21_42_skip
@@ -6008,6 +6112,11 @@ int21_handler:
 ; Returns BX = PSP segment
 .i21_62:
 	mov	bx, [cs:exec_seg]
+	iret
+
+; --- AH=0D: Disk reset (flush buffers) ---
+; No-op since we write through
+.i21_0d:
 	iret
 
 ; --- AH=0E: Set current drive ---
@@ -7843,6 +7952,17 @@ int21_handler:
 .i21_33_done:
 	iret
 
+; --- AH=37: Get/set switch character ---
+; AL=0: get → DL=switch char, AL=1: set DL=switch char
+.i21_37:
+	cmp	al, 0
+	jne	.i21_37_set
+	mov	dl, '/'			; Default switch char
+	iret
+.i21_37_set:
+	; Ignore set, return success
+	iret
+
 ; --- AH=38: Get country info ---
 ; Returns: BX=country code, DS:DX filled with info
 ; Simplified: return US defaults
@@ -7936,6 +8056,18 @@ int21_handler:
 	call	.mcb_merge_free
 .i21_4c_go:
 	pop	es
+
+	; Restore interrupt vectors — use shared handler
+	call	int20_handler_restore_only
+	; Restore shell segments
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+
 	; Return to shell command loop
 	jmp	SHELL_SEG:cmd_loop
 
@@ -8098,6 +8230,55 @@ get_fat_timestamp:
 
 cur_fat_time:	dw	0
 cur_fat_date:	dw	0
+
+; ============================================================================
+; INT 20h — Program terminate handler
+; ============================================================================
+int20_handler:
+	call	int20_handler_restore_only
+	; Restore shell state
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	jmp	cmd_loop
+
+; Subroutine: restore all vectors (callable from AH=4Ch too)
+int20_handler_restore_only:
+	xor	ax, ax
+	mov	es, ax
+	; Restore BIOS vectors that programs may have hooked
+	mov	ax, [cs:saved_int08]
+	mov	[es:0x20], ax		; INT 08h
+	mov	ax, [cs:saved_int08+2]
+	mov	[es:0x22], ax
+	mov	ax, [cs:saved_int09]
+	mov	[es:0x24], ax		; INT 09h
+	mov	ax, [cs:saved_int09+2]
+	mov	[es:0x26], ax
+	mov	ax, [cs:saved_int10]
+	mov	[es:0x40], ax		; INT 10h
+	mov	ax, [cs:saved_int10+2]
+	mov	[es:0x42], ax
+	mov	ax, [cs:saved_int1c]
+	mov	[es:0x70], ax		; INT 1Ch
+	mov	ax, [cs:saved_int1c+2]
+	mov	[es:0x72], ax
+	; Restore DOS vectors
+	mov	word [es:0x80], int20_handler	; INT 20h
+	mov	word [es:0x82], SHELL_SEG
+	mov	word [es:0x84], int21_handler	; INT 21h
+	mov	word [es:0x86], SHELL_SEG
+	mov	word [es:0x88], int20_handler	; INT 22h
+	mov	word [es:0x8A], SHELL_SEG
+	mov	word [es:0x8C], int23_handler	; INT 23h
+	mov	word [es:0x8E], SHELL_SEG
+	mov	word [es:0x90], int24_handler	; INT 24h
+	mov	word [es:0x92], SHELL_SEG
+	ret
 
 ; ============================================================================
 ; INT 23h — Ctrl-C handler
@@ -8421,6 +8602,10 @@ exec_jmp_cs:	dw	0
 exec_try_ext:	db	0		; 0=done, 1=try EXE, 2=try BAT
 exec_cmdtail_ptr: dw	0		; Pointer to command tail in cmd_buffer
 env_seg:	dw	0		; Segment of environment block
+saved_int08:	dd	0		; Saved INT 08h vector (timer)
+saved_int09:	dd	0		; Saved INT 09h vector (keyboard)
+saved_int10:	dd	0		; Saved INT 10h vector (video)
+saved_int1c:	dd	0		; Saved INT 1Ch vector (timer tick)
 break_flag:	db	0		; Ctrl-C check flag
 verify_flag:	db	0		; Disk verify flag
 last_error:	dw	0		; Last extended error code

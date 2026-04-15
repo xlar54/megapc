@@ -4,6 +4,9 @@
 	org	0
 
 start:
+	push	cs
+	pop	ds		; DS = CS (DOS gives us DS=PSP)
+
 	mov	ah, 0x09
 	mov	dx, msg
 	int	0x21

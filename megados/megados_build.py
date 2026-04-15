@@ -72,6 +72,7 @@ nasm_assemble('fread.asm', 'FREAD.COM')
 nasm_assemble('fwrite.asm', 'FWRITE.COM')
 nasm_assemble('sysinfo.asm', 'SYSINFO.COM')
 nasm_assemble('dirtest.asm', 'DIRTEST.COM')
+nasm_assemble('exetest.asm', 'EXETEST.COM')
 nasm_assemble('hello.asm', 'hello_code.bin')
 
 # Build HELLO.EXE from hello_code.bin
@@ -296,7 +297,7 @@ next_dir_entry = 1
 next_cluster = 2 + shell_clusters
 
 extra_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
-               'DIRTEST.COM', 'HELLO.EXE', 'AUTOEXEC.BAT', 'README.TXT']
+               'DIRTEST.COM', 'EXETEST.COM', 'HELLO.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
 for fname in extra_files:
     fpath = os.path.join(TARGET_DIR, fname)
