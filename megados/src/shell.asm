@@ -1273,9 +1273,9 @@ do_del:
 .del_scan_wild:
 	mov	al, [si]
 	cmp	al, 0
-	je	.del_scan_done
+	je	.del_wild_checked
 	cmp	al, ' '
-	je	.del_scan_done
+	je	.del_wild_checked
 	cmp	al, '*'
 	je	.del_found_wild
 	cmp	al, '?'
@@ -1284,7 +1284,7 @@ do_del:
 	jmp	.del_scan_wild
 .del_found_wild:
 	mov	byte [wild_active], 1
-.del_wild_scan_done:
+.del_wild_checked:
 	pop	si
 
 	cmp	byte [wild_active], 0
@@ -1390,8 +1390,10 @@ do_del:
 .del_wild_ready:
 	mov	byte [.del_count], 0
 
-	; Load FAT
+	; Load FAT (save CX — read_fat clobbers it via INT 13h)
+	push	cx
 	call	read_fat
+	pop	cx
 	jc	.del_disk_err
 
 	; Scan all entries
@@ -1440,8 +1442,6 @@ do_del:
 	call	write_fat
 	jc	.del_disk_err
 
-	mov	si, msg_deleted
-	call	print_string
 	jmp	cmd_loop
 
 .del_no_wild:
@@ -1918,11 +1918,16 @@ do_copy:
 	rep	movsb			; Copy filename
 	mov	al, [copy_src_attr]
 	mov	[di], al		; Attribute (DI now at offset 11)
-	; Zero out the rest of the entry (times, dates)
-	inc	di
-	mov	cx, 14			; Offsets 12-25
+	; Fill timestamps
+	inc	di			; DI at offset 12
+	call	get_fat_timestamp
+	mov	cx, 10
 	xor	al, al
-	rep	stosb
+	rep	stosb			; Zero offsets 12-21
+	mov	ax, [cur_fat_time]
+	stosw				; Offset 22: time
+	mov	ax, [cur_fat_date]
+	stosw				; Offset 24: date
 	mov	ax, [copy_first_cl]
 	mov	[di], ax		; Starting cluster at offset 26
 	add	di, 2
@@ -4264,6 +4269,8 @@ int21_handler:
 	je	.i21_0b
 	cmp	ah, 0x0C
 	je	.i21_0c
+	cmp	ah, 0x0D
+	je	.i21_0d
 	cmp	ah, 0x25
 	je	.i21_25
 	cmp	ah, 0x30
@@ -4334,6 +4341,8 @@ int21_handler:
 	je	.i21_57
 	cmp	ah, 0x33
 	je	.i21_33
+	cmp	ah, 0x37
+	je	.i21_37
 	cmp	ah, 0x38
 	je	.i21_38
 	cmp	ah, 0x54
@@ -4699,6 +4708,7 @@ int21_handler:
 
 	; Create directory entry
 	; SI still points to the free slot
+	call	get_fat_timestamp
 	mov	di, si
 	mov	si, exec_fname
 	mov	cx, 11
@@ -4706,9 +4716,13 @@ int21_handler:
 	mov	ax, [cs:.i21_3c_attr]
 	mov	byte [di], al		; Attribute
 	inc	di
-	mov	cx, 14
+	mov	cx, 10
 	xor	al, al
-	rep	stosb			; Zero times/dates
+	rep	stosb			; Zero offsets 12-21
+	mov	ax, [cur_fat_time]
+	stosw				; Offset 22: write time
+	mov	ax, [cur_fat_date]
+	stosw				; Offset 24: write date
 	mov	ax, [cs:.i21_3c_cluster]
 	mov	[di], ax		; Starting cluster
 	add	di, 2
@@ -5104,7 +5118,11 @@ int21_handler:
 	mov	word [cs:.i21_3f_read], 0	; Bytes read so far
 
 	; Load FAT for cluster chain traversal
+	push	si
+	push	cx
 	call	read_fat
+	pop	cx
+	pop	si
 
 .i21_3f_read_loop:
 	cmp	cx, 0
@@ -5120,6 +5138,8 @@ int21_handler:
 	mov	al, [cs:file_handles + si + 1]	; Drive
 	mov	[resolved_drive], al
 	mov	ax, [cs:file_handles + si + 4]
+	push	cx			; Save byte count — cluster_to_chs/INT 13h clobber CX
+	push	si			; Save handle offset — INT 13h may clobber SI
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
@@ -5128,6 +5148,8 @@ int21_handler:
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
 	int	0x13
+	pop	si
+	pop	cx
 	jc	.i21_3f_done
 
 	; Copy bytes from dir_buffer + cluster_offset to caller's buffer
@@ -5181,22 +5203,67 @@ int21_handler:
 	iret
 
 .i21_3f_stdin:
-	; Read from keyboard (one char at a time)
+	; Read from keyboard into DS:DX buffer, up to CX bytes
 	push	bx
-	mov	bx, dx			; DS:BX = buffer
-	xor	ax, ax
+	push	si
+	mov	si, dx
+	xor	bx, bx			; BX = bytes read count
 .i21_3f_stdin_loop:
-	cmp	ax, cx
+	cmp	bx, cx
 	jge	.i21_3f_stdin_done
-	push	ax
+	push	bx
 	push	cx
 	mov	ah, 0x00
 	int	0x16
 	pop	cx
-	pop	ax			; AX was interrupted, but we pushed it
-	; Actually this is wrong — let me simplify
-	jmp	.i21_3f_stdin_done
+	pop	bx
+	cmp	al, 0
+	je	.i21_3f_stdin_loop	; Skip extended keys
+	push	ax
+	push	bx
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10			; Echo
+	pop	bx
+	pop	ax
+	cmp	al, 0x08
+	jne	.i21_3f_stdin_not_bs
+	cmp	bx, 0
+	je	.i21_3f_stdin_loop
+	dec	bx
+	dec	si
+	push	ax
+	push	bx
+	mov	al, ' '
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x08
+	mov	ah, 0x0E
+	int	0x10
+	pop	bx
+	pop	ax
+	jmp	.i21_3f_stdin_loop
+.i21_3f_stdin_not_bs:
+	mov	[si], al
+	inc	si
+	inc	bx
+	cmp	al, 0x0D
+	jne	.i21_3f_stdin_loop
+	push	ax
+	push	bx
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	pop	bx
+	pop	ax
+	cmp	bx, cx
+	jge	.i21_3f_stdin_done
+	mov	byte [si], 0x0A
+	inc	bx
 .i21_3f_stdin_done:
+	mov	ax, bx
+	pop	si
 	pop	bx
 	push	bp
 	mov	bp, sp
@@ -5477,22 +5544,25 @@ int21_handler:
 	push	bx
 	push	dx
 
+	; Set resolved_drive from file handle
+	mov	al, [cs:file_handles + si + 1]
+	mov	[cs:resolved_drive], al
+
+	push	si
 	mov	ax, SHELL_SEG
 	push	ds
 	mov	ds, ax
 	call	read_fat
 	pop	ds
+	pop	si
 
 	mov	ax, [cs:file_handles + si + 2]	; Start cluster
 	mov	[cs:file_handles + si + 4], ax	; Reset current cluster
 
 	; Calculate how many clusters to skip
-	; clusters_to_skip = position / (SECS_PER_CLUST * 512)
-	mov	ax, cx			; CX = position high
-	mov	dx, SECS_PER_CLUST * 512
-	; For simplicity, handle only positions < 64K for now
+	; 32-bit divide: DX:AX / 1024
+	mov	dx, [cs:file_handles + si + 10]	; Position high
 	mov	ax, [cs:file_handles + si + 8]	; Position low
-	xor	dx, dx
 	mov	bx, SECS_PER_CLUST * 512
 	div	bx			; AX = clusters to skip, DX = position in cluster
 	mov	[cs:file_handles + si + 6], dx	; Position within cluster
@@ -5509,6 +5579,8 @@ int21_handler:
 	call	fat12_next_cluster
 	pop	ds
 	pop	cx
+	cmp	ax, 0xFF8
+	jae	.i21_42_positioned	; Hit end of chain
 	mov	[cs:file_handles + si + 4], ax
 	dec	cx
 	jnz	.i21_42_skip
@@ -6008,6 +6080,21 @@ int21_handler:
 ; Returns BX = PSP segment
 .i21_62:
 	mov	bx, [cs:exec_seg]
+	iret
+
+; --- AH=0D: Disk reset (flush buffers) ---
+; No-op since we write through
+.i21_0d:
+	iret
+
+; --- AH=37: Get/set switch character ---
+; AL=0: get → DL=switch char, AL=1: set (ignored)
+.i21_37:
+	cmp	al, 0
+	jne	.i21_37_set
+	mov	dl, '/'
+	iret
+.i21_37_set:
 	iret
 
 ; --- AH=0E: Set current drive ---
