@@ -17,7 +17,7 @@ SRC_DIR = os.path.join(SCRIPT_DIR, 'src')
 TARGET_DIR = os.path.join(SCRIPT_DIR, 'target')
 HDOS_DIR = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming',
                         'xemu-lgb', 'mega65', 'hdos')
-NASM = os.path.join(os.path.expanduser('~'), 'repos', 'nasm', 'nasm.exe')
+NASM = os.path.join(SCRIPT_DIR, '..', 'nasm.exe')
 
 # --- Disk geometry (360K) ---
 BYTES_PER_SEC = 512
