@@ -3990,13 +3990,21 @@ do_exec:
 	; PSP:16 — Parent PSP segment (shell's own segment)
 	mov	word [es:0x16], SHELL_SEG
 
-	; PSP:18 — File handle table (20 bytes)
-	mov	byte [es:0x18], 0x01	; stdin
-	mov	byte [es:0x19], 0x01	; stdout
-	mov	byte [es:0x1A], 0x01	; stderr
-	mov	byte [es:0x1B], 0x00	; stdaux
-	mov	byte [es:0x1C], 0x02	; stdprn
-	; Handles 5-19 already zeroed (closed)
+	; PSP:18 — Job File Table (20 bytes)
+	; Fill all 20 with 0xFF (closed), then set standard handles
+	push	di
+	push	cx
+	mov	di, 0x18
+	mov	al, 0xFF
+	mov	cx, 20
+	rep	stosb
+	pop	cx
+	pop	di
+	mov	byte [es:0x18], 0x00	; handle 0 = stdin  (SFT 0)
+	mov	byte [es:0x19], 0x01	; handle 1 = stdout (SFT 1)
+	mov	byte [es:0x1A], 0x02	; handle 2 = stderr (SFT 2)
+	mov	byte [es:0x1B], 0x03	; handle 3 = stdaux (SFT 3)
+	mov	byte [es:0x1C], 0x04	; handle 4 = stdprn (SFT 4)
 
 	; PSP:2C — Environment segment
 	mov	ax, [env_seg]
@@ -4181,11 +4189,10 @@ do_exec:
 	mov	sp, dx			; SP from header
 	sti
 
-	; DS = CS for tiny model (program can change it)
-	mov	ax, [exec_jmp_cs]
-	mov	ds, ax
+	; DS = ES = PSP segment (standard DOS .EXE convention)
 	mov	ax, [exec_seg]
-	mov	es, ax			; ES = PSP
+	mov	ds, ax
+	mov	es, ax
 
 	; Far jump to CS:IP
 	jmp	far [cs:exec_jmp_ip]
@@ -5292,7 +5299,9 @@ int21_handler:
 ; Input: BX = handle, CX = bytes, DS:DX = buffer
 ; Output: AX = bytes written
 .i21_40:
-	; Handle stdout/stderr — print to screen
+	; Handle console devices — print to screen
+	cmp	bx, 0
+	je	.i21_40_stdout
 	cmp	bx, 1
 	je	.i21_40_stdout
 	cmp	bx, 2
