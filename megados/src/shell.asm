@@ -8381,6 +8381,9 @@ int20_handler:
 	mov	word [es:0x8E], SHELL_SEG
 	mov	word [es:0x90], int24_handler
 	mov	word [es:0x92], SHELL_SEG
+	; Restore DTA to shell default
+	mov	word [cs:dta_seg], SHELL_SEG
+	mov	word [cs:dta_off], 0x0080
 	; Restore shell state and return
 	mov	ax, SHELL_SEG
 	mov	ds, ax
