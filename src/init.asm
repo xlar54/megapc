@@ -400,6 +400,20 @@ _cga_loop:
         ; Write disk parameter table at F000:F000 (bank 5 $5F000)
         jsr _init_write_dpt
 
+        ; Write BIOS model byte at F000:FFFE (bank 5 offset $FFFE)
+        ; Can't put this in bios.asm since it would require padding to 64K
+        lda #$FE
+        sta temp_ptr
+        lda #$FF
+        sta temp_ptr+1
+        lda #$05
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$FE                ; 0xFE = IBM PC/XT
+        ldz #0
+        sta [temp_ptr],z
+
         ; --- Set up BDA (BIOS Data Area) at $40400 ---
         ; Equipment word at $40410: bit 0=floppy present
         lda #$10

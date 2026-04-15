@@ -7908,35 +7908,23 @@ int21_handler:
 ; Input: DX = segment for new PSP
 ; Copies current PSP to new location (simplified)
 .i21_26:
-	; Create new PSP at segment DX
-	; NOTE: Some programs (GWBASIC) use this as a no-op segment helper
-	; and DX points to their data segment, NOT a PSP area.
-	; Only copy if DX looks like it could be a valid PSP target
-	; (i.e., not the same as the current program's segments)
 	push	si
 	push	di
 	push	cx
 	push	es
 	push	ds
-	; Safety check: if DX is in the program's code/data area, skip copy
-	; to avoid corrupting program data
-	cmp	dx, [cs:exec_seg]
-	jbe	.i21_26_skip		; DX <= PSP seg, don't copy over existing PSP
-	; DX is above PSP — could be a valid target, copy
+	; Source = current PSP (exec_seg), dest = DX
 	mov	es, dx
 	mov	ax, [cs:exec_seg]
 	or	ax, ax
 	jnz	.i21_26_copy
-	mov	ax, cs
+	mov	ax, cs			; Fall back to shell seg
 .i21_26_copy:
 	mov	ds, ax
 	xor	si, si
 	xor	di, di
 	mov	cx, 128
 	rep	movsw
-	jmp	.i21_26_done
-.i21_26_skip:
-.i21_26_done:
 	pop	ds
 	pop	es
 	pop	cx

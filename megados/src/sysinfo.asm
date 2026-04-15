@@ -23,6 +23,72 @@
 	call	print_dec
 	call	newline
 
+	; === Machine Type (F000:FFFE) ===
+	mov	si, msg_machine
+	call	print_str
+	push	es
+	mov	ax, 0xFFFF
+	mov	es, ax
+	mov	al, [es:0x0E]		; FFFF:000E = F000:FFFE
+	pop	es
+	cmp	al, 0xFF
+	je	.mach_pc
+	cmp	al, 0xFE
+	je	.mach_xt
+	cmp	al, 0xFD
+	je	.mach_pcjr
+	cmp	al, 0xFC
+	je	.mach_at
+	cmp	al, 0xFB
+	je	.mach_xt286
+	cmp	al, 0xFA
+	je	.mach_ps2_30
+	cmp	al, 0xF9
+	je	.mach_pc_conv
+	cmp	al, 0xF8
+	je	.mach_ps2_80
+	; Unknown
+	push	ax
+	mov	si, msg_mach_unk
+	call	print_str
+	pop	ax
+	xor	ah, ah
+	call	print_hex
+	jmp	.mach_done
+.mach_pc:
+	mov	si, msg_mach_pc
+	call	print_str
+	jmp	.mach_done
+.mach_xt:
+	mov	si, msg_mach_xt
+	call	print_str
+	jmp	.mach_done
+.mach_pcjr:
+	mov	si, msg_mach_pcjr
+	call	print_str
+	jmp	.mach_done
+.mach_at:
+	mov	si, msg_mach_at
+	call	print_str
+	jmp	.mach_done
+.mach_xt286:
+	mov	si, msg_mach_xt286
+	call	print_str
+	jmp	.mach_done
+.mach_ps2_30:
+	mov	si, msg_mach_ps2
+	call	print_str
+	jmp	.mach_done
+.mach_pc_conv:
+	mov	si, msg_mach_conv
+	call	print_str
+	jmp	.mach_done
+.mach_ps2_80:
+	mov	si, msg_mach_ps2_80
+	call	print_str
+.mach_done:
+	call	newline
+
 	; === Current Drive (AH=19h) ===
 	mov	si, msg_drive
 	call	print_str
@@ -521,6 +587,16 @@ msg_tail	db	'Cmd Tail: ', 0
 msg_retcode	db	'Last Return: ', 0
 msg_break	db	'Break Flag: ', 0
 msg_verify	db	'Verify Flag: ', 0
+msg_machine	db	'Machine: ', 0
+msg_mach_pc	db	'IBM PC (FF)', 0
+msg_mach_xt	db	'IBM PC/XT (FE)', 0
+msg_mach_pcjr	db	'IBM PCjr (FD)', 0
+msg_mach_at	db	'IBM PC/AT (FC)', 0
+msg_mach_xt286	db	'IBM PC/XT-286 (FB)', 0
+msg_mach_ps2	db	'IBM PS/2 Model 30 (FA)', 0
+msg_mach_conv	db	'IBM PC Convertible (F9)', 0
+msg_mach_ps2_80	db	'IBM PS/2 Model 80 (F8)', 0
+msg_mach_unk	db	'Unknown: ', 0
 msg_env		db	'Environment:', 0
 msg_fcb_open	db	'FCB Open SHELL.COM: ', 0
 msg_fcb_find	db	'FCB FindFirst *.*: ', 0
