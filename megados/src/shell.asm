@@ -5226,6 +5226,7 @@ int21_handler:
 	mov	[cs:sft_dir_cluster + bx], ax
 	mov	ax, [resolved_dir_entries]
 	mov	[cs:sft_dir_entries + bx], ax
+	mov	word [cs:sft_devinfo + bx], 0	; Disk file
 	pop	es
 
 	pop	ds			; Restore caller's DS
@@ -5423,6 +5424,7 @@ int21_handler:
 	mov	[cs:sft_dir_cluster + bx], ax
 	mov	ax, [resolved_dir_entries]
 	mov	[cs:sft_dir_entries + bx], ax
+	mov	word [cs:sft_devinfo + bx], 0	; Disk file
 	pop	bx
 	pop	es
 
@@ -6531,34 +6533,14 @@ int21_handler:
 	push	si
 	call	handle_to_sft
 	jc	.i21_44_bad_handle_pop
-	; Check SFT flag for device
-	test	byte [cs:file_handles + si], 0x80
-	pop	si
-	jz	.i21_44_file
-	; It's a device — determine which type from SFT index
-	; SFT 0 = stdin, SFT 1-2 = stdout/stderr, SFT 3-4 = aux/prn
-	push	si
-	call	handle_to_sft
-	; SI = SFT offset. SFT index = SI / 16
-	push	cx
-	mov	cx, si
-	shr	cx, 1
-	shr	cx, 1
-	shr	cx, 1
-	shr	cx, 1			; CX = SFT index
-	cmp	cx, 0
-	jne	.i21_44_not_stdin
-	mov	dx, 0x80C1		; stdin: ISDEV|ISCIN|BINARY
-	jmp	.i21_44_dev_done
-.i21_44_not_stdin:
-	cmp	cx, 2
-	ja	.i21_44_aux_prn
-	mov	dx, 0x80C2		; stdout/stderr: ISDEV|ISCOT|BINARY
-	jmp	.i21_44_dev_done
-.i21_44_aux_prn:
-	mov	dx, 0x80C0		; aux/prn: ISDEV|BINARY
-.i21_44_dev_done:
-	pop	cx
+	; SI = SFT offset (index * 16). Get SFT index for devinfo lookup
+	push	bx
+	mov	bx, si
+	shr	bx, 1
+	shr	bx, 1
+	shr	bx, 1			; BX = SFT index * 2 (word offset)
+	mov	dx, [cs:sft_devinfo + bx]
+	pop	bx
 	pop	si
 	push	bp
 	mov	bp, sp
@@ -6568,13 +6550,6 @@ int21_handler:
 .i21_44_bad_handle_pop:
 	pop	si
 	jmp	.i21_44_bad_handle
-.i21_44_file:
-	mov	dx, 0x0000		; Disk file, not EOF
-	push	bp
-	mov	bp, sp
-	and	word [bp+6], 0xFFFE
-	pop	bp
-	iret
 .i21_44_bad_handle:
 	mov	ax, 6			; Invalid handle
 	push	bp
@@ -10247,6 +10222,13 @@ sft_dir_cluster:			; Directory cluster where file entry lives
 sft_dir_entries:			; Number of entries in that directory
 	dw	0, 0, 0, 0, 0
 	times (MAX_HANDLES - 5) dw 0
+sft_devinfo:				; IOCTL device info word per SFT entry
+	dw	0x80D3			; SFT 0: stdin  (ISDEV|ISCIN|ISCOT|BINARY|SPECIAL)
+	dw	0x80D3			; SFT 1: stdout (ISDEV|ISCIN|ISCOT|BINARY|SPECIAL)
+	dw	0x80D3			; SFT 2: stderr (ISDEV|ISCIN|ISCOT|BINARY|SPECIAL)
+	dw	0x80C0			; SFT 3: stdaux (ISDEV|BINARY)
+	dw	0xA0C0			; SFT 4: stdprn (ISDEV|BINARY|NULDEV)
+	times (MAX_HANDLES - 5) dw 0	; File handles: 0 = disk file
 file_count:	dw	0
 dir_wide:	db	0
 dir_col:	db	0			; Column counter for wide mode
