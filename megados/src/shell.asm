@@ -5379,9 +5379,11 @@ int21_handler:
 ; Input: BX = handle, CX = bytes to read, DS:DX = buffer
 ; Output: AX = bytes actually read, CF=0
 .i21_3f:
-	; Check for device handles (stdin)
+	; Check for device handles (0-4 = CON/AUX/PRN)
 	cmp	bx, 0
-	je	.i21_3f_stdin
+	je	.i21_3f_stdin		; stdin — keyboard input
+	cmp	bx, 5
+	jb	.i21_3f_stdin		; handles 1-4 also read from console
 	cmp	bx, MAX_HANDLES
 	jae	.i21_3f_bad
 
@@ -5604,12 +5606,9 @@ int21_handler:
 ; Output: AX = bytes written
 .i21_40:
 	; Handle console devices — print to screen
-	cmp	bx, 0
-	je	.i21_40_stdout
-	cmp	bx, 1
-	je	.i21_40_stdout
-	cmp	bx, 2
-	je	.i21_40_stdout
+	; Handles 0-4 are all console/device output
+	cmp	bx, 5
+	jb	.i21_40_stdout
 	cmp	bx, MAX_HANDLES
 	jae	.i21_40_bad
 
@@ -5628,6 +5627,25 @@ int21_handler:
 	cmp	byte [cs:file_handles + si], 0
 	je	.i21_40_bad_pop
 
+	; CX=0 means truncate file at current position
+	cmp	cx, 0
+	jne	.i21_40_not_trunc
+	; Truncate: set file size = current file pointer
+	mov	ax, [cs:file_handles + si + 8]
+	mov	[cs:file_handles + si + 12], ax
+	mov	ax, [cs:file_handles + si + 10]
+	mov	[cs:file_handles + si + 14], ax
+	xor	ax, ax			; 0 bytes written
+	pop	es
+	pop	di
+	pop	si
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_40_not_trunc:
+
 	; Save caller state
 	mov	[cs:.i21_40_ds], ds
 	mov	[cs:.i21_40_dx], dx
@@ -5638,8 +5656,12 @@ int21_handler:
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 
-	; Load FAT
+	; Load FAT (save SI and CX)
+	push	si
+	push	cx
 	call	read_fat
+	pop	cx
+	pop	si
 
 	mov	cx, [cs:.i21_40_cx]
 
@@ -5842,6 +5864,10 @@ int21_handler:
 	pop	cx
 	mov	si, ax
 
+	; Validate handle is open
+	cmp	byte [cs:file_handles + si], 0
+	je	.i21_42_bad_pop
+
 	; Compute absolute position based on method
 	cmp	byte [cs:.i21_42_method], 0
 	je	.i21_42_from_start
@@ -5938,6 +5964,10 @@ int21_handler:
 	or	word [bp+6], 0x0001
 	pop	bp
 	iret
+
+.i21_42_bad_pop:
+	pop	si
+	jmp	.i21_42_bad
 
 .i21_42_method:	db	0
 
@@ -6395,10 +6425,30 @@ int21_handler:
 	pop	bp
 	iret
 .i21_44_file:
+	; Validate handle is open
+	cmp	bx, MAX_HANDLES
+	jae	.i21_44_bad_handle
+	push	ax
+	push	cx
+	mov	ax, bx
+	mov	cl, 4
+	shl	ax, cl
+	mov	bx, ax
+	cmp	byte [cs:file_handles + bx], 0
+	pop	cx
+	pop	ax
+	je	.i21_44_bad_handle
 	mov	dx, 0x0000		; Disk file, not EOF
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_44_bad_handle:
+	mov	ax, 6			; Invalid handle
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
 	pop	bp
 	iret
 
