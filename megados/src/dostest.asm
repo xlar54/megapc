@@ -708,33 +708,107 @@
 	; === 43. FCB sequential read (AH=14) ===
 	mov	si, t_fcbread
 	call	pstr
-	; Open README.TXT via FCB
+	; Open CHILD.COM via FCB (known to exist, starts with 0xB8)
 	mov	byte [test_fcb], 0
-	mov	word [test_fcb+1], 'RE'
-	mov	word [test_fcb+3], 'AD'
-	mov	word [test_fcb+5], 'ME'
+	mov	word [test_fcb+1], 'CH'
+	mov	word [test_fcb+3], 'IL'
+	mov	word [test_fcb+5], 'D '
 	mov	word [test_fcb+7], '  '
-	mov	word [test_fcb+9], 'TX'
-	mov	byte [test_fcb+11], 'T'
+	mov	word [test_fcb+9], 'CO'
+	mov	byte [test_fcb+11], 'M'
 	mov	ah, 0x0F
 	mov	dx, test_fcb
 	int	0x21
 	cmp	al, 0
 	jne	.t43_fail
+	; Clear DTA
+	mov	byte [0x0080], 0
 	; Read first record
 	mov	ah, 0x14
 	mov	dx, test_fcb
 	int	0x21
+	; AL=0 or AL=3 (partial) are both OK
 	cmp	al, 1			; EOF = fail
 	je	.t43_fail
-	; Check DTA has data (first byte should be 'S' from "Simple")
-	cmp	byte [0x0080], 'S'
+	; Check DTA has data (CHILD.COM starts with 0xB8 = mov ax,imm16)
+	cmp	byte [0x0080], 0xB8
 	jne	.t43_fail
 	call	pass
 	jmp	.t43_done
 .t43_fail:
 	call	fail
 .t43_done:
+
+	; === 44. FCB sequential write (AH=15) ===
+	; Test: create file via handle, write "HELLO", close,
+	;       then open via FCB and read back with AH=14
+	mov	si, t_fcbwrite
+	call	pstr
+	; Create via handle (AH=3C)
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fcb_tmpname
+	int	0x21
+	jc	.t44_fail_c
+	mov	bx, ax
+	; Write 5 bytes "HELLO"
+	mov	ah, 0x40
+	mov	cx, 5
+	mov	dx, t44_data
+	int	0x21
+	jc	.t44_fail_w
+	; Close handle
+	mov	ah, 0x3E
+	int	0x21
+	; Open via FCB (AH=0F) and read back with AH=14
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BT'
+	mov	word [test_fcb+5], 'ES'
+	mov	word [test_fcb+7], 'T '
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	mov	ah, 0x0F
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t44_fail_o
+	; Check FCB file size > 0
+	mov	ax, [test_fcb+0x10]
+	or	ax, [test_fcb+0x12]
+	jz	.t44_fail_s		; S = size is zero
+	; Clear DTA
+	mov	byte [0x0080], 0
+	; Read first record (AH=14)
+	mov	ah, 0x14
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 1
+	je	.t44_fail_r
+	; Verify first byte is 'H'
+	cmp	byte [0x0080], 'H'
+	jne	.t44_fail_v
+	; Close and delete
+	mov	ah, 0x10
+	mov	dx, test_fcb
+	int	0x21
+	mov	ah, 0x41
+	mov	dx, fcb_tmpname
+	int	0x21
+	call	pass
+	jmp	.t44_done
+.t44_fail_c:
+.t44_fail_w:
+.t44_fail_o:
+.t44_fail_s:
+.t44_fail_r:
+.t44_fail_v:
+	; Try to clean up
+	mov	ah, 0x41
+	mov	dx, fcb_tmpname
+	int	0x21
+	call	fail
+.t44_done:
 
 	; === Summary ===
 	call	nl
@@ -862,8 +936,11 @@ t_indos		db	'40. InDOS flag', 0
 t_fcbsize	db	'41. FCB file size', 0
 t_fcbrand	db	'42. FCB set random', 0
 t_fcbread	db	'43. FCB seq read', 0
+t_fcbwrite	db	'44. FCB seq write', 0
 
 fname		db	'DOSTEST.TMP', 0
+fcb_tmpname	db	'FCBTEST.TMP', 0
+t44_data	db	'HELLO'
 child_fname	db	'CHILD.COM', 0
 exec_pb		times 14 db 0		; EXEC parameter block
 exec_cmdtail	db	0, 0x0D		; Empty command tail (len=0, CR)

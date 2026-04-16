@@ -5523,7 +5523,7 @@ int21_handler:
 	mov	[resolved_dir_entries], ax
 	pop	cx
 	call	read_resolved_dir
-	jc	.i21_3e_just_close
+	jc	.i21_3e_dir_fail
 
 	; Search for entry with matching start cluster
 	mov	di, dir_buffer
@@ -5531,7 +5531,7 @@ int21_handler:
 	mov	ax, [cs:file_handles + si + 2]	; Start cluster
 .i21_3e_search:
 	cmp	byte [di], 0
-	je	.i21_3e_just_close
+	je	.i21_3e_not_found
 	cmp	byte [di], 0xE5
 	je	.i21_3e_next
 	cmp	[di+26], ax
@@ -5540,6 +5540,9 @@ int21_handler:
 	add	di, 32
 	dec	cx
 	jnz	.i21_3e_search
+.i21_3e_not_found:
+	jmp	.i21_3e_just_close
+.i21_3e_dir_fail:
 	jmp	.i21_3e_just_close
 
 .i21_3e_found:
@@ -5580,6 +5583,7 @@ int21_handler:
 	cmp	bx, MAX_HANDLES
 	jae	.i21_3f_bad
 
+	push	bx
 	push	si
 	push	di
 	push	es
@@ -5595,6 +5599,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 	jmp	.i21_3f_stdin
 .i21_3f_not_device:
 
@@ -5708,6 +5713,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
@@ -5787,6 +5793,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 .i21_3f_bad:
 	mov	ax, 6
 	push	bp
@@ -5808,6 +5815,7 @@ int21_handler:
 	jae	.i21_40_bad
 
 	; File write
+	push	bx
 	push	si
 	push	di
 	push	es
@@ -5835,6 +5843,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
@@ -6002,6 +6011,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
@@ -6012,6 +6022,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 .i21_40_bad:
 	mov	ax, 6
 	push	bp
@@ -6024,6 +6035,7 @@ int21_handler:
 	pop	es
 	pop	di
 	pop	si
+	pop	bx
 .i21_40_stdout:
 	; Print CX bytes from DS:DX to screen
 	push	si
@@ -8677,17 +8689,552 @@ int21_handler:
 ; Input: DS:DX = opened FCB
 ; Returns: AL=0 success, AL=1 disk full, AL=2 DTA too small
 .i21_15:
-	; Stub — return disk full (write support would need cluster allocation)
-	mov	al, 1
+	; FCB sequential write
+	; DS:DX = opened FCB, writes one record from DTA
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx			; SI = FCB in caller's DS
+
+	; Calculate byte offset = ((current_block * 128) + current_record) * record_size
+	mov	ax, [si+0x0C]		; Current block
+	mov	cl, 7
+	shl	ax, cl			; * 128
+	xor	ch, ch
+	mov	cl, [si+0x20]		; Current record
+	add	ax, cx			; AX = sequential record number
+	mov	bx, [si+0x0E]		; Record size
+	mul	bx			; DX:AX = byte offset
+
+	; Save record size and file offset
+	mov	[cs:.i21_15_offset], ax
+	mov	[cs:.i21_15_offset+2], dx
+	mov	[cs:.i21_15_recsize], bx
+
+	; Get drive from FCB
+	mov	al, [si]
+	or	al, al
+	jnz	.i21_15_has_drive
+	mov	al, [cs:cur_drive]
+	inc	al
+.i21_15_has_drive:
+	dec	al
+	mov	[cs:resolved_drive], al
+
+	; Copy 8.3 name from FCB+1 to exec_fname (for dir search)
+	push	si
+	push	cx
+	inc	si			; Skip drive byte
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	di, exec_fname
+	mov	cx, 11
+.i21_15_copy_name:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	dec	cx
+	jnz	.i21_15_copy_name
+	pop	cx
+	pop	si
+
+	; Get start cluster from FCB
+	mov	bx, [si+0x1A]		; Start cluster
+	mov	[cs:exec_cluster], bx
+
+	; Save caller DS, FCB pointer
+	mov	[cs:.i21_15_fcb_off], si
+	mov	[cs:.i21_15_fcb_seg], ds
+
+	; Switch to SHELL_SEG
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+
+	; Read FAT
+	call	read_fat
+	jc	.i21_15_err
+
+	; If start cluster is 0, file is empty — need to allocate first cluster
+	mov	ax, [exec_cluster]
+	or	ax, ax
+	jnz	.i21_15_have_start
+	; Allocate first cluster
+	call	.i21_15_alloc_cluster
+	jc	.i21_15_err
+	mov	[exec_cluster], ax
+	; Update FCB start cluster
+	push	ds
+	mov	ds, [cs:.i21_15_fcb_seg]
+	mov	si, [cs:.i21_15_fcb_off]
+	mov	[si+0x1A], ax
+	pop	ds
+	; Mark as EOF
+	push	bx
+	mov	bx, 0xFFF
+	call	fat12_write_cluster
+	call	write_fat
+	pop	bx
+	; Update directory entry with new start cluster
+	; The entry currently has cluster 0 — find it by matching name
+	push	ax
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jc	.i21_15_skip_dir_alloc
+	; Search by name (exec_fname was copied at entry)
+	mov	di, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	mov	ax, SHELL_SEG
+	mov	es, ax			; Ensure ES = DS = SHELL_SEG for cmpsb
+.i21_15_find_entry:
+	cmp	byte [di], 0
+	je	.i21_15_skip_dir_alloc
+	cmp	byte [di], 0xE5
+	je	.i21_15_find_next
+	; Compare 11-byte name
+	push	cx
+	push	si
+	push	di
+	mov	si, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	di
+	pop	si
+	pop	cx
+	je	.i21_15_entry_found
+.i21_15_find_next:
+	add	di, 32
+	dec	cx
+	jnz	.i21_15_find_entry
+	jmp	.i21_15_skip_dir_alloc
+.i21_15_entry_found:
+	mov	ax, [exec_cluster]
+	mov	[di+26], ax		; Set start cluster in dir entry
+	call	write_resolved_dir
+.i21_15_skip_dir_alloc:
+	pop	ax
+.i21_15_have_start:
+
+	; Walk cluster chain to find the cluster containing our offset
+	mov	ax, [.i21_15_offset]
+	mov	dx, [.i21_15_offset+2]
+	; Divide DX:AX by 1024 to get cluster index
+	mov	cx, 10
+.i21_15_div_loop:
+	shr	dx, 1
+	rcr	ax, 1
+	dec	cx
+	jnz	.i21_15_div_loop
+	; AX = cluster index from start
+	mov	cx, ax			; CX = clusters to skip
+	mov	ax, [exec_cluster]	; AX = start cluster
+	or	cx, cx
+	jz	.i21_15_at_cluster
+.i21_15_walk_chain:
+	push	cx
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jae	.i21_15_extend
+	pop	cx
+	dec	cx
+	jnz	.i21_15_walk_chain
+	jmp	.i21_15_at_cluster
+
+.i21_15_extend:
+	; Need to allocate a new cluster and link it
+	pop	cx			; Remaining clusters to walk
+	push	ax			; Save current (EOF) cluster
+	; Actually, the current AX is >= 0xFF8 meaning we fell off the chain.
+	; We need to go back and get the LAST valid cluster.
+	; Let's re-walk to find the last cluster
+	mov	ax, [exec_cluster]
+.i21_15_find_last:
+	mov	[cs:.i21_15_last_cl], ax
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jb	.i21_15_find_last
+	; .i21_15_last_cl = last cluster in chain
+	pop	ax			; Discard
+	; Allocate new cluster
+	call	.i21_15_alloc_cluster
+	jc	.i21_15_err
+	; Link last → new
+	push	ax			; Save new cluster
+	push	bx
+	mov	bx, ax			; BX = new cluster
+	mov	ax, [cs:.i21_15_last_cl]
+	call	fat12_write_cluster	; last → new
+	pop	bx
+	pop	ax
+	push	ax
+	push	bx
+	mov	bx, 0xFFF
+	call	fat12_write_cluster	; new → EOF
+	call	write_fat
+	pop	bx
+	pop	ax
+	; Continue walking if needed
+	dec	cx
+	jnz	.i21_15_walk_chain
+
+.i21_15_at_cluster:
+	; AX = cluster number to write into
+	mov	[cs:.i21_15_cur_cl], ax
+
+	; Calculate offset within cluster
+	push	ax
+	mov	ax, [.i21_15_offset]
+	and	ax, 0x03FF		; Offset within 1024-byte cluster
+	mov	[cs:.i21_15_clust_off], ax
+	pop	ax
+
+	; Read existing cluster data (so partial writes preserve existing bytes)
+	call	cluster_to_chs
+	mov	dl, [cs:resolved_drive]
+	mov	bx, dir_buffer
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	ah, 0x02
+	mov	al, SECS_PER_CLUST
+	int	0x13
+	jc	.i21_15_err
+
+	; Copy record_size bytes from DTA to dir_buffer+clust_off
+	mov	di, dir_buffer
+	add	di, [.i21_15_clust_off]
+	mov	si, [cs:dta_off]
+	push	ds
+	mov	ds, [cs:dta_seg]
+	mov	cx, [cs:.i21_15_recsize]
+	; Don't write past cluster boundary
+	mov	ax, 1024
+	sub	ax, [cs:.i21_15_clust_off]
+	cmp	cx, ax
+	jbe	.i21_15_copy_ok
+	mov	cx, ax
+.i21_15_copy_ok:
+	rep	movsb
+	pop	ds
+
+	; Write cluster back to disk
+	mov	ax, [cs:.i21_15_cur_cl]
+	call	cluster_to_chs
+	mov	dl, [cs:resolved_drive]
+	mov	bx, dir_buffer
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	ah, 0x03
+	mov	al, SECS_PER_CLUST
+	int	0x13
+	jc	.i21_15_err
+
+	; Advance record pointer in FCB
+	mov	ds, [cs:.i21_15_fcb_seg]
+	mov	si, [cs:.i21_15_fcb_off]
+	mov	al, [si+0x20]		; Current record
+	inc	al
+	cmp	al, 128
+	jb	.i21_15_no_block_inc
+	xor	al, al
+	inc	word [si+0x0C]		; Next block
+.i21_15_no_block_inc:
+	mov	[si+0x20], al
+
+	; Update file size in FCB if we wrote past current end
+	mov	ax, [cs:.i21_15_offset]
+	add	ax, [cs:.i21_15_recsize]
+	mov	dx, [cs:.i21_15_offset+2]
+	adc	dx, 0
+	cmp	dx, [si+0x12]
+	ja	.i21_15_update_size
+	jb	.i21_15_size_ok
+	cmp	ax, [si+0x10]
+	jbe	.i21_15_size_ok
+.i21_15_update_size:
+	mov	[si+0x10], ax
+	mov	[si+0x12], dx
+.i21_15_size_ok:
+
+	; Update directory entry with new file size (search by name)
+	push	ax
+	push	dx
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax			; ES = SHELL_SEG for cmpsb
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jc	.i21_15_skip_dir
+	mov	di, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_15_dir_search:
+	cmp	byte [di], 0
+	je	.i21_15_skip_dir
+	cmp	byte [di], 0xE5
+	je	.i21_15_dir_next
+	push	cx
+	push	si
+	push	di
+	mov	si, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	di
+	pop	si
+	pop	cx
+	je	.i21_15_dir_found
+.i21_15_dir_next:
+	add	di, 32
+	dec	cx
+	jnz	.i21_15_dir_search
+	jmp	.i21_15_skip_dir
+.i21_15_dir_found:
+	; Update start cluster and size from FCB
+	mov	ax, [cs:exec_cluster]
+	mov	[di+26], ax		; Ensure start cluster is set
+	push	ds
+	mov	ds, [cs:.i21_15_fcb_seg]
+	mov	si, [cs:.i21_15_fcb_off]
+	mov	ax, [si+0x10]
+	mov	[cs:di+28], ax		; Update size low
+	mov	ax, [si+0x12]
+	mov	[cs:di+30], ax		; Update size high
+	pop	ds
+	call	write_resolved_dir
+.i21_15_skip_dir:
+	pop	dx
+	pop	ax
+
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	xor	al, al			; AL=0 success
 	iret
+
+.i21_15_err:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	al, 1			; AL=1 disk full / error
+	iret
+
+; Helper: find a free cluster
+; Returns: AX = free cluster number, CF=0 / CF=1 if disk full
+.i21_15_alloc_cluster:
+	push	cx
+	mov	ax, 2
+.i21_15_find_free:
+	cmp	ax, 720
+	jae	.i21_15_no_free
+	push	ax
+	call	fat12_read_cluster
+	cmp	ax, 0
+	pop	ax
+	je	.i21_15_found_free
+	inc	ax
+	jmp	.i21_15_find_free
+.i21_15_found_free:
+	pop	cx
+	clc
+	ret
+.i21_15_no_free:
+	pop	cx
+	stc
+	ret
+
+.i21_15_offset:		dd	0
+.i21_15_recsize:	dw	0
+.i21_15_fcb_off:	dw	0
+.i21_15_fcb_seg:	dw	0
+.i21_15_clust_off:	dw	0
+.i21_15_cur_cl:		dw	0
+.i21_15_last_cl:	dw	0
 
 ; --- AH=16: Create file (FCB) ---
 ; Input: DS:DX = FCB
 ; Returns: AL=0 success, AL=FF error
 .i21_16:
-	; Stub — return error
+	; FCB create file — create/truncate file, fill FCB
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx
+	; Get drive
+	mov	al, [si]
+	or	al, al
+	jnz	.i21_16_has_drv
+	mov	al, [cs:cur_drive]
+	inc	al
+.i21_16_has_drv:
+	dec	al
+	mov	[cs:resolved_drive], al
+	; Copy 8.3 name from FCB+1 to exec_fname
+	push	si
+	inc	si
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	di, exec_fname
+	mov	cx, 11
+.i21_16_copy:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	dec	cx
+	jnz	.i21_16_copy
+	pop	si			; SI = FCB
+	; Switch to SHELL_SEG
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	; Read current directory
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jc	.i21_16_fail
+	; Search for existing file or free slot
+	mov	di, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	mov	word [cs:.i21_16_free], 0	; No free slot found yet
+.i21_16_search:
+	mov	al, [di]
+	cmp	al, 0
+	je	.i21_16_save_free
+	cmp	al, 0xE5
+	je	.i21_16_save_free
+	; Compare names
+	push	cx
+	push	si
+	push	di
+	mov	si, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	di
+	pop	si
+	pop	cx
+	je	.i21_16_found_existing
+.i21_16_next:
+	add	di, 32
+	dec	cx
+	jnz	.i21_16_search
+	; Not found — use free slot
+	mov	di, [cs:.i21_16_free]
+	or	di, di
+	jz	.i21_16_fail		; No free slots
+	jmp	.i21_16_create_new
+.i21_16_save_free:
+	cmp	word [cs:.i21_16_free], 0
+	jnz	.i21_16_next
+	mov	[cs:.i21_16_free], di
+	cmp	al, 0			; End of directory?
+	je	.i21_16_create_at_free
+	jmp	.i21_16_next
+.i21_16_create_at_free:
+	mov	di, [cs:.i21_16_free]
+
+.i21_16_create_new:
+	; DI = free directory entry. Fill it.
+	push	di
+	mov	si, exec_fname
+	mov	cx, 11
+	rep	movsb			; Copy filename
+	pop	di
+	; Clear rest of entry
+	mov	byte [di+11], 0x20	; Archive attribute
+	mov	word [di+12], 0
+	mov	word [di+14], 0
+	mov	word [di+16], 0
+	mov	word [di+18], 0
+	mov	word [di+20], 0
+	mov	word [di+22], 0
+	mov	word [di+24], 0
+	mov	word [di+26], 0		; Start cluster = 0 (empty)
+	mov	word [di+28], 0		; File size = 0
+	mov	word [di+30], 0
+	; Write directory back
+	call	write_resolved_dir
+	jc	.i21_16_fail
+	jmp	.i21_16_fill_fcb
+
+.i21_16_found_existing:
+	; Truncate: set size to 0, free cluster chain
+	; Free old clusters if any
+	mov	ax, [di+26]
+	or	ax, ax
+	jz	.i21_16_trunc_done
+	; Free cluster chain
+	push	di
+	call	read_fat
+	pop	di
+	jc	.i21_16_trunc_done
+	mov	ax, [di+26]
+.i21_16_free_chain:
+	cmp	ax, 0xFF8
+	jae	.i21_16_chain_freed
+	push	ax
+	call	fat12_next_cluster
+	push	ax			; Save next
+	pop	bx			; BX = next
+	pop	ax			; AX = current
+	push	bx
+	mov	bx, 0
+	call	fat12_write_cluster	; Mark current as free
+	pop	ax			; AX = next
+	jmp	.i21_16_free_chain
+.i21_16_chain_freed:
+	call	write_fat
+.i21_16_trunc_done:
+	mov	word [di+26], 0		; Clear start cluster
+	mov	word [di+28], 0		; Size = 0
+	mov	word [di+30], 0
+	call	write_resolved_dir
+
+.i21_16_fill_fcb:
+	; Fill caller's FCB
+	pop	ds			; Restore caller DS
+	mov	si, dx			; SI = caller's FCB
+	mov	word [si+0x0C], 0	; Current block = 0
+	mov	word [si+0x0E], 128	; Record size = 128
+	mov	word [si+0x10], 0	; File size = 0
+	mov	word [si+0x12], 0
+	mov	word [si+0x1A], 0	; Start cluster = 0
+	mov	byte [si+0x20], 0	; Current record = 0
+	mov	word [si+0x21], 0	; Random record = 0
+	mov	word [si+0x23], 0
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	xor	al, al			; AL=0 success
+	iret
+
+.i21_16_fail:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
 	mov	al, 0xFF
 	iret
+
+.i21_16_free:	dw	0
 
 ; --- AH=00: Terminate program ---
 ; Same as INT 20h
@@ -10243,7 +10790,7 @@ saved_int10:	dd	0
 saved_int1c:	dd	0
 
 		; Buffers at fixed high address in SHELL_SEG — well past code/data
-dir_buffer	equ	0x5000			; Fixed at SHELL_SEG:5000
-fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:5E00
-batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:6600 (max ~8KB batch file)
+dir_buffer	equ	0x5800			; Fixed at SHELL_SEG:5800 (must be past code+data)
+fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:6600
+batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:6E00 (max ~8KB batch file)
 		; FAT: 2 * 512 = 1024 bytes
