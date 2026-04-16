@@ -810,6 +810,116 @@
 	call	fail
 .t44_done:
 
+	; === 45. FCB random read (AH=21) ===
+	; Open CHILD.COM, set random record=0, read, check first byte = 0xB8
+	mov	si, t_fcbrand_r
+	call	pstr
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'CH'
+	mov	word [test_fcb+3], 'IL'
+	mov	word [test_fcb+5], 'D '
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'CO'
+	mov	byte [test_fcb+11], 'M'
+	mov	ah, 0x0F
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t45_fail
+	; Set random record = 0
+	mov	word [test_fcb+0x21], 0
+	mov	word [test_fcb+0x23], 0
+	; Clear DTA
+	mov	byte [0x0080], 0
+	; Random read
+	mov	ah, 0x21
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 1
+	je	.t45_fail
+	; Check first byte = 0xB8 (mov ax, imm16)
+	cmp	byte [0x0080], 0xB8
+	jne	.t45_fail
+	; Check block/record were updated (should be block=0, record=0)
+	cmp	word [test_fcb+0x0C], 0
+	jne	.t45_fail
+	call	pass
+	jmp	.t45_done
+.t45_fail:
+	call	fail
+.t45_done:
+
+	; === 46. FCB random write (AH=22) ===
+	; Create file, write "TEST!" at record 0, read back, verify
+	mov	si, t_fcbrand_w
+	call	pstr
+	; Create via AH=16
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BT'
+	mov	word [test_fcb+5], 'ES'
+	mov	word [test_fcb+7], 'T2'
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	mov	ah, 0x16
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t46_fail
+	; Put "TEST!" in DTA
+	mov	byte [0x0080], 'T'
+	mov	byte [0x0081], 'E'
+	mov	byte [0x0082], 'S'
+	mov	byte [0x0083], 'T'
+	mov	byte [0x0084], '!'
+	; Set random record = 0
+	mov	word [test_fcb+0x21], 0
+	mov	word [test_fcb+0x23], 0
+	; Random write
+	mov	ah, 0x22
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t46_fail
+	; Close
+	mov	ah, 0x10
+	mov	dx, test_fcb
+	int	0x21
+	; Reopen
+	mov	ah, 0x0F
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t46_fail
+	; Clear DTA
+	mov	byte [0x0080], 0
+	; Random read record 0
+	mov	word [test_fcb+0x21], 0
+	mov	word [test_fcb+0x23], 0
+	mov	ah, 0x21
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 1
+	je	.t46_fail
+	; Verify
+	cmp	byte [0x0080], 'T'
+	jne	.t46_fail
+	; Close and delete
+	mov	ah, 0x10
+	mov	dx, test_fcb
+	int	0x21
+	mov	ah, 0x41
+	mov	dx, fcb_tmp2name
+	int	0x21
+	call	pass
+	jmp	.t46_done
+.t46_fail:
+	mov	ah, 0x41
+	mov	dx, fcb_tmp2name
+	int	0x21
+	call	fail
+.t46_done:
+
 	; === Summary ===
 	call	nl
 	mov	si, msg_summary
@@ -937,9 +1047,12 @@ t_fcbsize	db	'41. FCB file size', 0
 t_fcbrand	db	'42. FCB set random', 0
 t_fcbread	db	'43. FCB seq read', 0
 t_fcbwrite	db	'44. FCB seq write', 0
+t_fcbrand_r	db	'45. FCB rand read', 0
+t_fcbrand_w	db	'46. FCB rand write', 0
 
 fname		db	'DOSTEST.TMP', 0
 fcb_tmpname	db	'FCBTEST.TMP', 0
+fcb_tmp2name	db	'FCBTEST2.TMP', 0
 t44_data	db	'HELLO'
 child_fname	db	'CHILD.COM', 0
 exec_pb		times 14 db 0		; EXEC parameter block

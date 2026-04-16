@@ -4804,6 +4804,10 @@ int21_handler:
 	je	.i21_2d
 	cmp	ah, 0x62
 	je	.i21_62
+	cmp	ah, 0x21
+	je	.i21_21
+	cmp	ah, 0x22
+	je	.i21_22
 	cmp	ah, 0x00
 	je	.i21_00
 	cmp	ah, 0x03
@@ -8528,6 +8532,9 @@ int21_handler:
 	mov	bx, [si+0x0E]		; Record size
 	mul	bx			; DX:AX = byte offset
 
+	; Fall through to shared read logic
+.i21_14_with_offset:
+	; Entry: DX:AX = byte offset, SI = FCB pointer, caller DS/ES on stack
 	; Check if offset >= file size → EOF
 	cmp	dx, [si+0x12]		; Compare high word
 	ja	.i21_14_eof
@@ -8709,6 +8716,9 @@ int21_handler:
 	mov	bx, [si+0x0E]		; Record size
 	mul	bx			; DX:AX = byte offset
 
+	; Fall through to shared write logic
+.i21_15_with_offset:
+	; Entry: DX:AX = byte offset, SI = FCB pointer, caller DS/ES on stack
 	; Save record size and file offset
 	mov	[cs:.i21_15_offset], ax
 	mov	[cs:.i21_15_offset+2], dx
@@ -9235,6 +9245,77 @@ int21_handler:
 	iret
 
 .i21_16_free:	dw	0
+
+; --- AH=21: Random read (FCB) ---
+; Input: DS:DX = opened FCB
+; Returns: AL=0 success, AL=1 EOF, AL=2 DTA too small, AL=3 partial
+; Uses random record field (FCB+21h) instead of sequential block/record
+.i21_21:
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx
+
+	; Calculate byte offset = random_record * record_size
+	mov	ax, [si+0x21]		; Random record (low word)
+	mov	bx, [si+0x0E]		; Record size
+	mul	bx			; DX:AX = byte offset
+
+	; Update current block/record from random record
+	; (preserve DX:AX = offset and BX = record_size)
+	push	ax
+	push	dx
+	push	bx
+	mov	ax, [si+0x21]		; Random record
+	xor	dx, dx
+	mov	bx, 128
+	div	bx			; AX = block, DX = record within block
+	mov	[si+0x0C], ax		; Current block
+	mov	[si+0x20], dl		; Current record
+	pop	bx
+	pop	dx
+	pop	ax
+
+	; Now do the same read as AH=14 with this offset
+	jmp	.i21_14_with_offset
+
+; --- AH=22: Random write (FCB) ---
+; Input: DS:DX = opened FCB
+; Returns: AL=0 success, AL=1 disk full, AL=2 DTA too small
+.i21_22:
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx
+
+	; Calculate byte offset = random_record * record_size
+	mov	ax, [si+0x21]		; Random record (low word)
+	mov	bx, [si+0x0E]		; Record size
+	mul	bx			; DX:AX = byte offset
+
+	; Update current block/record from random record
+	; (preserve DX:AX = offset and BX = record_size)
+	push	ax
+	push	dx
+	push	bx
+	mov	ax, [si+0x21]
+	xor	dx, dx
+	mov	bx, 128
+	div	bx
+	mov	[si+0x0C], ax		; Current block
+	mov	[si+0x20], dl		; Current record
+	pop	bx
+	pop	dx
+	pop	ax
+
+	; Now do the same write as AH=15 with this offset
+	jmp	.i21_15_with_offset
 
 ; --- AH=00: Terminate program ---
 ; Same as INT 20h
