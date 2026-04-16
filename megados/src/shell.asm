@@ -449,6 +449,9 @@ do_dir:
 	mov	byte [di], '\'
 	inc	di
 .dir_hdr_append:
+	; Bounds check: don't write past dir_hdr_path + 63
+	cmp	di, dir_hdr_path + 63
+	jae	.dir_hdr_comp_done
 	mov	al, [si]
 	cmp	al, 0
 	je	.dir_hdr_comp_done
@@ -5105,12 +5108,18 @@ int21_handler:
 	mov	word [cs:file_handles + di + 10], 0
 	mov	word [cs:file_handles + di + 12], 0 ; File size = 0
 	mov	word [cs:file_handles + di + 14], 0
-	; Set JFT entry and refcount
+	; Set JFT entry, refcount, and directory location
 	push	es
 	mov	es, [cs:exec_seg]
 	mov	bx, [cs:.i21_3c_handle]
 	mov	[es:0x18 + bx], bl	; JFT[handle] = SFT index (same number)
 	mov	byte [cs:sft_refcount + bx], 1
+	; Save directory cluster/entries for close-time size update
+	mov	ax, [resolved_dir_cluster]
+	shl	bx, 1			; Word index
+	mov	[cs:sft_dir_cluster + bx], ax
+	mov	ax, [resolved_dir_entries]
+	mov	[cs:sft_dir_entries + bx], ax
 	pop	es
 
 	pop	ds			; Restore caller's DS
@@ -5294,13 +5303,21 @@ int21_handler:
 	mov	ax, [si+30]
 	mov	[cs:file_handles + di + 14], ax
 
-	; Set JFT entry and refcount
+	; Set JFT entry, refcount, and directory location
 	pop	bx			; Handle number
 	push	bx
 	push	es
 	mov	es, [cs:exec_seg]
 	mov	[es:0x18 + bx], bl	; JFT[handle] = SFT index
 	mov	byte [cs:sft_refcount + bx], 1
+	; Save directory cluster/entries for close-time size update
+	mov	ax, [resolved_dir_cluster]
+	push	bx
+	shl	bx, 1
+	mov	[cs:sft_dir_cluster + bx], ax
+	mov	ax, [resolved_dir_entries]
+	mov	[cs:sft_dir_entries + bx], ax
+	pop	bx
 	pop	es
 
 	; Load FAT (needed for cluster chain traversal)
@@ -5382,15 +5399,27 @@ int21_handler:
 	mov	ds, ax
 	mov	al, [cs:file_handles + si + 1]
 	mov	[resolved_drive], al
-	; For simplicity, re-read root directory and search for the file by cluster
-	mov	word [resolved_dir_cluster], 0
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	; Re-read the directory where the file was opened
+	; SI = SFT offset. SFT index = SI / 16
+	push	cx
+	mov	cx, si
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1			; CX = SFT index
+	shl	cx, 1			; CX = word index for sft_dir_cluster
+	mov	bx, cx
+	mov	ax, [cs:sft_dir_cluster + bx]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cs:sft_dir_entries + bx]
+	mov	[resolved_dir_entries], ax
+	pop	cx
 	call	read_resolved_dir
 	jc	.i21_3e_just_close
 
 	; Search for entry with matching start cluster
 	mov	di, dir_buffer
-	mov	cx, MAX_DIR_ENTRIES
+	mov	cx, [resolved_dir_entries]
 	mov	ax, [cs:file_handles + si + 2]	; Start cluster
 .i21_3e_search:
 	cmp	byte [di], 0
@@ -6412,6 +6441,15 @@ int21_handler:
 	push	ds
 	mov	ax, SHELL_SEG
 	mov	ds, ax
+	; Set drive: DL=0 default, DL=1 A:, DL=2 B:
+	or	dl, dl
+	jnz	.i21_36_has_drive
+	mov	dl, [cur_drive]
+	jmp	.i21_36_set_drive
+.i21_36_has_drive:
+	dec	dl			; 1-based to 0-based
+.i21_36_set_drive:
+	mov	[resolved_drive], dl
 	; Read FAT to count free clusters
 	push	dx
 	call	read_fat
@@ -6540,9 +6578,13 @@ int21_handler:
 	iret
 
 .i21_44_input_ready:
-	; AL=6: Check input status
-	cmp	bx, 5
-	jae	.i21_44_input_file
+	; AL=6: Check input status — resolve via SFT
+	push	si
+	call	handle_to_sft
+	jc	.i21_44_input_err
+	test	byte [cs:file_handles + si], 0x80
+	pop	si
+	jz	.i21_44_input_file
 	; Device: check keyboard buffer via INT 16h AH=01
 	push	ax
 	mov	ah, 0x01
@@ -6563,6 +6605,9 @@ int21_handler:
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
+.i21_44_input_err:
+	pop	si
+	jmp	.i21_44_bad_handle
 .i21_44_input_file:
 	mov	al, 0xFF		; Files always ready
 	push	bp
@@ -6572,7 +6617,11 @@ int21_handler:
 	iret
 
 .i21_44_output_ready:
-	; AL=7: Check output status — always ready
+	; AL=7: Check output status — resolve via SFT
+	push	si
+	call	handle_to_sft
+	pop	si
+	; Device or file — output always ready
 	mov	al, 0xFF
 	push	bp
 	mov	bp, sp
@@ -6650,6 +6699,9 @@ int21_handler:
 	jae	.i21_46_err
 	cmp	cx, MAX_HANDLES
 	jae	.i21_46_err
+	; DUP2 with same handle = no-op success
+	cmp	bx, cx
+	je	.i21_46_noop
 	push	es
 	mov	es, [cs:exec_seg]
 	; Get SFT index of source handle
@@ -6693,6 +6745,12 @@ int21_handler:
 	iret
 .i21_46_err_pop:
 	pop	es
+.i21_46_noop:
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
 .i21_46_err:
 	mov	ax, 6			; Invalid handle
 	push	bp
@@ -6707,15 +6765,28 @@ int21_handler:
 .i21_47:
 	push	ax
 	push	di
-	; Copy cur_dir_path to DS:SI
-	push	si
-	push	ds
-	push	cs
-	pop	ds
+	; Determine which drive's path to return
+	; DL: 0=default, 1=A, 2=B
+	or	dl, dl
+	jnz	.i21_47_specific
+	; Default drive — use cur_dir_path
 	mov	di, cur_dir_path
-	pop	ds
-	pop	si
-	; Now copy from CS:cur_dir_path to DS:SI
+	jmp	.i21_47_do_copy
+.i21_47_specific:
+	cmp	dl, 1
+	je	.i21_47_drv_a
+	cmp	dl, 2
+	je	.i21_47_drv_b
+	; Invalid drive — return empty string
+	mov	byte [si], 0
+	jmp	.i21_47_done_direct
+.i21_47_drv_a:
+	mov	di, drv_a_path
+	jmp	.i21_47_do_copy
+.i21_47_drv_b:
+	mov	di, drv_b_path
+.i21_47_do_copy:
+	; Copy from CS:DI to DS:SI
 	push	si
 .i21_47_copy:
 	mov	al, [cs:di]
@@ -6727,6 +6798,7 @@ int21_handler:
 	jmp	.i21_47_copy
 .i21_47_done:
 	pop	si
+.i21_47_done_direct:
 	pop	di
 	pop	ax
 	; Clear carry
@@ -6769,7 +6841,19 @@ int21_handler:
 .i21_0e:
 	cmp	dl, 2
 	jae	.i21_0e_done
-	mov	[cs:cur_drive], dl
+	cmp	dl, [cs:cur_drive]
+	je	.i21_0e_done		; Same drive, no switch needed
+	; Save current drive state, switch, load new state
+	push	ds
+	push	ax
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	call	save_drive_state
+	mov	[cur_drive], dl
+	mov	al, dl
+	call	load_drive_state
+	pop	ax
+	pop	ds
 .i21_0e_done:
 	mov	al, 2			; We support 2 drives
 	iret
@@ -9329,6 +9413,12 @@ file_handles:
 sft_refcount:
 	db	1, 1, 1, 1, 1		; Device handles always refcount=1
 	times (MAX_HANDLES - 5) db 0	; File handles start at 0
+sft_dir_cluster:			; Directory cluster where file entry lives
+	dw	0, 0, 0, 0, 0		; Device handles (unused)
+	times (MAX_HANDLES - 5) dw 0	; File handles
+sft_dir_entries:			; Number of entries in that directory
+	dw	0, 0, 0, 0, 0
+	times (MAX_HANDLES - 5) dw 0
 file_count:	dw	0
 dir_wide:	db	0
 dir_col:	db	0			; Column counter for wide mode
