@@ -571,6 +571,57 @@
 	call	fail
 .t36_done:
 
+	; === 37. EXEC child program (AH=4B) ===
+	mov	si, t_exec
+	call	pstr
+	; Set up parameter block for EXEC
+	mov	word [exec_pb], 0		; Env = inherit (0)
+	mov	word [exec_pb+2], exec_cmdtail	; Command tail offset
+	mov	word [exec_pb+4], cs		; Command tail segment
+	mov	word [exec_pb+6], 0x005C	; FCB1 offset (PSP default)
+	mov	word [exec_pb+8], cs		; FCB1 segment
+	mov	word [exec_pb+10], 0x006C	; FCB2 offset
+	mov	word [exec_pb+12], cs		; FCB2 segment
+	; Call EXEC
+	mov	ax, 0x4B00
+	mov	dx, child_fname
+	push	ds
+	push	es
+	mov	bx, exec_pb
+	push	cs
+	pop	es			; ES:BX = parameter block
+	int	0x21
+	pop	es
+	pop	ds
+	jc	.t37_fail
+	call	pass
+	jmp	.t37_done
+.t37_fail:
+	push	ax
+	call	fail
+	; Print error code
+	mov	si, msg_errcode
+	call	pstr
+	pop	ax
+	call	pdec
+	call	nl
+.t37_done:
+
+	; === 38. Check child return code (AH=4D) ===
+	mov	si, t_retcode
+	call	pstr
+	mov	ah, 0x4D
+	int	0x21
+	cmp	al, 42			; CHILD.COM exits with code 42
+	je	.t38_pass
+	jmp	.t38_fail
+.t38_pass:
+	call	pass
+	jmp	.t38_done
+.t38_fail:
+	call	fail
+.t38_done:
+
 	; === Summary ===
 	call	nl
 	mov	si, msg_summary
@@ -652,6 +703,7 @@ msg_fail	db	' FAIL', 0
 msg_summary	db	'Results: ', 0
 msg_passed	db	' passed, ', 0
 msg_failed	db	' failed', 0
+msg_errcode	db	'  Error: ', 0
 
 t_ver		db	' 1. DOS Version', 0
 t_getdrv	db	' 2. Get Drive', 0
@@ -689,8 +741,13 @@ t_env		db	'33. Environment', 0
 t_cmdtail	db	'34. Cmd tail', 0
 t_delete	db	'35. Delete file', 0
 t_vector	db	'36. Get vector', 0
+t_exec		db	'37. EXEC child', 0
+t_retcode	db	'38. Return code', 0
 
 fname		db	'DOSTEST.TMP', 0
+child_fname	db	'CHILD.COM', 0
+exec_pb		times 14 db 0		; EXEC parameter block
+exec_cmdtail	db	0, 0x0D		; Empty command tail (len=0, CR)
 wildcard	db	'*.COM', 0
 testdata	db	'ABCD'
 

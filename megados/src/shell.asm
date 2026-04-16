@@ -4203,11 +4203,9 @@ do_exec:
 	; For .COM: allocate all available memory (like DOS)
 	; For .EXE: allocate based on header
 	mov	bx, 0xFFFF		; Request maximum
-	mov	ah, 0x48
-	int	0x21			; Will fail but BX = largest block
+	call	alloc_mem_core		; Will fail but BX = largest block
 	; Now allocate that largest block
-	mov	ah, 0x48
-	int	0x21
+	call	alloc_mem_core
 	jc	.exec_no_mem
 	mov	[exec_seg], ax		; Save allocated segment
 
@@ -4581,6 +4579,95 @@ fat12_next_cluster:
 	pop	cx
 	pop	bx
 	ret
+
+; ============================================================================
+; alloc_mem_core — callable memory allocator (no INT overhead)
+; ============================================================================
+; Input: BX = requested paragraphs
+; Output: CF=0, AX = allocated segment  /  CF=1, AX=8, BX=largest available
+; Clobbers: CX, DX, DI, ES
+alloc_mem_core:
+	mov	ax, [cs:mcb_first]
+	mov	cx, bx			; CX = requested size
+	mov	dx, 0			; DX = largest free found
+.walk:
+	mov	es, ax
+	cmp	byte [es:0x00], 'M'
+	je	.check
+	cmp	byte [es:0x00], 'Z'
+	je	.check
+	jmp	.fail			; Corrupt MCB
+.check:
+	cmp	word [es:0x01], 0	; Free?
+	jne	.next
+	; Save this block's type before we might split it
+	push	ax
+	mov	al, [es:0x00]
+	mov	[cs:.amc_type], al
+	pop	ax
+	; Free block — check size
+	mov	bx, [es:0x03]
+	cmp	bx, dx			; Track largest
+	jbe	.not_larger
+	mov	dx, bx
+.not_larger:
+	cmp	bx, cx			; Big enough?
+	jb	.next
+	; Allocate from this block
+	mov	di, bx
+	sub	di, cx
+	cmp	di, 1			; Room for a new MCB?
+	jbe	.take_all
+	; Split: shrink this block, create new MCB after
+	mov	word [es:0x03], cx	; Resize current block
+	push	ax
+	inc	ax
+	mov	[es:0x01], ax		; Owner = allocated segment (MCB+1)
+	pop	ax
+	push	ax
+	add	ax, cx
+	inc	ax
+	push	es
+	mov	es, ax
+	mov	bl, [cs:.amc_type]
+	mov	[es:0x00], bl		; New block gets original type
+	mov	word [es:0x01], 0	; Free
+	sub	di, 1
+	mov	[es:0x03], di		; Remaining size
+	pop	es
+	mov	byte [es:0x00], 'M'	; Current is no longer last
+	pop	ax
+	jmp	.ok
+.take_all:
+	push	ax
+	inc	ax
+	mov	[es:0x01], ax		; Owner = MCB+1
+	pop	ax
+	jmp	.ok_nosplit
+.next:
+	mov	bl, [es:0x00]
+	mov	[cs:.amc_type], bl
+	cmp	byte [es:0x00], 'Z'
+	je	.fail
+	mov	bx, [es:0x03]
+	add	ax, bx
+	inc	ax
+	jmp	.walk
+.ok:
+	inc	ax			; Return segment = MCB + 1
+	clc
+	ret
+.ok_nosplit:
+	mov	ax, es
+	inc	ax
+	clc
+	ret
+.fail:
+	mov	bx, dx			; Return largest available
+	mov	ax, 8			; Error: insufficient memory
+	stc
+	ret
+.amc_type	db	'M'
 
 ; ============================================================================
 ; INT 21h — DOS Services Handler
@@ -6075,113 +6162,21 @@ int21_handler:
 ; Output: AX = segment of allocated block, CF=0 on success
 ;         CF=1 on failure, BX = largest available block
 .i21_48:
-	push	cx
-	push	dx
-	push	es
-	push	di
-	mov	ax, [cs:mcb_first]
-	mov	cx, bx			; CX = requested size
-	mov	dx, 0			; DX = largest free found
-.i21_48_walk:
-	mov	es, ax
-	cmp	byte [es:0x00], 'M'
-	je	.i21_48_check
-	cmp	byte [es:0x00], 'Z'
-	je	.i21_48_check
-	jmp	.i21_48_fail		; Corrupt MCB
-.i21_48_check:
-	cmp	word [es:0x01], 0	; Free?
-	jne	.i21_48_next
-	; Free block — check size
-	mov	bx, [es:0x03]
-	cmp	bx, dx			; Track largest
-	jbe	.i21_48_not_larger
-	mov	dx, bx
-.i21_48_not_larger:
-	cmp	bx, cx			; Big enough?
-	jb	.i21_48_next
-	; Allocate from this block
-	; If exact fit or 1 para left, just take it
-	mov	di, bx
-	sub	di, cx
-	cmp	di, 1			; Room for a new MCB + at least 0 paras?
-	jbe	.i21_48_take_all
-	; Split: shrink this block, create new MCB after
-	mov	word [es:0x03], cx	; Resize current block
-	push	ax
-	inc	ax			; Owner = allocated segment (MCB+1)
-	mov	[es:0x01], ax		; Owner = the PSP/program that owns this block
-	pop	ax
-	; New free MCB at (current_seg + 1 + cx)
-	push	ax
-	add	ax, cx
-	inc	ax			; Skip past allocated block + MCB
-	push	es
-	mov	es, ax
-	mov	bl, [cs:.i21_48_type]	; Was original 'M' or 'Z'?
-	mov	[es:0x00], bl		; New block gets original type
-	mov	word [es:0x01], 0	; Free
-	sub	di, 1			; Subtract MCB paragraph
-	mov	[es:0x03], di		; Remaining size
-	pop	es
-	mov	byte [es:0x00], 'M'	; Current block is no longer last
-	pop	ax
-	jmp	.i21_48_ok
-.i21_48_take_all:
-	push	ax
-	inc	ax
-	mov	[es:0x01], ax		; Owner = allocated segment (MCB+1)
-	pop	ax
-	jmp	.i21_48_ok_nosplit
-.i21_48_next:
-	; Save block type before moving on
-	mov	bl, [es:0x00]
-	mov	[cs:.i21_48_type], bl
-	cmp	byte [es:0x00], 'Z'
-	je	.i21_48_fail
-	; Next MCB = current_seg + size + 1
-	mov	bx, [es:0x03]
-	add	ax, bx
-	inc	ax
-	jmp	.i21_48_walk
-.i21_48_ok:
-	; Return segment = MCB segment + 1
-	inc	ax
-	pop	di
-	pop	es
-	pop	dx
-	pop	cx
-	; Clear carry in flags on stack (iret will pop flags)
+	call	alloc_mem_core
+	jc	.i21_48_int_fail
+	; Success: AX = segment
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE	; Clear CF in saved flags
 	pop	bp
 	iret
-.i21_48_ok_nosplit:
-	mov	ax, es
-	inc	ax
-	pop	di
-	pop	es
-	pop	dx
-	pop	cx
-	push	bp
-	mov	bp, sp
-	and	word [bp+6], 0xFFFE
-	pop	bp
-	iret
-.i21_48_fail:
-	mov	bx, dx			; Return largest available
-	mov	ax, 8			; Error: insufficient memory
-	pop	di
-	pop	es
-	pop	dx
-	pop	cx
+.i21_48_int_fail:
+	; Fail: AX = 8, BX = largest available
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001	; Set CF in saved flags
 	pop	bp
 	iret
-.i21_48_type	db	'M'
 
 ; --- AH=49: Free memory ---
 ; Input: ES = segment to free
@@ -8744,17 +8739,447 @@ int21_handler:
 ; --- AH=4B: EXEC — Load and execute program ---
 ; Input: AL=0 load+execute, AL=1 load overlay, AL=3 load overlay
 ;        DS:DX = ASCIIZ program name, ES:BX = parameter block
+;        Parameter block: [+0] env seg, [+2] cmd tail ptr, [+4] FCB1, [+8] FCB2
 ; Returns: CF=0 success, CF=1 AX=error
 .i21_4b:
-	; For now, return "not enough memory" error
-	; A full EXEC implementation requires saving parent state,
-	; loading child, creating PSP, executing, and returning
-	mov	ax, 8			; Insufficient memory
+	cmp	al, 0
+	je	.i21_4b_exec
+	; AL != 0: load overlay — not supported
+	mov	ax, 1
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
 	pop	bp
 	iret
+
+.i21_4b_exec:
+	; Save caller's ES:BX (parameter block pointer) to variables
+	mov	[cs:.i21_4b_caller_es], es
+	mov	[cs:.i21_4b_caller_bx], bx
+
+	; Save parent SS:SP and exec_seg
+	mov	[cs:exec_parent_ss], ss
+	mov	[cs:exec_parent_sp], sp
+	mov	ax, [cs:exec_seg]
+	mov	[cs:.i21_4b_parent_seg], ax
+
+	; Copy filename from caller's DS:DX to cmd_buffer
+	; DS still = caller's DS, SI = DX = filename offset
+	mov	si, dx
+	push	ds			; Save caller DS again for copy
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	di, cmd_buffer
+	mov	cx, 78
+.i21_4b_copy_fname:
+	lodsb				; Read from DS:SI (caller's memory)
+	stosb				; Write to ES:DI (SHELL_SEG:cmd_buffer)
+	or	al, al
+	jz	.i21_4b_fname_done
+	dec	cx
+	jnz	.i21_4b_copy_fname
+	mov	byte [es:di-1], 0
+.i21_4b_fname_done:
+	pop	ax			; Discard saved caller DS
+
+	; Switch DS and ES to SHELL_SEG for all subsequent operations
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+
+	; Parse filename
+	mov	si, cmd_buffer
+	mov	di, exec_fname
+	call	parse_83_filename
+
+	; If no extension, try .COM then .EXE
+	cmp	byte [exec_fname+8], ' '
+	jne	.i21_4b_has_ext
+	mov	byte [exec_fname+8], 'C'
+	mov	byte [exec_fname+9], 'O'
+	mov	byte [exec_fname+10], 'M'
+.i21_4b_has_ext:
+
+	; Read current directory
+	mov	al, [cur_drive]
+	mov	[resolved_drive], al
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jnc	.i21_4b_dir_ok
+	mov	ax, 101
+	jmp	.i21_4b_err_ax
+.i21_4b_dir_ok:
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_4b_search:
+	mov	al, [si]
+	cmp	al, 0
+	je	.i21_4b_not_found
+	cmp	al, 0xE5
+	je	.i21_4b_search_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_4b_found
+.i21_4b_search_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_4b_search
+
+.i21_4b_not_found:
+	; Try .EXE if we tried .COM
+	cmp	byte [exec_fname+8], 'C'
+	jne	.i21_4b_err
+	mov	byte [exec_fname+8], 'E'
+	mov	byte [exec_fname+9], 'X'
+	mov	byte [exec_fname+10], 'E'
+	call	read_resolved_dir
+	jc	.i21_4b_err
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	jmp	.i21_4b_search
+
+.i21_4b_err:
+	mov	ax, 2			; File not found
+.i21_4b_err_ax:
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_4b_found:
+	; Get file info
+	mov	ax, [si+26]
+	mov	[exec_cluster], ax
+	mov	ax, [si+28]
+	mov	[exec_size], ax
+	mov	ax, [si+30]
+	mov	[exec_size+2], ax
+
+	; Load FAT
+	call	read_fat
+	jc	.i21_4b_err
+
+	; Mark this as an EXEC-launched program
+	inc	byte [exec_depth]
+
+	; Save command tail from parameter block
+	; Parameter block is at caller's ES:BX
+	; [ES:BX+2] = far pointer to command tail
+	push	ds
+	mov	es, [cs:.i21_4b_caller_es]
+	mov	bx, [cs:.i21_4b_caller_bx]
+	mov	si, [es:bx+2]		; Command tail offset
+	mov	ds, [es:bx+4]		; Command tail segment
+	; Save command tail pointer for PSP setup
+	mov	[cs:exec_cmdtail_ptr], si
+	mov	[cs:.i21_4b_cmdtail_seg], ds
+	pop	ds
+
+	; Now reuse the existing exec machinery
+	; Allocate memory
+	mov	bx, 0xFFFF
+	call	alloc_mem_core		; Probe: fails, BX = largest
+	call	alloc_mem_core		; Allocate largest block
+	jc	.i21_4b_no_mem
+
+	mov	[exec_seg], ax
+
+	; Build PSP (reuse existing PSP setup code inline)
+	mov	es, ax
+
+	; Clear PSP
+	push	ax
+	push	cx
+	push	di
+	xor	di, di
+	xor	ax, ax
+	mov	cx, 128
+	rep	stosw
+	pop	di
+	pop	cx
+	pop	ax
+
+	; PSP:00 INT 20h
+	mov	byte [es:0x00], 0xCD
+	mov	byte [es:0x01], 0x20
+	; PSP:02 Memory top
+	push	es
+	mov	ax, [exec_seg]
+	dec	ax
+	mov	es, ax
+	mov	ax, [es:0x03]
+	add	ax, [exec_seg]
+	inc	ax
+	pop	es
+	mov	[es:0x02], ax
+	; PSP:05 FAR CALL to DOS
+	mov	byte [es:0x05], 0xCD
+	mov	byte [es:0x06], 0x21
+	mov	byte [es:0x07], 0xCB
+	; PSP:0A-15 Save parent vectors
+	push	ds
+	xor	ax, ax
+	mov	ds, ax
+	mov	ax, [ds:0x88]
+	mov	[es:0x0A], ax
+	mov	ax, [ds:0x8A]
+	mov	[es:0x0C], ax
+	mov	ax, [ds:0x8C]
+	mov	[es:0x0E], ax
+	mov	ax, [ds:0x8E]
+	mov	[es:0x10], ax
+	mov	ax, [ds:0x90]
+	mov	[es:0x12], ax
+	mov	ax, [ds:0x92]
+	mov	[es:0x14], ax
+	pop	ds
+	; PSP:16 Parent PSP
+	mov	ax, [cs:.i21_4b_parent_seg]
+	mov	[es:0x16], ax
+	; PSP:18 JFT
+	push	di
+	push	cx
+	mov	di, 0x18
+	mov	al, 0xFF
+	mov	cx, MAX_HANDLES
+	rep	stosb
+	pop	cx
+	pop	di
+	mov	byte [es:0x18], 0x00
+	mov	byte [es:0x19], 0x01
+	mov	byte [es:0x1A], 0x02
+	mov	byte [es:0x1B], 0x03
+	mov	byte [es:0x1C], 0x04
+	; PSP:2C Environment
+	; Use caller's environment or the parameter block env
+	push	bx
+	mov	es, [cs:.i21_4b_caller_es]
+	mov	bx, [cs:.i21_4b_caller_bx]
+	mov	ax, [es:bx]		; Env segment from param block
+	or	ax, ax
+	jnz	.i21_4b_has_env
+	mov	ax, [env_seg]		; Use shell's env if 0
+.i21_4b_has_env:
+	mov	es, [exec_seg]
+	mov	[es:0x2C], ax
+	pop	bx
+	; PSP:32/34 Handle table
+	mov	word [es:0x32], MAX_HANDLES
+	mov	word [es:0x34], 0x18
+	mov	ax, [exec_seg]
+	mov	word [es:0x36], ax
+	; PSP:50 INT 21/RETF
+	mov	byte [es:0x50], 0xCD
+	mov	byte [es:0x51], 0x21
+	mov	byte [es:0x52], 0xCB
+
+	; PSP:80 Command tail from parameter block
+	push	si
+	push	di
+	push	ds
+	mov	ds, [cs:.i21_4b_cmdtail_seg]
+	mov	si, [cs:exec_cmdtail_ptr]
+	mov	di, 0x80
+	; First byte is length
+	mov	cl, [si]
+	mov	[es:di], cl
+	xor	ch, ch
+	inc	si
+	inc	di
+	rep	movsb
+	mov	byte [es:di], 0x0D
+	pop	ds
+	pop	di
+	pop	si
+
+	; Set DTA
+	mov	ax, [exec_seg]
+	mov	[dta_seg], ax
+	mov	word [dta_off], 0x0080
+
+	; Save BIOS vectors
+	push	ds
+	xor	ax, ax
+	mov	ds, ax
+	mov	ax, [ds:0x20]
+	mov	[cs:saved_int08], ax
+	mov	ax, [ds:0x22]
+	mov	[cs:saved_int08+2], ax
+	mov	ax, [ds:0x24]
+	mov	[cs:saved_int09], ax
+	mov	ax, [ds:0x26]
+	mov	[cs:saved_int09+2], ax
+	mov	ax, [ds:0x40]
+	mov	[cs:saved_int10], ax
+	mov	ax, [ds:0x42]
+	mov	[cs:saved_int10+2], ax
+	mov	ax, [ds:0x70]
+	mov	[cs:saved_int1c], ax
+	mov	ax, [ds:0x72]
+	mov	[cs:saved_int1c+2], ax
+	pop	ds
+
+	; Load file
+	mov	bx, 0x0100
+	mov	ax, [exec_cluster]
+	mov	es, [exec_seg]
+
+.i21_4b_load:
+	push	ax
+	sub	ax, 2
+	mov	cx, SECS_PER_CLUST
+	push	cx
+	mul	cx
+	add	ax, DATA_START_SEC
+	mov	[cs:exec_cur_sec], ax
+	pop	cx
+.i21_4b_load_sec:
+	push	cx
+	mov	ax, [cs:exec_cur_sec]
+	xor	dx, dx
+	push	bx
+	mov	bx, 18
+	div	bx
+	mov	ch, al
+	mov	ax, dx
+	xor	dx, dx
+	mov	bx, 9
+	div	bx
+	mov	dh, al
+	mov	cl, dl
+	inc	cl
+	pop	bx
+	push	es
+	mov	ah, 0x02
+	mov	al, 1
+	mov	dl, [resolved_drive]
+	int	0x13
+	pop	es
+	jc	.i21_4b_load_err
+	mov	ax, es
+	add	ax, 512 / 16
+	mov	es, ax
+	inc	word [cs:exec_cur_sec]
+	pop	cx
+	dec	cx
+	jnz	.i21_4b_load_sec
+	pop	ax
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jb	.i21_4b_load
+
+	; Check for EXE
+	mov	ax, [exec_seg]
+	mov	es, ax
+	cmp	word [es:0x100], 0x5A4D
+	je	.i21_4b_exe
+
+	; === .COM launch ===
+	mov	word [exec_jmp_ip], 0x0100
+	mov	ax, [exec_seg]
+	mov	[exec_jmp_cs], ax
+	; Set up program segments
+	mov	ax, [exec_seg]
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	jmp	far [cs:exec_jmp_ip]
+
+	; === .EXE launch ===
+.i21_4b_exe:
+	mov	ax, [exec_seg]
+	mov	es, ax
+	mov	ax, [es:0x108]		; Header paragraphs
+	mov	[exe_hdr_size], ax
+	mov	bx, [exec_seg]
+	add	bx, 0x10
+	add	bx, ax
+	mov	[exe_load_seg], bx
+	; CS:IP
+	mov	ax, [es:0x116]
+	add	ax, bx
+	mov	[exec_jmp_cs], ax
+	mov	ax, [es:0x114]
+	mov	[exec_jmp_ip], ax
+	; SS:SP
+	mov	ax, [es:0x10E]
+	add	ax, bx
+	mov	dx, [es:0x110]
+	; Relocations
+	mov	cx, [es:0x106]
+	jcxz	.i21_4b_no_reloc
+	mov	di, [es:0x118]
+	add	di, 0x100
+.i21_4b_reloc:
+	push	cx
+	mov	si, [es:di]
+	mov	cx, [es:di+2]
+	add	cx, [exe_load_seg]
+	push	es
+	push	di
+	mov	es, cx
+	mov	di, si
+	mov	cx, [es:di]
+	add	cx, [cs:exe_load_seg]
+	mov	[es:di], cx
+	pop	di
+	pop	es
+	pop	cx
+	add	di, 4
+	dec	cx
+	jnz	.i21_4b_reloc
+.i21_4b_no_reloc:
+	cli
+	mov	ss, ax
+	mov	sp, dx
+	sti
+	mov	ax, [exec_seg]
+	mov	ds, ax
+	mov	es, ax
+	jmp	far [cs:exec_jmp_ip]
+
+.i21_4b_no_mem:
+	dec	byte [cs:exec_depth]
+	mov	ax, 8
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+
+.i21_4b_load_err:
+	pop	cx
+	pop	ax
+	dec	byte [cs:exec_depth]
+	mov	es, [cs:exec_seg]
+	mov	ah, 0x49
+	int	0x21
+	mov	ax, 5
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_4b_caller_ds:	dw	0
+.i21_4b_caller_dx:	dw	0
+.i21_4b_caller_es:	dw	0
+.i21_4b_caller_bx:	dw	0
+.i21_4b_parent_seg:	dw	0
+.i21_4b_cmdtail_seg:	dw	0
 
 ; --- AH=4C: Terminate with return code ---
 .i21_4c:
@@ -8801,11 +9226,58 @@ int21_handler:
 .i21_4c_go:
 	pop	dx
 	pop	es
-	; Fall through to int20_handler
+
+	; Check if this was an EXEC-launched child
+	cmp	byte [cs:exec_depth], 0
+	je	.i21_4c_to_shell
+
+	; Return to parent program
+	dec	byte [cs:exec_depth]
+	; Restore parent's exec_seg
+	mov	ax, [cs:.i21_4b_parent_seg]
+	mov	[cs:exec_seg], ax
+	; Restore BIOS vectors
+	call	int20_handler_restore_vectors
+	; Restore parent SS:SP and return
+	cli
+	mov	ss, [cs:exec_parent_ss]
+	mov	sp, [cs:exec_parent_sp]
+	sti
+	; Restore DTA to parent PSP:80
+	mov	ax, [cs:exec_seg]
+	mov	[cs:dta_seg], ax
+	mov	word [cs:dta_off], 0x0080
+	; Return to parent with CF=0
+	; The parent's stack has FLAGS, CS, IP from INT 21h
+	; We need to clear carry in the saved flags
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE	; Clear CF
+	pop	bp
+	mov	ax, [cs:last_return_code]
+	iret
+
+.i21_4c_to_shell:
+	; Fall through to int20_handler (shell-launched program)
 
 ; Entry point for INT 20h / INT 22h program termination
 int20_handler:
-	; Restore BIOS vectors
+	call	int20_handler_restore_vectors
+	; Restore DTA to shell default
+	mov	word [cs:dta_seg], SHELL_SEG
+	mov	word [cs:dta_off], 0x0080
+	; Restore shell state and return
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	jmp	cmd_loop
+
+; Subroutine: restore BIOS + DOS vectors
+int20_handler_restore_vectors:
 	xor	ax, ax
 	mov	es, ax
 	mov	ax, [cs:saved_int08]
@@ -8824,7 +9296,6 @@ int20_handler:
 	mov	[es:0x70], ax
 	mov	ax, [cs:saved_int1c+2]
 	mov	[es:0x72], ax
-	; Restore DOS vectors
 	mov	word [es:0x80], int20_handler
 	mov	word [es:0x82], SHELL_SEG
 	mov	word [es:0x84], int21_handler
@@ -8835,18 +9306,7 @@ int20_handler:
 	mov	word [es:0x8E], SHELL_SEG
 	mov	word [es:0x90], int24_handler
 	mov	word [es:0x92], SHELL_SEG
-	; Restore DTA to shell default
-	mov	word [cs:dta_seg], SHELL_SEG
-	mov	word [cs:dta_off], 0x0080
-	; Restore shell state and return
-	mov	ax, SHELL_SEG
-	mov	ds, ax
-	mov	es, ax
-	cli
-	mov	ss, ax
-	mov	sp, 0xFFFE
-	sti
-	jmp	cmd_loop
+	ret
 
 ; ============================================================================
 ; Utility: print null-terminated string at DS:SI
@@ -9368,6 +9828,9 @@ exec_jmp_ip:	dw	0x0100		; For far jump to program
 exec_jmp_cs:	dw	0
 exec_try_ext:	db	0		; 0=done, 1=try EXE, 2=try BAT
 exec_cur_sec:	dw	0		; Current linear sector during exec load
+exec_parent_ss:	dw	0		; Parent SS for AH=4Bh EXEC return
+exec_parent_sp:	dw	0		; Parent SP for AH=4Bh EXEC return
+exec_depth:	db	0		; Nesting depth (0=shell launched, >0=EXEC launched)
 exec_cmdtail_ptr: dw	0		; Pointer to command tail in cmd_buffer
 env_seg:	dw	0		; Segment of environment block
 break_flag:	db	0		; Ctrl-C check flag
