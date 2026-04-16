@@ -4614,8 +4614,14 @@ int21_handler:
 	je	.i21_36
 	cmp	ah, 0x44
 	je	.i21_44
+	cmp	ah, 0x45
+	je	.i21_45
+	cmp	ah, 0x46
+	je	.i21_46
 	cmp	ah, 0x47
 	je	.i21_47
+	cmp	ah, 0x4B
+	je	.i21_4b
 	cmp	ah, 0x4C
 	je	.i21_4c
 	cmp	ah, 0x4D
@@ -5827,6 +5833,7 @@ int21_handler:
 .i21_42:
 	cmp	bx, MAX_HANDLES
 	jae	.i21_42_bad
+	mov	[cs:.i21_42_method], al	; Save method before AL is clobbered
 	push	si
 	mov	ax, bx
 	push	cx
@@ -5835,16 +5842,33 @@ int21_handler:
 	pop	cx
 	mov	si, ax
 
-	; Get method from AL on stack (it was the original AL)
-	; Actually AL was trashed by shl. We need to get original AL.
-	; The original AX is on the interrupt stack frame.
-	; Let's read it from the saved flags area... actually the caller
-	; passed AL in AH=42, AL=method. But AH dispatch already happened.
-	; We need to save AL before the dispatch. For now, assume method=0 (from start)
-
-	; Method 0: set position to CX:DX
-	mov	[cs:file_handles + si + 8], dx	; Position low
-	mov	[cs:file_handles + si + 10], cx	; Position high
+	; Compute absolute position based on method
+	cmp	byte [cs:.i21_42_method], 0
+	je	.i21_42_from_start
+	cmp	byte [cs:.i21_42_method], 1
+	je	.i21_42_from_current
+	; Method 2: from end — position = file_size + CX:DX (CX:DX is usually negative)
+	mov	ax, [cs:file_handles + si + 12]	; File size low
+	add	ax, dx
+	mov	[cs:file_handles + si + 8], ax
+	mov	ax, [cs:file_handles + si + 14]	; File size high
+	adc	ax, cx
+	mov	[cs:file_handles + si + 10], ax
+	jmp	.i21_42_do_seek
+.i21_42_from_current:
+	; Method 1: from current — position = current_pos + CX:DX
+	mov	ax, [cs:file_handles + si + 8]	; Current pos low
+	add	ax, dx
+	mov	[cs:file_handles + si + 8], ax
+	mov	ax, [cs:file_handles + si + 10]	; Current pos high
+	adc	ax, cx
+	mov	[cs:file_handles + si + 10], ax
+	jmp	.i21_42_do_seek
+.i21_42_from_start:
+	; Method 0: from start — position = CX:DX
+	mov	[cs:file_handles + si + 8], dx
+	mov	[cs:file_handles + si + 10], cx
+.i21_42_do_seek:
 
 	; Need to recalculate current cluster from start
 	; Walk the FAT chain from start cluster
@@ -5914,6 +5938,8 @@ int21_handler:
 	or	word [bp+6], 0x0001
 	pop	bp
 	iret
+
+.i21_42_method:	db	0
 
 ; --- AH=48: Allocate memory ---
 ; Input: BX = paragraphs requested
@@ -6329,31 +6355,221 @@ int21_handler:
 ; Returns DX = device info word
 .i21_44:
 	cmp	al, 0
-	jne	.i21_44_other
-	; AL=0: Get device info
+	je	.i21_44_get
+	cmp	al, 1
+	je	.i21_44_set
+	cmp	al, 6
+	je	.i21_44_input_ready
+	cmp	al, 7
+	je	.i21_44_output_ready
+	cmp	al, 8
+	je	.i21_44_removable
+	; Other subfunctions — return error
+	mov	ax, 1
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_44_get:
+	; AL=0: Get device info for handle BX
 	cmp	bx, 5
-	jae	.i21_44_file		; Handles 5+ are files
-	; Handles 0-4 are devices (stdin/stdout/stderr/aux/prn)
-	mov	dx, 0x80D3		; Device: ISCIN|ISCOT|ISDEV|BINARY
-	; Clear carry in flags on stack
+	jae	.i21_44_file
+	; Handles 0-4 are devices — return appropriate flags
+	cmp	bx, 0
+	jne	.i21_44_not_stdin
+	mov	dx, 0x80C1		; stdin: ISDEV|ISCIN|BINARY
+	jmp	.i21_44_dev_ret
+.i21_44_not_stdin:
+	cmp	bx, 2
+	ja	.i21_44_aux_prn
+	mov	dx, 0x80C2		; stdout/stderr: ISDEV|ISCOT|BINARY
+	jmp	.i21_44_dev_ret
+.i21_44_aux_prn:
+	mov	dx, 0x80C0		; aux/prn: ISDEV|BINARY
+.i21_44_dev_ret:
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
 .i21_44_file:
-	mov	dx, 0x0000		; Not a device, not EOF
+	mov	dx, 0x0000		; Disk file, not EOF
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
-.i21_44_other:
-	; Other IOCTL subfunctions — return error
-	mov	ax, 1			; Invalid function
+
+.i21_44_set:
+	; AL=1: Set device info — ignore, return success
 	push	bp
 	mov	bp, sp
-	or	word [bp+6], 0x0001	; Set carry
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+
+.i21_44_input_ready:
+	; AL=6: Check input status
+	cmp	bx, 5
+	jae	.i21_44_input_file
+	; Device: check keyboard buffer via INT 16h AH=01
+	push	ax
+	mov	ah, 0x01
+	int	0x16
+	jz	.i21_44_not_ready
+	pop	ax
+	mov	al, 0xFF		; Ready
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_44_not_ready:
+	pop	ax
+	mov	al, 0x00		; Not ready
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_44_input_file:
+	mov	al, 0xFF		; Files always ready
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+
+.i21_44_output_ready:
+	; AL=7: Check output status — always ready
+	mov	al, 0xFF
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+
+.i21_44_removable:
+	; AL=8: Check if removable media
+	; BL = drive (0=A, 1=B)
+	; Returns: AX=0 removable, AX=1 fixed
+	xor	ax, ax			; 0 = removable (floppy)
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+
+; --- AH=45: Duplicate handle (DUP) ---
+; Input: BX = handle to duplicate
+; Returns: AX = new handle, CF=0 success
+.i21_45:
+	cmp	bx, MAX_HANDLES
+	jae	.i21_45_err
+	; Find a free handle starting at 5
+	push	cx
+	push	si
+	push	di
+	mov	si, 5 * FH_SIZE		; Source = BX's entry (computed below)
+	; First compute source offset
+	mov	ax, bx
+	mov	cl, 4
+	shl	ax, cl
+	mov	si, ax			; SI = source handle offset
+	; Find free handle
+	mov	di, 5 * FH_SIZE
+.i21_45_find:
+	cmp	di, MAX_HANDLES * FH_SIZE
+	jae	.i21_45_no_handle
+	cmp	byte [cs:file_handles + di], 0
+	je	.i21_45_got
+	add	di, FH_SIZE
+	jmp	.i21_45_find
+.i21_45_got:
+	; Copy handle entry from SI to DI
+	push	cx
+	mov	cx, FH_SIZE
+.i21_45_copy:
+	mov	al, [cs:file_handles + si]
+	mov	[cs:file_handles + di], al
+	inc	si
+	inc	di
+	dec	cx
+	jnz	.i21_45_copy
+	pop	cx
+	; Return new handle number
+	mov	ax, di
+	sub	ax, FH_SIZE		; Back to start of entry
+	mov	cl, 4
+	shr	ax, cl			; Convert offset to handle number
+	pop	di
+	pop	si
+	pop	cx
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_45_no_handle:
+	pop	di
+	pop	si
+	pop	cx
+.i21_45_err:
+	mov	ax, 4			; Too many open files
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+; --- AH=46: Force duplicate handle (DUP2) ---
+; Input: BX = source handle, CX = target handle
+; Target handle is closed if open, then made a copy of source
+.i21_46:
+	cmp	bx, MAX_HANDLES
+	jae	.i21_46_err
+	cmp	cx, MAX_HANDLES
+	jae	.i21_46_err
+	push	si
+	push	di
+	push	cx
+	; Compute source offset
+	mov	ax, bx
+	mov	cl, 4
+	shl	ax, cl
+	mov	si, ax
+	; Compute target offset
+	pop	ax			; AX = original CX (target handle)
+	push	ax
+	mov	cl, 4
+	shl	ax, cl
+	mov	di, ax
+	; Close target if open
+	mov	byte [cs:file_handles + di], 0
+	; Copy source to target
+	mov	cx, FH_SIZE
+.i21_46_copy:
+	mov	al, [cs:file_handles + si]
+	mov	[cs:file_handles + di], al
+	inc	si
+	inc	di
+	dec	cx
+	jnz	.i21_46_copy
+	pop	cx
+	pop	di
+	pop	si
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
+	pop	bp
+	iret
+.i21_46_err:
+	mov	ax, 6			; Invalid handle
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
 	pop	bp
 	iret
 
@@ -8313,11 +8529,37 @@ int21_handler:
 	mov	ch, 1			; Locus: unknown
 	iret
 
+; --- AH=4B: EXEC — Load and execute program ---
+; Input: AL=0 load+execute, AL=1 load overlay, AL=3 load overlay
+;        DS:DX = ASCIIZ program name, ES:BX = parameter block
+; Returns: CF=0 success, CF=1 AX=error
+.i21_4b:
+	; For now, return "not enough memory" error
+	; A full EXEC implementation requires saving parent state,
+	; loading child, creating PSP, executing, and returning
+	mov	ax, 8			; Insufficient memory
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
 ; --- AH=4C: Terminate with return code ---
 .i21_4c:
 	; Save return code
 	xor	ah, ah
 	mov	[cs:last_return_code], ax
+	; Close all open file handles (5-7)
+	push	bx
+	mov	bx, 5 * FH_SIZE
+.i21_4c_close:
+	cmp	bx, MAX_HANDLES * FH_SIZE
+	jae	.i21_4c_closed
+	mov	byte [cs:file_handles + bx], 0
+	add	bx, FH_SIZE
+	jmp	.i21_4c_close
+.i21_4c_closed:
+	pop	bx
 	; Free program's memory before returning to shell
 	; Free all blocks owned by exec_seg (the program's PSP segment)
 	push	es
