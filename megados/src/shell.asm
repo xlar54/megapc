@@ -3331,13 +3331,48 @@ read_resolved_dir:
 	mov	bx, dir_buffer
 	cmp	word [resolved_dir_cluster], 0
 	jne	.rrd_subdir
-	mov	ah, 0x02
-	mov	al, ROOT_DIR_SECS
-	mov	ch, 0
-	mov	cl, ROOT_DIR_SEC + 1
-	mov	dh, 0
+	; Read root directory one sector at a time (avoid head boundary crossing)
+	push	cx
+	push	dx
+	mov	cx, ROOT_DIR_SECS
+	mov	ax, ROOT_DIR_SEC	; LBA of first root dir sector
+.rrd_root_loop:
+	push	cx
+	push	ax
+	; Convert LBA to CHS
+	xor	dx, dx
+	push	bx
+	mov	bx, 9			; Sectors per track
+	div	bx			; AX = track*heads + head, DX = sector
+	pop	bx
+	mov	cl, dl
+	inc	cl			; CHS sector (1-based)
+	xor	dx, dx
+	push	bx
+	mov	bx, 2			; Heads
+	div	bx
+	pop	bx
+	mov	ch, al			; Cylinder
+	mov	dh, dl			; Head
 	mov	dl, [resolved_drive]
+	mov	ah, 0x02
+	mov	al, 1			; 1 sector
 	int	0x13
+	pop	ax
+	pop	cx
+	jc	.rrd_root_err
+	add	bx, 512			; Advance buffer
+	inc	ax			; Next LBA
+	dec	cx
+	jnz	.rrd_root_loop
+	pop	dx
+	pop	cx
+	clc
+	ret
+.rrd_root_err:
+	pop	dx
+	pop	cx
+	stc
 	ret
 .rrd_subdir:
 	mov	ax, [resolved_dir_cluster]
@@ -3360,13 +3395,47 @@ write_resolved_dir:
 	mov	bx, dir_buffer
 	cmp	word [resolved_dir_cluster], 0
 	jne	.wrd_subdir
-	mov	ah, 0x03
-	mov	al, ROOT_DIR_SECS
-	mov	ch, 0
-	mov	cl, ROOT_DIR_SEC + 1
-	mov	dh, 0
+	; Write root directory one sector at a time
+	push	cx
+	push	dx
+	mov	cx, ROOT_DIR_SECS
+	mov	ax, ROOT_DIR_SEC
+.wrd_root_loop:
+	push	cx
+	push	ax
+	xor	dx, dx
+	push	bx
+	mov	bx, 9
+	div	bx
+	pop	bx
+	mov	cl, dl
+	inc	cl
+	xor	dx, dx
+	push	bx
+	mov	bx, 2
+	div	bx
+	pop	bx
+	mov	ch, al
+	mov	dh, dl
 	mov	dl, [resolved_drive]
+	mov	ah, 0x03
+	mov	al, 1
 	int	0x13
+	pop	ax
+	pop	cx
+	jc	.wrd_root_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wrd_root_loop
+	pop	dx
+	pop	cx
+	clc
+	ret
+.wrd_root_err:
+	pop	dx
+	pop	cx
+	stc
 	ret
 .wrd_subdir:
 	mov	ax, [resolved_dir_cluster]
@@ -4826,6 +4895,18 @@ int21_handler:
 	je	.i21_24
 	cmp	ah, 0x34
 	je	.i21_34
+	cmp	ah, 0x17
+	je	.i21_17
+	cmp	ah, 0x27
+	je	.i21_27
+	cmp	ah, 0x28
+	je	.i21_28
+	cmp	ah, 0x50
+	je	.i21_50
+	cmp	ah, 0x51
+	je	.i21_51
+	cmp	ah, 0x5B
+	je	.i21_5b
 	; Unhandled — just return
 	iret
 
@@ -8119,6 +8200,8 @@ int21_handler:
 	call	read_resolved_dir
 	jc	.i21_0f_fail
 	; Search for file
+	mov	ax, SHELL_SEG
+	mov	es, ax			; ES = SHELL_SEG for cmpsb
 	push	si
 	mov	si, dir_buffer
 	mov	cx, [resolved_dir_entries]
@@ -8605,10 +8688,10 @@ int21_handler:
 	mov	[cs:.i21_14_clust_off], ax
 	pop	ax
 
-	; Read this cluster into dir_buffer (read 2 sectors)
+	; Read this cluster into batch_buffer (preserve dir_buffer)
 	call	cluster_to_chs
 	mov	dl, [cs:resolved_drive]
-	mov	bx, dir_buffer
+	mov	bx, batch_buffer
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x02
@@ -8616,8 +8699,8 @@ int21_handler:
 	int	0x13
 	jc	.i21_14_eof_restore
 
-	; Copy record_size bytes from dir_buffer+clust_off to DTA
-	mov	si, dir_buffer
+	; Copy record_size bytes from batch_buffer+clust_off to DTA
+	mov	si, batch_buffer
 	add	si, [.i21_14_clust_off]
 	mov	di, [dta_off]
 	mov	es, [dta_seg]
@@ -8903,10 +8986,10 @@ int21_handler:
 	mov	[cs:.i21_15_clust_off], ax
 	pop	ax
 
-	; Read existing cluster data (so partial writes preserve existing bytes)
+	; Read existing cluster data into batch_buffer (preserve dir_buffer)
 	call	cluster_to_chs
 	mov	dl, [cs:resolved_drive]
-	mov	bx, dir_buffer
+	mov	bx, batch_buffer
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x02
@@ -8914,8 +8997,8 @@ int21_handler:
 	int	0x13
 	jc	.i21_15_err
 
-	; Copy record_size bytes from DTA to dir_buffer+clust_off
-	mov	di, dir_buffer
+	; Copy record_size bytes from DTA to batch_buffer+clust_off
+	mov	di, batch_buffer
 	add	di, [.i21_15_clust_off]
 	mov	si, [cs:dta_off]
 	push	ds
@@ -8935,7 +9018,7 @@ int21_handler:
 	mov	ax, [cs:.i21_15_cur_cl]
 	call	cluster_to_chs
 	mov	dl, [cs:resolved_drive]
-	mov	bx, dir_buffer
+	mov	bx, batch_buffer
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x03
@@ -9489,6 +9572,296 @@ int21_handler:
 	mov	bx, .i21_34_indos
 	iret
 .i21_34_indos:	db	0
+
+; --- AH=17: Rename file (FCB) ---
+; Input: DS:DX = modified FCB (old name at +1, new name at +17)
+; Returns: AL=0 success, AL=FF not found
+.i21_17:
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx
+	; Get drive
+	mov	al, [si]
+	or	al, al
+	jnz	.i21_17_has_drv
+	mov	al, [cs:cur_drive]
+	inc	al
+.i21_17_has_drv:
+	dec	al
+	mov	[cs:resolved_drive], al
+	; Copy old name from FCB+1 to exec_fname
+	push	si
+	inc	si
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	di, exec_fname
+	mov	cx, 11
+.i21_17_copy_old:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	dec	cx
+	jnz	.i21_17_copy_old
+	pop	si
+	; Copy new name from FCB+17 to wild_pattern (temp)
+	push	si
+	add	si, 17
+	mov	di, wild_pattern
+	mov	cx, 11
+.i21_17_copy_new:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	dec	cx
+	jnz	.i21_17_copy_new
+	pop	si
+	; Switch to SHELL_SEG
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	; Read directory
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jc	.i21_17_fail
+	; Search for old name
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_17_search:
+	mov	al, [si]
+	cmp	al, 0
+	je	.i21_17_fail
+	cmp	al, 0xE5
+	je	.i21_17_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_17_found
+.i21_17_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_17_search
+	jmp	.i21_17_fail
+.i21_17_found:
+	; Copy new name over old
+	mov	di, si			; DI = dir entry
+	mov	si, wild_pattern
+	mov	cx, 11
+	rep	movsb
+	call	write_resolved_dir
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	xor	al, al
+	iret
+.i21_17_fail:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	al, 0xFF
+	iret
+
+; --- AH=27: Random block read (FCB) ---
+; Input: DS:DX = opened FCB, CX = number of records
+; Returns: AL=0 all read, AL=1 EOF, AL=3 partial, CX = records actually read
+.i21_27:
+	; FCB block read: read CX records starting at random record
+	; Set block/record from random record, then loop AH=14 via INT 21h
+	mov	[cs:.i21_27_count], cx
+	mov	word [cs:.i21_27_done], 0
+	mov	[cs:.i21_27_fcb_off], dx	; Save FCB offset
+	; Save DTA
+	mov	ax, [cs:dta_off]
+	mov	[cs:.i21_27_dta_off], ax
+	mov	ax, [cs:dta_seg]
+	mov	[cs:.i21_27_dta_seg], ax
+	; Save SI = FCB pointer
+	push	si
+	mov	si, dx
+.i21_27_loop:
+	mov	cx, [cs:.i21_27_count]
+	cmp	word [cs:.i21_27_done], cx
+	jae	.i21_27_ok
+	; Set block/record from random record
+	push	bx
+	push	dx
+	mov	ax, [si+0x21]
+	xor	dx, dx
+	mov	bx, 128
+	div	bx
+	mov	[si+0x0C], ax		; Block
+	mov	[si+0x20], dl		; Record
+	pop	dx
+	pop	bx
+	; Call AH=14 (sequential read) — DX must point to FCB
+	mov	dx, [cs:.i21_27_fcb_off]
+	mov	ah, 0x14
+	int	0x21
+	cmp	al, 1
+	je	.i21_27_eof
+	; Advance DTA by record size
+	push	bx
+	mov	bx, [si+0x0E]
+	add	[cs:dta_off], bx
+	pop	bx
+	; Advance random record
+	inc	word [si+0x21]
+	inc	word [cs:.i21_27_done]
+	jmp	.i21_27_loop
+.i21_27_ok:
+	mov	al, 0
+	jmp	.i21_27_ret
+.i21_27_eof:
+	mov	al, 1
+.i21_27_ret:
+	; Restore DTA
+	push	ax
+	mov	ax, [cs:.i21_27_dta_off]
+	mov	[cs:dta_off], ax
+	mov	ax, [cs:.i21_27_dta_seg]
+	mov	[cs:dta_seg], ax
+	pop	ax
+	mov	cx, [cs:.i21_27_done]
+	pop	si
+	iret
+.i21_27_count:	dw	0
+.i21_27_done:	dw	0
+.i21_27_dta_off: dw	0
+.i21_27_dta_seg: dw	0
+.i21_27_fcb_off: dw	0
+
+; --- AH=28: Random block write (FCB) ---
+; Input: DS:DX = opened FCB, CX = number of records (0 = set file size)
+; Returns: AL=0 success, AL=1 disk full, CX = records actually written
+.i21_28:
+	; CX=0 means set file size to random_record * record_size
+	push	si
+	mov	si, dx
+	or	cx, cx
+	jnz	.i21_28_write
+	; Set file size only (truncate)
+	mov	ax, [si+0x21]		; Random record
+	mov	bx, [si+0x0E]		; Record size
+	mul	bx			; DX:AX = new file size
+	mov	[si+0x10], ax
+	mov	[si+0x12], dx
+	xor	cx, cx
+	xor	al, al
+	pop	si
+	iret
+.i21_28_write:
+	mov	[cs:.i21_28_count], cx
+	mov	word [cs:.i21_28_done], 0
+	mov	[cs:.i21_28_fcb_off], dx
+	mov	ax, [cs:dta_off]
+	mov	[cs:.i21_28_dta_off], ax
+	mov	ax, [cs:dta_seg]
+	mov	[cs:.i21_28_dta_seg], ax
+.i21_28_loop:
+	mov	cx, [cs:.i21_28_count]
+	cmp	word [cs:.i21_28_done], cx
+	jae	.i21_28_ok
+	; Set block/record from random record
+	push	bx
+	push	dx
+	mov	ax, [si+0x21]
+	xor	dx, dx
+	mov	bx, 128
+	div	bx
+	mov	[si+0x0C], ax
+	mov	[si+0x20], dl
+	pop	dx
+	pop	bx
+	; Call AH=15 (sequential write) — DX must point to FCB
+	mov	dx, [cs:.i21_28_fcb_off]
+	mov	ah, 0x15
+	int	0x21
+	cmp	al, 0
+	jne	.i21_28_full
+	; Advance DTA
+	push	bx
+	mov	bx, [si+0x0E]
+	add	[cs:dta_off], bx
+	pop	bx
+	; Advance random record
+	inc	word [si+0x21]
+	inc	word [cs:.i21_28_done]
+	jmp	.i21_28_loop
+.i21_28_ok:
+	mov	al, 0
+	jmp	.i21_28_ret
+.i21_28_full:
+	mov	al, 1
+.i21_28_ret:
+	push	ax
+	mov	ax, [cs:.i21_28_dta_off]
+	mov	[cs:dta_off], ax
+	mov	ax, [cs:.i21_28_dta_seg]
+	mov	[cs:dta_seg], ax
+	pop	ax
+	mov	cx, [cs:.i21_28_done]
+	pop	si
+	iret
+.i21_28_count:	dw	0
+.i21_28_done:	dw	0
+.i21_28_dta_off: dw	0
+.i21_28_dta_seg: dw	0
+.i21_28_fcb_off: dw	0
+
+; --- AH=50: Set current PSP ---
+; Input: BX = new PSP segment
+.i21_50:
+	mov	[cs:exec_seg], bx
+	iret
+
+; --- AH=51: Get current PSP ---
+; Output: BX = current PSP segment (same as AH=62)
+.i21_51:
+	mov	bx, [cs:exec_seg]
+	iret
+
+; --- AH=5B: Create new file (fail if exists) ---
+; Input: CX = attributes, DS:DX = ASCIIZ filename
+; Output: AX = handle, CF=0 / CF=1 AX=error (80 = file exists)
+.i21_5b:
+	; First check if file exists using AH=4E (FindFirst)
+	push	cx
+	push	dx
+	push	ds
+	mov	ah, 0x4E
+	mov	cx, 0x27		; All attributes
+	int	0x21
+	pop	ds
+	pop	dx
+	pop	cx
+	jc	.i21_5b_create		; Not found — good, create it
+	; File exists — return error
+	mov	ax, 80			; File exists
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+.i21_5b_create:
+	; File doesn't exist — use AH=3C to create
+	mov	ah, 0x3C
+	int	0x21
+	iret				; CF and AX already set by AH=3C
 
 ; --- AH=2B: Set date ---
 ; Input: CX=year, DH=month, DL=day

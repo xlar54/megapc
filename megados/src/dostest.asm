@@ -738,7 +738,6 @@
 .t43_fail:
 	call	fail
 .t43_done:
-
 	; === 44. FCB sequential write (AH=15) ===
 	; Test: create file via handle, write "HELLO", close,
 	;       then open via FCB and read back with AH=14
@@ -809,7 +808,6 @@
 	int	0x21
 	call	fail
 .t44_done:
-
 	; === 45. FCB random read (AH=21) ===
 	; Open CHILD.COM, set random record=0, read, check first byte = 0xB8
 	mov	si, t_fcbrand_r
@@ -848,7 +846,6 @@
 .t45_fail:
 	call	fail
 .t45_done:
-
 	; === 46. FCB random write (AH=22) ===
 	; Create file, write "TEST!" at record 0, read back, verify
 	mov	si, t_fcbrand_w
@@ -919,6 +916,170 @@
 	int	0x21
 	call	fail
 .t46_done:
+	; === 47. FCB rename (AH=17) ===
+	mov	si, t_fcbren
+	call	pstr
+	; Create a file to rename
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fcb_tmpname
+	int	0x21
+	jc	.t47_fail
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	; Build rename FCB: old name at +1, new name at +17
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BT'
+	mov	word [test_fcb+5], 'ES'
+	mov	word [test_fcb+7], 'T '
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	; New name at offset 17
+	mov	word [test_fcb+17], 'FC'
+	mov	word [test_fcb+19], 'BR'
+	mov	word [test_fcb+21], 'EN'
+	mov	word [test_fcb+23], ' '
+	mov	byte [test_fcb+24], ' '
+	mov	word [test_fcb+25], 'TM'
+	mov	byte [test_fcb+27], 'P'
+	mov	ah, 0x17
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t47_fail
+	; Verify renamed file exists
+	mov	ah, 0x4E
+	mov	cx, 0
+	mov	dx, fcb_renname
+	int	0x21
+	jc	.t47_fail
+	; Clean up
+	mov	ah, 0x41
+	mov	dx, fcb_renname
+	int	0x21
+	call	pass
+	jmp	.t47_done
+.t47_fail:
+	mov	ah, 0x41
+	mov	dx, fcb_tmpname
+	int	0x21
+	mov	ah, 0x41
+	mov	dx, fcb_renname
+	int	0x21
+	call	fail
+.t47_done:
+	; === 48. Get/Set PSP (AH=51/50) ===
+	mov	si, t_getsetpsp
+	call	pstr
+	; Get current PSP
+	mov	ah, 0x51
+	int	0x21
+	mov	[.t48_saved_psp], bx
+	; Should match AH=62
+	mov	ah, 0x62
+	int	0x21
+	cmp	bx, [.t48_saved_psp]
+	jne	.t48_fail
+	; Set PSP then get it back
+	mov	bx, 0x1234
+	mov	ah, 0x50
+	int	0x21
+	mov	ah, 0x51
+	int	0x21
+	cmp	bx, 0x1234
+	jne	.t48_fail
+	; Restore original
+	mov	bx, [.t48_saved_psp]
+	mov	ah, 0x50
+	int	0x21
+	call	pass
+	jmp	.t48_done
+.t48_fail:
+	; Restore original PSP
+	mov	bx, [.t48_saved_psp]
+	mov	ah, 0x50
+	int	0x21
+	call	fail
+.t48_done:
+	jmp	.t48_skip_data
+.t48_saved_psp:	dw	0
+.t48_skip_data:
+
+	; === 49. Create new file (AH=5B) ===
+	mov	si, t_createnew
+	call	pstr
+	; First create should succeed
+	mov	ah, 0x5B
+	xor	cx, cx
+	mov	dx, fcb_tmpname
+	int	0x21
+	jc	.t49_fail
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	; Second create should fail (file exists)
+	mov	ah, 0x5B
+	xor	cx, cx
+	mov	dx, fcb_tmpname
+	int	0x21
+	jnc	.t49_fail_close		; Should have failed
+	cmp	ax, 80			; Error = file exists
+	jne	.t49_fail
+	; Clean up
+	mov	ah, 0x41
+	mov	dx, fcb_tmpname
+	int	0x21
+	call	pass
+	jmp	.t49_done
+.t49_fail_close:
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+.t49_fail:
+	mov	ah, 0x41
+	mov	dx, fcb_tmpname
+	int	0x21
+	call	fail
+.t49_done:
+
+	; === 50. FCB block read (AH=27) ===
+	; Open CHILD.COM via FCB, block read 5 records of 1 byte each
+	mov	si, t_blkread
+	call	pstr
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'CH'
+	mov	word [test_fcb+3], 'IL'
+	mov	word [test_fcb+5], 'D '
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'CO'
+	mov	byte [test_fcb+11], 'M'
+	mov	ah, 0x0F
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t50_fail
+	; Set record size = 1, random record = 0
+	mov	word [test_fcb+0x0E], 1
+	mov	word [test_fcb+0x21], 0
+	mov	word [test_fcb+0x23], 0
+	; Clear DTA
+	mov	byte [0x0080], 0
+	; Block read 5 records
+	mov	cx, 5
+	mov	ah, 0x27
+	mov	dx, test_fcb
+	int	0x21
+	cmp	cx, 5
+	jne	.t50_fail
+	cmp	byte [0x0080], 0xB8
+	jne	.t50_fail
+	call	pass
+	jmp	.t50_done
+.t50_fail:
+	call	fail
+.t50_done:
 
 	; === Summary ===
 	call	nl
@@ -1049,10 +1210,15 @@ t_fcbread	db	'43. FCB seq read', 0
 t_fcbwrite	db	'44. FCB seq write', 0
 t_fcbrand_r	db	'45. FCB rand read', 0
 t_fcbrand_w	db	'46. FCB rand write', 0
+t_fcbren	db	'47. FCB rename', 0
+t_getsetpsp	db	'48. Get/Set PSP', 0
+t_createnew	db	'49. Create new file', 0
+t_blkread	db	'50. FCB block read', 0
 
 fname		db	'DOSTEST.TMP', 0
 fcb_tmpname	db	'FCBTEST.TMP', 0
 fcb_tmp2name	db	'FCBTEST2.TMP', 0
+fcb_renname	db	'FCBREN.TMP', 0
 t44_data	db	'HELLO'
 child_fname	db	'CHILD.COM', 0
 exec_pb		times 14 db 0		; EXEC parameter block
