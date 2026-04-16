@@ -249,8 +249,8 @@
 	jc	.sk1_err
 	mov	[handle1], ax
 	; Read 2 bytes (position now at 2)
+	mov	bx, [handle1]
 	mov	ah, 0x3F
-	mov	bx, ax
 	mov	cx, 2
 	mov	dx, readbuf
 	int	0x21
@@ -298,9 +298,8 @@
 	jc	.sk2_err
 	mov	[handle1], ax
 	; Seek -1 from end (method 2) — CX:DX = FFFF:FFFF = -1
-	mov	ah, 0x42
-	mov	al, 2
-	mov	bx, ax
+	mov	bx, [handle1]
+	mov	ax, 0x4202
 	mov	cx, 0xFFFF
 	mov	dx, 0xFFFF
 	int	0x21
@@ -360,9 +359,8 @@
 	jc	.tr_err
 	mov	[handle1], ax
 	; Seek to position 2
-	mov	ah, 0x42
-	mov	al, 0
-	mov	bx, ax
+	mov	bx, [handle1]
+	mov	ax, 0x4200
 	xor	cx, cx
 	mov	dx, 2
 	int	0x21

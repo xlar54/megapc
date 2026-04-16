@@ -5789,7 +5789,18 @@ int21_handler:
 	pop	cx
 
 .i21_40_write_done:
-	; File size is updated by close handler from file pointer
+	; Update file size if pointer exceeds it
+	mov	ax, [cs:file_handles + si + 8]	; File pointer low
+	cmp	ax, [cs:file_handles + si + 12]	; Compare to size low
+	mov	ax, [cs:file_handles + si + 10]	; File pointer high
+	sbb	ax, [cs:file_handles + si + 14]	; Compare to size high (with borrow)
+	jb	.i21_40_size_ok			; Pointer < size, no update
+	; Pointer >= size: update size to match pointer
+	mov	ax, [cs:file_handles + si + 8]
+	mov	[cs:file_handles + si + 12], ax
+	mov	ax, [cs:file_handles + si + 10]
+	mov	[cs:file_handles + si + 14], ax
+.i21_40_size_ok:
 	mov	ds, [cs:.i21_40_ds]
 	mov	ax, [cs:.i21_40_written]
 	pop	es
