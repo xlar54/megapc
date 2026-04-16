@@ -4272,7 +4272,7 @@ do_exec:
 	push	cx
 	mov	di, 0x18
 	mov	al, 0xFF
-	mov	cx, 20
+	mov	cx, MAX_HANDLES
 	rep	stosb
 	pop	cx
 	pop	di
@@ -4286,8 +4286,8 @@ do_exec:
 	mov	ax, [env_seg]
 	mov	[es:0x2C], ax
 
-	; PSP:32 — Max file handles
-	mov	word [es:0x32], 20
+	; PSP:32 — Max file handles (must match MAX_HANDLES)
+	mov	word [es:0x32], MAX_HANDLES
 	; PSP:34 — Pointer to handle table (default: PSP:18)
 	mov	word [es:0x34], 0x18
 	mov	ax, [exec_seg]
@@ -5076,6 +5076,13 @@ int21_handler:
 	mov	word [cs:file_handles + di + 10], 0
 	mov	word [cs:file_handles + di + 12], 0 ; File size = 0
 	mov	word [cs:file_handles + di + 14], 0
+	; Set JFT entry and refcount
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	bx, [cs:.i21_3c_handle]
+	mov	[es:0x18 + bx], bl	; JFT[handle] = SFT index (same number)
+	mov	byte [cs:sft_refcount + bx], 1
+	pop	es
 
 	pop	ds			; Restore caller's DS
 	mov	ax, [cs:.i21_3c_handle]
@@ -5258,6 +5265,15 @@ int21_handler:
 	mov	ax, [si+30]
 	mov	[cs:file_handles + di + 14], ax
 
+	; Set JFT entry and refcount
+	pop	bx			; Handle number
+	push	bx
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	[es:0x18 + bx], bl	; JFT[handle] = SFT index
+	mov	byte [cs:sft_refcount + bx], 1
+	pop	es
+
 	; Load FAT (needed for cluster chain traversal)
 	call	read_fat
 
@@ -5307,10 +5323,26 @@ int21_handler:
 	push	ds
 	push	es
 
-	mov	ax, bx
+	; Look up SFT index from JFT
+	mov	es, [cs:exec_seg]
+	mov	al, [es:0x18 + bx]
+	cmp	al, 0xFF
+	je	.i21_3e_just_close_noref	; Already closed
+	; Mark JFT entry as closed
+	mov	byte [es:0x18 + bx], 0xFF
+	; Decrement refcount
+	xor	ah, ah
+	mov	si, ax			; SI = SFT index
+	cmp	byte [cs:sft_refcount + si], 0
+	je	.i21_3e_just_close_noref
+	dec	byte [cs:sft_refcount + si]
+	jnz	.i21_3e_just_close_noref ; Other handles still reference this SFT entry
+	; Refcount = 0: actually close the SFT entry
+	; Convert SFT index to table offset
+	push	cx
 	mov	cl, 4
-	shl	ax, cl
-	mov	si, ax			; SI = handle offset
+	shl	si, cl
+	pop	cx
 
 	; Check if file was opened for write — update directory with file size
 	cmp	byte [cs:file_handles + si], 2
@@ -5353,8 +5385,8 @@ int21_handler:
 	call	write_resolved_dir
 
 .i21_3e_just_close:
-	mov	byte [cs:file_handles + si], 0	; Mark closed
-
+	mov	byte [cs:file_handles + si], 0	; Mark SFT entry closed
+.i21_3e_just_close_noref:
 	pop	es
 	pop	ds
 	pop	di
@@ -5379,11 +5411,6 @@ int21_handler:
 ; Input: BX = handle, CX = bytes to read, DS:DX = buffer
 ; Output: AX = bytes actually read, CF=0
 .i21_3f:
-	; Check for device handles (0-4 = CON/AUX/PRN)
-	cmp	bx, 0
-	je	.i21_3f_stdin		; stdin — keyboard input
-	cmp	bx, 5
-	jb	.i21_3f_stdin		; handles 1-4 also read from console
 	cmp	bx, MAX_HANDLES
 	jae	.i21_3f_bad
 
@@ -5391,13 +5418,19 @@ int21_handler:
 	push	di
 	push	es
 
-	; Get handle entry
-	mov	ax, bx
-	push	cx
-	mov	cl, 4
-	shl	ax, cl
-	pop	cx
-	mov	si, ax			; SI = handle table offset
+	; Get SFT entry via JFT lookup
+	call	handle_to_sft
+	jc	.i21_3f_bad_pop
+
+	; Check if this is a device (flag & 0x80)
+	test	byte [cs:file_handles + si], 0x80
+	jz	.i21_3f_not_device
+	; Device — pop saved regs and go to stdin handler
+	pop	es
+	pop	di
+	pop	si
+	jmp	.i21_3f_stdin
+.i21_3f_not_device:
 
 	; Check handle is open
 	cmp	byte [cs:file_handles + si], 0
@@ -5605,10 +5638,6 @@ int21_handler:
 ; Input: BX = handle, CX = bytes, DS:DX = buffer
 ; Output: AX = bytes written
 .i21_40:
-	; Handle console devices — print to screen
-	; Handles 0-4 are all console/device output
-	cmp	bx, 5
-	jb	.i21_40_stdout
 	cmp	bx, MAX_HANDLES
 	jae	.i21_40_bad
 
@@ -5617,12 +5646,13 @@ int21_handler:
 	push	di
 	push	es
 
-	mov	ax, bx
-	push	cx
-	mov	cl, 4
-	shl	ax, cl
-	pop	cx
-	mov	si, ax			; SI = handle table offset
+	; Get SFT entry via JFT lookup
+	call	handle_to_sft
+	jc	.i21_40_bad_pop
+
+	; Check if this is a device (flag & 0x80)
+	test	byte [cs:file_handles + si], 0x80
+	jnz	.i21_40_stdout_pop	; Device → console output
 
 	cmp	byte [cs:file_handles + si], 0
 	je	.i21_40_bad_pop
@@ -5824,6 +5854,10 @@ int21_handler:
 	pop	bp
 	iret
 
+.i21_40_stdout_pop:
+	pop	es
+	pop	di
+	pop	si
 .i21_40_stdout:
 	; Print CX bytes from DS:DX to screen
 	push	si
@@ -5868,12 +5902,8 @@ int21_handler:
 	jae	.i21_42_bad
 	mov	[cs:.i21_42_method], al	; Save method before AL is clobbered
 	push	si
-	mov	ax, bx
-	push	cx
-	mov	cl, 4
-	shl	ax, cl
-	pop	cx
-	mov	si, ax
+	call	handle_to_sft
+	jc	.i21_42_bad_pop
 
 	; Validate handle is open
 	cmp	byte [cs:file_handles + si], 0
@@ -6415,40 +6445,49 @@ int21_handler:
 
 .i21_44_get:
 	; AL=0: Get device info for handle BX
-	cmp	bx, 5
-	jae	.i21_44_file
-	; Handles 0-4 are devices — return appropriate flags
-	cmp	bx, 0
+	cmp	bx, MAX_HANDLES
+	jae	.i21_44_bad_handle
+	push	si
+	call	handle_to_sft
+	jc	.i21_44_bad_handle_pop
+	; Check SFT flag for device
+	test	byte [cs:file_handles + si], 0x80
+	pop	si
+	jz	.i21_44_file
+	; It's a device — determine which type from SFT index
+	; SFT 0 = stdin, SFT 1-2 = stdout/stderr, SFT 3-4 = aux/prn
+	push	si
+	call	handle_to_sft
+	; SI = SFT offset. SFT index = SI / 16
+	push	cx
+	mov	cx, si
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1			; CX = SFT index
+	cmp	cx, 0
 	jne	.i21_44_not_stdin
 	mov	dx, 0x80C1		; stdin: ISDEV|ISCIN|BINARY
-	jmp	.i21_44_dev_ret
+	jmp	.i21_44_dev_done
 .i21_44_not_stdin:
-	cmp	bx, 2
+	cmp	cx, 2
 	ja	.i21_44_aux_prn
 	mov	dx, 0x80C2		; stdout/stderr: ISDEV|ISCOT|BINARY
-	jmp	.i21_44_dev_ret
+	jmp	.i21_44_dev_done
 .i21_44_aux_prn:
 	mov	dx, 0x80C0		; aux/prn: ISDEV|BINARY
-.i21_44_dev_ret:
+.i21_44_dev_done:
+	pop	cx
+	pop	si
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
+.i21_44_bad_handle_pop:
+	pop	si
+	jmp	.i21_44_bad_handle
 .i21_44_file:
-	; Validate handle is open
-	cmp	bx, MAX_HANDLES
-	jae	.i21_44_bad_handle
-	push	ax
-	push	cx
-	mov	ax, bx
-	mov	cl, 4
-	shl	ax, cl
-	mov	bx, ax
-	cmp	byte [cs:file_handles + bx], 0
-	pop	cx
-	pop	ax
-	je	.i21_44_bad_handle
 	mov	dx, 0x0000		; Disk file, not EOF
 	push	bp
 	mov	bp, sp
@@ -6529,44 +6568,34 @@ int21_handler:
 .i21_45:
 	cmp	bx, MAX_HANDLES
 	jae	.i21_45_err
-	; Find a free handle starting at 5
+	; Get the SFT index for the source handle from the JFT
 	push	cx
-	push	si
-	push	di
-	mov	si, 5 * FH_SIZE		; Source = BX's entry (computed below)
-	; First compute source offset
-	mov	ax, bx
-	mov	cl, 4
-	shl	ax, cl
-	mov	si, ax			; SI = source handle offset
-	; Find free handle
-	mov	di, 5 * FH_SIZE
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	al, [es:0x18 + bx]	; AL = SFT index of source handle
+	cmp	al, 0xFF
+	je	.i21_45_no_handle
+	; Find a free JFT slot (handle 5+)
+	mov	di, 5
 .i21_45_find:
-	cmp	di, MAX_HANDLES * FH_SIZE
+	cmp	di, MAX_HANDLES
 	jae	.i21_45_no_handle
-	cmp	byte [cs:file_handles + di], 0
+	cmp	byte [es:0x18 + di], 0xFF  ; Free slot?
 	je	.i21_45_got
-	add	di, FH_SIZE
+	inc	di
 	jmp	.i21_45_find
 .i21_45_got:
-	; Copy handle entry from SI to DI
-	push	cx
-	mov	cx, FH_SIZE
-.i21_45_copy:
-	mov	al, [cs:file_handles + si]
-	mov	[cs:file_handles + di], al
-	inc	si
-	inc	di
-	dec	cx
-	jnz	.i21_45_copy
-	pop	cx
-	; Return new handle number
+	; Point new JFT entry to same SFT index
+	mov	[es:0x18 + di], al	; New handle → same SFT entry
+	; Increment refcount
+	push	bx
+	xor	ah, ah
+	mov	bx, ax			; BX = SFT index
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+	; Return new handle number in AX
 	mov	ax, di
-	sub	ax, FH_SIZE		; Back to start of entry
-	mov	cl, 4
-	shr	ax, cl			; Convert offset to handle number
-	pop	di
-	pop	si
+	pop	es
 	pop	cx
 	push	bp
 	mov	bp, sp
@@ -6574,8 +6603,7 @@ int21_handler:
 	pop	bp
 	iret
 .i21_45_no_handle:
-	pop	di
-	pop	si
+	pop	es
 	pop	cx
 .i21_45_err:
 	mov	ax, 4			; Too many open files
@@ -6593,39 +6621,49 @@ int21_handler:
 	jae	.i21_46_err
 	cmp	cx, MAX_HANDLES
 	jae	.i21_46_err
-	push	si
-	push	di
+	push	es
+	mov	es, [cs:exec_seg]
+	; Get SFT index of source handle
+	mov	al, [es:0x18 + bx]
+	cmp	al, 0xFF
+	je	.i21_46_err_pop
+	; Decrement refcount of target's old SFT entry if it was open
+	push	bx
+	xor	ah, ah
+	mov	di, cx
+	mov	bl, [es:0x18 + di]
+	cmp	bl, 0xFF
+	je	.i21_46_target_closed
+	xor	bh, bh
+	cmp	byte [cs:sft_refcount + bx], 0
+	je	.i21_46_target_closed
+	dec	byte [cs:sft_refcount + bx]
+	jnz	.i21_46_target_closed
+	; Refcount hit 0 — mark SFT entry closed
 	push	cx
-	; Compute source offset
-	mov	ax, bx
 	mov	cl, 4
-	shl	ax, cl
-	mov	si, ax
-	; Compute target offset
-	pop	ax			; AX = original CX (target handle)
-	push	ax
-	mov	cl, 4
-	shl	ax, cl
-	mov	di, ax
-	; Close target if open
-	mov	byte [cs:file_handles + di], 0
-	; Copy source to target
-	mov	cx, FH_SIZE
-.i21_46_copy:
-	mov	al, [cs:file_handles + si]
-	mov	[cs:file_handles + di], al
-	inc	si
-	inc	di
-	dec	cx
-	jnz	.i21_46_copy
+	shl	bx, cl
+	mov	byte [cs:file_handles + bx], 0
 	pop	cx
-	pop	di
-	pop	si
+.i21_46_target_closed:
+	pop	bx
+	; Point target JFT entry to source's SFT index
+	mov	di, cx
+	mov	[es:0x18 + di], al
+	; Increment source's refcount
+	push	bx
+	xor	ah, ah
+	mov	bx, ax
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+	pop	es
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
+.i21_46_err_pop:
+	pop	es
 .i21_46_err:
 	mov	ax, 6			; Invalid handle
 	push	bp
@@ -8880,6 +8918,44 @@ int24_handler:
 	mov	al, 3		; Fail
 	iret
 
+; ============================================================================
+; handle_to_sft — Convert handle number to SFT table offset
+; ============================================================================
+; Input:  BX = handle number
+; Output: BX = SFT table offset (handle * FH_SIZE), or CF=1 if invalid
+;         Also checks JFT for DUP'd handles
+; Preserves all other registers
+; handle_to_sft — Convert handle number to SFT table offset
+; Input:  BX = handle number
+; Output: SI = SFT table offset, CF=0 on success
+;         CF=1 if invalid/closed handle
+; Preserves: AX, CX, DX, DI, ES
+handle_to_sft:
+	cmp	bx, MAX_HANDLES
+	jae	.hts_bad
+	push	es
+	push	bx
+	mov	es, [cs:exec_seg]
+	mov	bl, [es:0x18 + bx]	; BL = SFT index from JFT
+	cmp	bl, 0xFF
+	je	.hts_bad_pop
+	xor	bh, bh
+	mov	si, bx
+	push	cx
+	mov	cl, 4
+	shl	si, cl			; SI = SFT index * 16
+	pop	cx
+	pop	bx
+	pop	es
+	clc
+	ret
+.hts_bad_pop:
+	pop	bx
+	pop	es
+.hts_bad:
+	stc
+	ret
+
 print_string:
 	push	ax
 	push	bx
@@ -9220,6 +9296,9 @@ file_handles:
 	db	0x80, 0, 0,0, 0,0, 0,0, 0,0,0,0, 0,0,0,0
 	; Handles 5-7: available for files
 	times (MAX_HANDLES - 5) * FH_SIZE db 0
+sft_refcount:
+	db	1, 1, 1, 1, 1		; Device handles always refcount=1
+	times (MAX_HANDLES - 5) db 0	; File handles start at 0
 file_count:	dw	0
 dir_wide:	db	0
 dir_col:	db	0			; Column counter for wide mode
