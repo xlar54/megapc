@@ -39,6 +39,12 @@ if os.path.exists(TARGET_DIR):
     shutil.rmtree(TARGET_DIR)
 os.makedirs(TARGET_DIR)
 
+# Copy pre-built binaries from src/ to target/
+for prebuilt in ['GWBASIC.EXE']:
+    src_path = os.path.join(SRC_DIR, prebuilt)
+    if os.path.exists(src_path):
+        shutil.copy2(src_path, os.path.join(TARGET_DIR, prebuilt))
+
 
 def nasm_assemble(src_name, out_name):
     """Assemble a NASM source file to flat binary."""
@@ -77,6 +83,7 @@ nasm_assemble('trace21.asm', 'TRACE21.COM')
 nasm_assemble('hdltest.asm', 'HDLTEST.COM')
 nasm_assemble('dostest.asm', 'DOSTEST.COM')
 nasm_assemble('child.asm', 'CHILD.COM')
+nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
 nasm_assemble('hello.asm', 'hello_code.bin')
 
 # Build HELLO.EXE from hello_code.bin
@@ -302,7 +309,8 @@ next_cluster = 2 + shell_clusters
 
 extra_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
                'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
-               'DOSTEST.COM', 'CHILD.COM', 'HELLO.EXE', 'AUTOEXEC.BAT', 'README.TXT']
+               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'HELLO.EXE',
+               'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
 for fname in extra_files:
     fpath = os.path.join(TARGET_DIR, fname)

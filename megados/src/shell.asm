@@ -22,6 +22,7 @@ DATA_START_SEC	equ	12	; First data sector (cluster 2)
 SECS_PER_CLUST	equ	2	; Sectors per cluster
 FAT_SEC		equ	1	; First FAT sector
 TOTAL_SECS	equ	720	; Total sectors (360K)
+MEDIA_BYTE	equ	0xFD	; 360K floppy media descriptor
 MAX_CMD_LEN	equ	80
 MAX_DIR_ENTRIES	equ	112	; Root dir entries (subdir = 32 per cluster)
 DIR_BUF_SIZE	equ	ROOT_DIR_SECS * 512	; 3584 bytes
@@ -4803,6 +4804,24 @@ int21_handler:
 	je	.i21_2d
 	cmp	ah, 0x62
 	je	.i21_62
+	cmp	ah, 0x00
+	je	.i21_00
+	cmp	ah, 0x03
+	je	.i21_03
+	cmp	ah, 0x04
+	je	.i21_04
+	cmp	ah, 0x05
+	je	.i21_05
+	cmp	ah, 0x1B
+	je	.i21_1b
+	cmp	ah, 0x1C
+	je	.i21_1c
+	cmp	ah, 0x23
+	je	.i21_23
+	cmp	ah, 0x24
+	je	.i21_24
+	cmp	ah, 0x34
+	je	.i21_34
 	; Unhandled — just return
 	iret
 
@@ -8502,15 +8521,188 @@ int21_handler:
 ; Input: DS:DX = opened FCB
 ; Returns: AL=0 success, AL=1 EOF, AL=2 DTA too small, AL=3 partial
 .i21_14:
-	; Stub — return EOF
-	mov	al, 1
+	; FCB sequential read
+	; DS:DX = opened FCB, reads one record to DTA
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx			; SI = FCB in caller's DS
+
+	; Calculate byte offset = ((current_block * 128) + current_record) * record_size
+	mov	ax, [si+0x0C]		; Current block
+	mov	cl, 7
+	shl	ax, cl			; * 128
+	xor	ch, ch
+	mov	cl, [si+0x20]		; Current record
+	add	ax, cx			; AX = sequential record number
+	mov	bx, [si+0x0E]		; Record size
+	mul	bx			; DX:AX = byte offset
+
+	; Check if offset >= file size → EOF
+	cmp	dx, [si+0x12]		; Compare high word
+	ja	.i21_14_eof
+	jb	.i21_14_not_eof
+	cmp	ax, [si+0x10]		; Compare low word
+	jae	.i21_14_eof
+.i21_14_not_eof:
+
+	; Save record size and file offset for later
+	mov	[cs:.i21_14_offset], ax
+	mov	[cs:.i21_14_offset+2], dx
+	mov	[cs:.i21_14_recsize], bx
+
+	; Get drive from FCB (0=default, 1=A, 2=B)
+	mov	al, [si]
+	or	al, al
+	jnz	.i21_14_has_drive
+	mov	al, [cs:cur_drive]
+	inc	al
+.i21_14_has_drive:
+	dec	al
+	mov	[cs:resolved_drive], al
+
+	; Get start cluster from FCB
+	mov	bx, [si+0x1A]		; Start cluster
+	mov	[cs:exec_cluster], bx
+
+	; Save caller DS, FCB pointer
+	mov	[cs:.i21_14_fcb_off], si
+	mov	[cs:.i21_14_fcb_seg], ds
+
+	; Switch to SHELL_SEG
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+
+	; Read FAT
+	call	read_fat
+	jc	.i21_14_eof_restore
+
+	; Walk cluster chain to find the cluster containing our offset
+	mov	ax, [.i21_14_offset]
+	mov	dx, [.i21_14_offset+2]
+	; Bytes per cluster = SECS_PER_CLUST * 512 = 1024
+	; Divide DX:AX by 1024 to get cluster index
+	mov	cx, 10
+.i21_14_div_loop:
+	shr	dx, 1
+	rcr	ax, 1
+	dec	cx
+	jnz	.i21_14_div_loop
+	; AX = cluster index from start, DX should be 0
+	mov	cx, ax			; CX = clusters to skip
+	mov	ax, [exec_cluster]	; AX = start cluster
+	or	cx, cx
+	jz	.i21_14_at_cluster
+.i21_14_walk_chain:
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jae	.i21_14_eof_restore	; Past end of chain
+	dec	cx
+	jnz	.i21_14_walk_chain
+.i21_14_at_cluster:
+	; AX = cluster number containing our data
+	; Calculate offset within cluster
+	push	ax
+	mov	ax, [.i21_14_offset]
+	and	ax, 0x03FF		; Offset within 1024-byte cluster
+	mov	[cs:.i21_14_clust_off], ax
+	pop	ax
+
+	; Read this cluster into dir_buffer (read 2 sectors)
+	call	cluster_to_chs
+	mov	dl, [cs:resolved_drive]
+	mov	bx, dir_buffer
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	ah, 0x02
+	mov	al, SECS_PER_CLUST
+	int	0x13
+	jc	.i21_14_eof_restore
+
+	; Copy record_size bytes from dir_buffer+clust_off to DTA
+	mov	si, dir_buffer
+	add	si, [.i21_14_clust_off]
+	mov	di, [dta_off]
+	mov	es, [dta_seg]
+	mov	cx, [.i21_14_recsize]
+	; Don't read past cluster boundary
+	mov	ax, 1024
+	sub	ax, [.i21_14_clust_off]	; Bytes left in cluster
+	cmp	cx, ax
+	jbe	.i21_14_copy_ok
+	mov	cx, ax			; Clamp to cluster boundary
+.i21_14_copy_ok:
+	push	cx			; Save actual bytes copied
+	rep	movsb
+	pop	cx
+
+	; Advance record pointer in FCB
+	mov	ds, [cs:.i21_14_fcb_seg]
+	mov	si, [cs:.i21_14_fcb_off]
+	mov	al, [si+0x20]		; Current record
+	inc	al
+	cmp	al, 128
+	jb	.i21_14_no_block_inc
+	xor	al, al
+	inc	word [si+0x0C]		; Next block
+.i21_14_no_block_inc:
+	mov	[si+0x20], al
+
+	; Check if we read a partial record (past EOF)
+	mov	ax, [cs:.i21_14_offset]
+	add	ax, [cs:.i21_14_recsize]
+	mov	dx, [cs:.i21_14_offset+2]
+	adc	dx, 0
+	cmp	dx, [si+0x12]
+	ja	.i21_14_partial
+	jb	.i21_14_full
+	cmp	ax, [si+0x10]
+	ja	.i21_14_partial
+.i21_14_full:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	xor	al, al			; AL=0 success
 	iret
+
+.i21_14_partial:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	al, 3			; AL=3 partial record
+	iret
+
+.i21_14_eof_restore:
+.i21_14_eof:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	al, 1			; AL=1 EOF
+	iret
+
+.i21_14_offset:		dd	0
+.i21_14_recsize:	dw	0
+.i21_14_fcb_off:	dw	0
+.i21_14_fcb_seg:	dw	0
+.i21_14_clust_off:	dw	0
 
 ; --- AH=15: Sequential write (FCB) ---
 ; Input: DS:DX = opened FCB
 ; Returns: AL=0 success, AL=1 disk full, AL=2 DTA too small
 .i21_15:
-	; Stub — return disk full
+	; Stub — return disk full (write support would need cluster allocation)
 	mov	al, 1
 	iret
 
@@ -8521,6 +8713,179 @@ int21_handler:
 	; Stub — return error
 	mov	al, 0xFF
 	iret
+
+; --- AH=00: Terminate program ---
+; Same as INT 20h
+.i21_00:
+	mov	ah, 0x4C
+	xor	al, al
+	jmp	.i21_4c
+
+; --- AH=03: Auxiliary input ---
+; Returns: AL = character from AUX device
+.i21_03:
+	xor	al, al			; Return null
+	iret
+
+; --- AH=04: Auxiliary output ---
+; Input: DL = character to output to AUX
+.i21_04:
+	iret				; Ignore
+
+; --- AH=05: Printer output ---
+; Input: DL = character to print
+.i21_05:
+	iret				; Ignore
+
+; --- AH=1B: Get allocation info for default drive ---
+; Returns: AL=sectors/cluster, CX=bytes/sector, DX=total clusters, DS:BX=media byte
+.i21_1b:
+	push	cs
+	pop	ds
+	mov	bx, .i21_1b_media
+	mov	al, SECS_PER_CLUST
+	mov	cx, 512
+	mov	dx, (TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST
+	iret
+.i21_1b_media:	db	MEDIA_BYTE
+
+; --- AH=1C: Get allocation info for specific drive ---
+; Input: DL = drive (0=default, 1=A, 2=B)
+; Returns: same as AH=1B
+.i21_1c:
+	jmp	.i21_1b			; Same drive, same geometry
+
+; --- AH=23: Get file size (FCB) ---
+; Input: DS:DX = unopened FCB
+; Output: AL=0 found (random record = file size / record size), AL=FF not found
+.i21_23:
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	si, dx
+	; Open via FCB to get file size
+	mov	al, [si]
+	or	al, al
+	jnz	.i21_23_has_drv
+	mov	al, [cs:cur_drive]
+	inc	al
+.i21_23_has_drv:
+	dec	al
+	mov	[cs:resolved_drive], al
+	; Copy 8.3 name
+	push	si
+	inc	si
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	di, exec_fname
+	mov	cx, 11
+.i21_23_copy:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	dec	cx
+	jnz	.i21_23_copy
+	pop	si
+	; Search directory
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+	call	read_resolved_dir
+	jc	.i21_23_fail
+	push	si
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_23_search:
+	mov	al, [si]
+	cmp	al, 0
+	je	.i21_23_nf
+	cmp	al, 0xE5
+	je	.i21_23_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_23_found
+.i21_23_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_23_search
+.i21_23_nf:
+	pop	si
+.i21_23_fail:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	al, 0xFF
+	iret
+.i21_23_found:
+	; SI = dir entry, file size at [SI+28..31]
+	mov	ax, [si+28]		; Size low
+	mov	dx, [si+30]		; Size high
+	pop	si			; SI = caller's FCB
+	pop	ds			; Restore caller DS
+	; Record size is at FCB+0x0E
+	mov	cx, [si+0x0E]
+	or	cx, cx
+	jz	.i21_23_done_zero
+	; Random record = ceil(file_size / record_size)
+	; DX:AX / CX
+	div	cx			; AX = quotient, DX = remainder
+	or	dx, dx
+	jz	.i21_23_no_round
+	inc	ax			; Round up
+.i21_23_no_round:
+	; Store in FCB random record field (3 bytes at +0x21)
+	mov	[si+0x21], ax
+	mov	byte [si+0x23], 0
+.i21_23_done_zero:
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	xor	al, al
+	iret
+
+; --- AH=24: Set random record field (FCB) ---
+; Input: DS:DX = opened FCB
+; Sets FCB random record = (current_block * 128) + current_record
+.i21_24:
+	push	si
+	push	cx
+	mov	si, dx
+	mov	ax, [si+0x0C]		; Current block
+	mov	cl, 7
+	shl	ax, cl			; * 128
+	xor	ch, ch
+	mov	cl, [si+0x20]		; Current record
+	add	ax, cx
+	mov	[si+0x21], ax		; Random record low word
+	mov	word [si+0x23], 0	; Random record high byte (always 0 for small files)
+	pop	cx
+	pop	si
+	iret
+
+; --- AH=34: Get InDOS flag address ---
+; Returns: ES:BX = pointer to InDOS flag byte
+.i21_34:
+	mov	bx, SHELL_SEG
+	mov	es, bx
+	mov	bx, .i21_34_indos
+	iret
+.i21_34_indos:	db	0
 
 ; --- AH=2B: Set date ---
 ; Input: CX=year, DH=month, DL=day
@@ -9848,7 +10213,7 @@ dta_off:	dw	0x0080		; DTA offset
 
 ; File handle table — 8 handles (0-7), each 16 bytes
 ; Handles 0-4 are predefined (stdin/stdout/stderr/stdaux/stdprn)
-MAX_HANDLES	equ	8
+MAX_HANDLES	equ	20
 FH_SIZE		equ	16		; Bytes per handle entry
 
 ; Handle entry layout:

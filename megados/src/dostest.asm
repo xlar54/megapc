@@ -622,6 +622,120 @@
 	call	fail
 .t38_done:
 
+	; === 39. Get alloc info (AH=1B) ===
+	mov	si, t_allocinfo
+	call	pstr
+	push	ds
+	mov	ah, 0x1B
+	int	0x21
+	; AL=sectors/cluster, CX=bytes/sector, DX=total clusters
+	; NOTE: DS is changed by this call (points to media byte)
+	pop	ds
+	cmp	al, 2			; 2 sectors per cluster
+	jne	.t39_fail
+	cmp	cx, 512			; 512 bytes/sector
+	jne	.t39_fail
+	or	dx, dx			; Total clusters > 0
+	jz	.t39_fail
+	call	pass
+	jmp	.t39_done
+.t39_fail:
+	call	fail
+.t39_done:
+
+	; === 40. InDOS flag (AH=34) ===
+	mov	si, t_indos
+	call	pstr
+	mov	ah, 0x34
+	int	0x21
+	; ES:BX should be a valid pointer
+	mov	ax, es
+	push	cs
+	pop	es
+	or	ax, ax
+	jz	.t40_fail
+	call	pass
+	jmp	.t40_done
+.t40_fail:
+	call	fail
+.t40_done:
+
+	; === 41. FCB file size (AH=23) ===
+	mov	si, t_fcbsize
+	call	pstr
+	; Set up FCB for README.TXT
+	mov	byte [test_fcb], 0		; Default drive
+	mov	word [test_fcb+1], 'RE'
+	mov	word [test_fcb+3], 'AD'
+	mov	word [test_fcb+5], 'ME'
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'TX'
+	mov	byte [test_fcb+11], 'T'
+	mov	word [test_fcb+0x0E], 128	; Record size = 128
+	mov	ah, 0x23
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t41_fail
+	; Random record field should be > 0 (file has content)
+	mov	ax, [test_fcb+0x21]
+	or	ax, ax
+	jz	.t41_fail
+	call	pass
+	jmp	.t41_done
+.t41_fail:
+	call	fail
+.t41_done:
+
+	; === 42. FCB set random record (AH=24) ===
+	mov	si, t_fcbrand
+	call	pstr
+	; Set up FCB with known block/record
+	mov	word [test_fcb+0x0C], 1		; Block 1
+	mov	byte [test_fcb+0x20], 5		; Record 5
+	mov	ah, 0x24
+	mov	dx, test_fcb
+	int	0x21
+	; Random record should be (1 * 128) + 5 = 133
+	cmp	word [test_fcb+0x21], 133
+	jne	.t42_fail
+	call	pass
+	jmp	.t42_done
+.t42_fail:
+	call	fail
+.t42_done:
+
+	; === 43. FCB sequential read (AH=14) ===
+	mov	si, t_fcbread
+	call	pstr
+	; Open README.TXT via FCB
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'RE'
+	mov	word [test_fcb+3], 'AD'
+	mov	word [test_fcb+5], 'ME'
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'TX'
+	mov	byte [test_fcb+11], 'T'
+	mov	ah, 0x0F
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 0
+	jne	.t43_fail
+	; Read first record
+	mov	ah, 0x14
+	mov	dx, test_fcb
+	int	0x21
+	cmp	al, 1			; EOF = fail
+	je	.t43_fail
+	; Check DTA has data (first byte should be 'S' from "Simple")
+	cmp	byte [0x0080], 'S'
+	jne	.t43_fail
+	call	pass
+	jmp	.t43_done
+.t43_fail:
+	call	fail
+.t43_done:
+
 	; === Summary ===
 	call	nl
 	mov	si, msg_summary
@@ -743,6 +857,11 @@ t_delete	db	'35. Delete file', 0
 t_vector	db	'36. Get vector', 0
 t_exec		db	'37. EXEC child', 0
 t_retcode	db	'38. Return code', 0
+t_allocinfo	db	'39. Alloc info', 0
+t_indos		db	'40. InDOS flag', 0
+t_fcbsize	db	'41. FCB file size', 0
+t_fcbrand	db	'42. FCB set random', 0
+t_fcbread	db	'43. FCB seq read', 0
 
 fname		db	'DOSTEST.TMP', 0
 child_fname	db	'CHILD.COM', 0
@@ -758,3 +877,4 @@ hdl2		dw	0
 alloc_seg	dw	0
 pathbuf		times 65 db 0
 readbuf		times 8 db 0
+test_fcb	times 37 db 0		; FCB for tests (37 bytes)
