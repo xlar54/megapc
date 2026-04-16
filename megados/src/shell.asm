@@ -4350,20 +4350,47 @@ do_exec:
 
 .load_cluster:
 	push	ax
-	call	cluster_to_chs
+	; Read cluster one sector at a time to avoid track boundary issues
+	sub	ax, 2
+	mov	cx, SECS_PER_CLUST
+	push	cx
+	mul	cx
+	add	ax, DATA_START_SEC	; AX = first linear sector
+	mov	[cs:exec_cur_sec], ax
+	pop	cx			; CX = sectors to read
+.load_sector:
+	push	cx
+	; Convert linear sector to CHS
+	mov	ax, [cs:exec_cur_sec]
+	xor	dx, dx
+	push	bx
+	mov	bx, 18			; SPT * heads
+	div	bx
+	mov	ch, al			; Cylinder
+	mov	ax, dx
+	xor	dx, dx
+	mov	bx, 9			; SPT
+	div	bx
+	mov	dh, al			; Head
+	mov	cl, dl
+	inc	cl			; Sector (1-based)
+	pop	bx
+	; Read 1 sector
 	push	es
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, 1
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	es
-	jc	.exec_disk_err_free
-
-	; Advance ES by cluster size (avoids 64K boundary crossing)
+	jc	.exec_disk_err_free_pop
+	; Advance buffer by 512 bytes (32 paragraphs)
 	mov	ax, es
-	add	ax, SECS_PER_CLUST * 512 / 16
+	add	ax, 512 / 16
 	mov	es, ax
-	; BX stays at same offset within each 1K window
+	inc	word [cs:exec_cur_sec]
+	pop	cx
+	dec	cx
+	jnz	.load_sector
 
 	pop	ax
 	call	fat12_next_cluster
@@ -4500,6 +4527,8 @@ do_exec:
 	call	print_string
 	jmp	cmd_loop
 
+.exec_disk_err_free_pop:
+	pop	cx			; Clean sector loop counter
 .exec_disk_err_free:
 	pop	ax			; Clean stack from push in load_cluster
 	; Free allocated memory
@@ -9254,6 +9283,7 @@ exe_load_seg:	dw	0
 exec_jmp_ip:	dw	0x0100		; For far jump to program
 exec_jmp_cs:	dw	0
 exec_try_ext:	db	0		; 0=done, 1=try EXE, 2=try BAT
+exec_cur_sec:	dw	0		; Current linear sector during exec load
 exec_cmdtail_ptr: dw	0		; Pointer to command tail in cmd_buffer
 env_seg:	dw	0		; Segment of environment block
 break_flag:	db	0		; Ctrl-C check flag
