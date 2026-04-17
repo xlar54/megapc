@@ -357,6 +357,37 @@ $B8000-$BFFFF  CGA video → bank 1 $18000
 $C0000-$CFFFF  Attic (BIOS shadow, NOT aliased to video)
 $F0000-$FFFFF  Bank 5 (BIOS ROM, write-protected)
 
+EDLIN.COM
+==========
+
+Line editor for MegaDOS, compatible with MS-DOS EDLIN command set.
+
+Implemented commands:
+  Line number   Edit specific line (show content, prompt replacement)
+  I             Insert mode (Ctrl-C exits, echoes ^C)
+  L             List lines (* marks current line)
+  P             Page display (like L but updates current line)
+  D             Delete line(s)
+  S             Search for string (case-sensitive)
+  R             Replace string (search^Zreplace, Ctrl-Z separator)
+  C             Copy block: first,last,dest[,count]C
+  M             Move block: first,last,destM
+  T             Transfer/merge file: [dest]Tfilename
+  E             Save and exit (creates .BAK backup)
+  Q             Quit without saving (Y/N confirm)
+  ?             Interactive modifier for S and R (O.K.? prompt)
+
+Line references: number, . (current), # (end+1), +n/-n (relative)
+
+Not implemented:
+  A             Append lines from disk (large file support)
+  W             Write lines to disk (counterpart to A)
+  Template keys F1-F5, Del, Ins (line editing with template buffer)
+  Ctrl-V        Enter control characters
+  Reuse previous search string (S/R with no string)
+
+Limits: 255 lines max, 253 chars per line.
+
 TODO
 =====
 
