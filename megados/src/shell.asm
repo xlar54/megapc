@@ -4757,6 +4757,11 @@ do_exec:
 	; Now allocate that largest block
 	call	alloc_mem_core
 	jc	.exec_no_mem
+	; Save parent's exec_seg before overwriting
+	push	bx
+	mov	bx, [exec_seg]
+	mov	[exec_parent_psp], bx
+	pop	bx
 	mov	[exec_seg], ax		; Save allocated segment
 
 	; Create PSP at allocated segment
@@ -4821,17 +4826,16 @@ do_exec:
 	; Fill all 20 with 0xFF (closed), then set standard handles
 	push	di
 	push	cx
+	; Inherit parent's JFT (copies redirected handles)
 	mov	di, 0x18
-	mov	al, 0xFF
+	push	ds
+	mov	ds, [cs:exec_parent_psp]
+	mov	si, 0x18
 	mov	cx, MAX_HANDLES
-	rep	stosb
+	rep	movsb
+	pop	ds
 	pop	cx
 	pop	di
-	mov	byte [es:0x18], 0x00	; handle 0 = stdin  (SFT 0)
-	mov	byte [es:0x19], 0x01	; handle 1 = stdout (SFT 1)
-	mov	byte [es:0x1A], 0x02	; handle 2 = stderr (SFT 2)
-	mov	byte [es:0x1B], 0x03	; handle 3 = stdaux (SFT 3)
-	mov	byte [es:0x1C], 0x04	; handle 4 = stdprn (SFT 4)
 
 	; PSP:2C — Environment segment
 	mov	ax, [env_seg]
@@ -10888,20 +10892,18 @@ int21_handler:
 	; PSP:16 Parent PSP
 	mov	ax, [cs:.i21_4b_parent_seg]
 	mov	[es:0x16], ax
-	; PSP:18 JFT
+	; PSP:18 JFT — inherit from parent
 	push	di
 	push	cx
+	push	ds
 	mov	di, 0x18
-	mov	al, 0xFF
+	mov	ds, [cs:.i21_4b_parent_seg]	; Parent PSP segment
+	mov	si, 0x18
 	mov	cx, MAX_HANDLES
-	rep	stosb
+	rep	movsb
+	pop	ds
 	pop	cx
 	pop	di
-	mov	byte [es:0x18], 0x00
-	mov	byte [es:0x19], 0x01
-	mov	byte [es:0x1A], 0x02
-	mov	byte [es:0x1B], 0x03
-	mov	byte [es:0x1C], 0x04
 	; PSP:2C Environment
 	; Use caller's environment or the parameter block env
 	push	bx
@@ -11129,16 +11131,27 @@ int21_handler:
 	; Save return code
 	xor	ah, ah
 	mov	[cs:last_return_code], ax
-	; Close all open file handles (5-7)
+	; Close file handles opened by the child (walk child's JFT)
+	; Only close handles 5+ that the child has open
 	push	bx
-	mov	bx, 5 * FH_SIZE
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	bx, 5
 .i21_4c_close:
-	cmp	bx, MAX_HANDLES * FH_SIZE
+	cmp	bx, MAX_HANDLES
 	jae	.i21_4c_closed
-	mov	byte [cs:file_handles + bx], 0
-	add	bx, FH_SIZE
+	cmp	byte [es:0x18 + bx], 0xFF
+	je	.i21_4c_close_next
+	; This handle is open — close it properly via AH=3E
+	push	bx
+	mov	ah, 0x3E
+	int	0x21
+	pop	bx
+.i21_4c_close_next:
+	inc	bx
 	jmp	.i21_4c_close
 .i21_4c_closed:
+	pop	es
 	pop	bx
 	; Free program's memory before returning to shell
 	; Free all blocks owned by exec_seg (the program's PSP segment)
@@ -11883,6 +11896,7 @@ redir_activate:
 	xor	cx, cx
 	xor	dx, dx
 	int	0x21
+	jc	.ra_out_fail_close
 	jmp	.ra_out_dup
 .ra_out_create:
 	mov	ah, 0x3C
@@ -11892,19 +11906,12 @@ redir_activate:
 	jc	.ra_out_err
 	mov	[redir_out_handle], ax
 .ra_out_dup:
-	; Directly point stdout (handle 1) at the file's SFT
-	push	es
-	mov	es, [exec_seg]
+	; DUP2: make handle 1 (stdout) point to the file
 	mov	bx, [redir_out_handle]
-	mov	al, [es:0x18 + bx]	; file handle's SFT index
-	mov	[es:0x19], al		; JFT[1] = same SFT
-	; Add one reference for stdout alias
-	xor	ah, ah
-	push	bx
-	mov	bx, ax
-	inc	byte [cs:sft_refcount + bx]
-	pop	bx
-	pop	es
+	mov	cx, 1
+	mov	ah, 0x46
+	int	0x21
+	jc	.ra_out_fail_close
 	jmp	.ra_no_out
 .ra_out_fail_close:
 	; DUP2 failed — close the file and cancel redirection
@@ -11924,19 +11931,17 @@ redir_activate:
 	int	0x21
 	jc	.ra_in_err
 	mov	[redir_in_handle], ax
-	; Directly point stdin (handle 0) at the file's SFT
-	push	es
-	mov	es, [exec_seg]
+	; DUP2: make handle 0 (stdin) point to the file
 	mov	bx, ax
-	mov	al, [es:0x18 + bx]	; file handle's SFT index
-	mov	[es:0x18], al		; JFT[0] = same SFT
-	xor	ah, ah
-	push	bx
-	mov	bx, ax
-	inc	byte [cs:sft_refcount + bx]
-	pop	bx
-	pop	es
+	mov	cx, 0
+	mov	ah, 0x46
+	int	0x21
+	jc	.ra_in_fail_close
 	jmp	.ra_no_in
+.ra_in_fail_close:
+	mov	bx, [redir_in_handle]
+	mov	ah, 0x3E
+	int	0x21
 .ra_in_err:
 	mov	byte [redir_in_active], 0
 .ra_no_in:
@@ -11950,25 +11955,20 @@ redir_restore:
 	cmp	byte [redir_out_mode], 0
 	je	.rr_no_out
 
-	; Restore original stdout JFT entry first
+	; Close handle 1 (redirected stdout alias) — refcount 2→1
+	mov	bx, 1
+	mov	ah, 0x3E
+	int	0x21
+
+	; Close the original redirect file handle — refcount 1→0, triggers dir update
+	mov	bx, [redir_out_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Restore original stdout JFT entry
 	mov	es, [exec_seg]
 	mov	al, [redir_save_stdout]
 	mov	[es:0x19], al
-
-	; Decrement the extra refcount we added for the stdout alias
-	mov	bx, [redir_out_handle]
-	push	bx
-	mov	bl, [es:0x18 + bx]	; SFT index
-	xor	bh, bh
-	cmp	byte [cs:sft_refcount + bx], 1
-	jbe	.rr_out_no_dec
-	dec	byte [cs:sft_refcount + bx]
-.rr_out_no_dec:
-	pop	bx
-
-	; Now close the redirect file handle (refcount should be 1 → hits 0)
-	mov	ah, 0x3E
-	int	0x21
 
 	mov	byte [redir_out_mode], 0
 .rr_no_out:
@@ -11977,25 +11977,20 @@ redir_restore:
 	cmp	byte [redir_in_active], 0
 	je	.rr_no_in
 
-	; Restore original stdin JFT entry first
+	; Close handle 0 (redirected stdin alias)
+	mov	bx, 0
+	mov	ah, 0x3E
+	int	0x21
+
+	; Close the original redirect input handle
+	mov	bx, [redir_in_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Restore original stdin JFT entry
 	mov	es, [exec_seg]
 	mov	al, [redir_save_stdin]
 	mov	[es:0x18], al
-
-	; Decrement extra refcount
-	mov	bx, [redir_in_handle]
-	push	bx
-	mov	bl, [es:0x18 + bx]
-	xor	bh, bh
-	cmp	byte [cs:sft_refcount + bx], 1
-	jbe	.rr_in_no_dec
-	dec	byte [cs:sft_refcount + bx]
-.rr_in_no_dec:
-	pop	bx
-
-	; Close the redirect input handle
-	mov	ah, 0x3E
-	int	0x21
 
 	mov	byte [redir_in_active], 0
 .rr_no_in:
@@ -12064,6 +12059,7 @@ batch_echo:	db	1		; Batch echo state (1=on, 0=off)
 mcb_first:	dw	PROG_SEG	; First MCB segment
 exec_cluster:	dw	0
 exec_size:	dd	0
+exec_parent_psp: dw	0		; Saved parent PSP for JFT inherit
 exec_seg:	dw	0		; Allocated segment for program
 		dw	0		; CS for EXE far jump
 		dw	0		; IP for EXE far jump
