@@ -949,24 +949,43 @@
 	int	0x21
 	cmp	al, 0
 	jne	.t47_fail
-	; Verify renamed file exists
-	mov	ah, 0x4E
-	mov	cx, 0
-	mov	dx, fcb_renname
+	; Delete the renamed file using FCB delete (AH=13)
+	; Set up FCB with the new name
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BR'
+	mov	word [test_fcb+5], 'EN'
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	mov	ah, 0x13
+	mov	dx, test_fcb
 	int	0x21
-	jc	.t47_fail
-	; Clean up
-	mov	ah, 0x41
-	mov	dx, fcb_renname
-	int	0x21
+	cmp	al, 0
+	jne	.t47_fail
 	call	pass
 	jmp	.t47_done
 .t47_fail:
-	mov	ah, 0x41
-	mov	dx, fcb_tmpname
+	; Try to clean up with FCB delete
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BT'
+	mov	word [test_fcb+5], 'ES'
+	mov	word [test_fcb+7], 'T '
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	mov	ah, 0x13
+	mov	dx, test_fcb
 	int	0x21
-	mov	ah, 0x41
-	mov	dx, fcb_renname
+	mov	byte [test_fcb], 0
+	mov	word [test_fcb+1], 'FC'
+	mov	word [test_fcb+3], 'BR'
+	mov	word [test_fcb+5], 'EN'
+	mov	word [test_fcb+7], '  '
+	mov	word [test_fcb+9], 'TM'
+	mov	byte [test_fcb+11], 'P'
+	mov	ah, 0x13
+	mov	dx, test_fcb
 	int	0x21
 	call	fail
 .t47_done:

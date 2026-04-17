@@ -8120,6 +8120,8 @@ int21_handler:
 	call	read_resolved_dir
 	jc	.i21_41_err
 	; Find the file
+	mov	ax, SHELL_SEG
+	mov	es, ax			; ES = SHELL_SEG for cmpsb
 	mov	si, dir_buffer
 	mov	cx, [resolved_dir_entries]
 .i21_41_search:
@@ -10184,6 +10186,8 @@ int21_handler:
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	; Read directory
+	mov	al, [cur_drive]
+	mov	[resolved_drive], al
 	mov	ax, [cur_dir_cluster]
 	mov	[resolved_dir_cluster], ax
 	mov	ax, [cur_dir_entries]
