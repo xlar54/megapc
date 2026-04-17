@@ -388,6 +388,38 @@ Not implemented:
 
 Limits: 255 lines max, 253 chars per line.
 
+MEGADOS I/O REDIRECTION
+========================
+
+Implemented: >, >>, < for built-in commands and external programs.
+Shell output goes through INT 21h AH=02h which checks if stdout
+is a device or file. AH=09h also routes through AH=02h.
+Child programs inherit parent JFT (including redirected handles).
+
+Limitations:
+  - No pipe (|) support
+  - No stderr (2>) redirection
+  - No quoted filenames or filenames with spaces
+  - Programs using INT 10h directly bypass redirection
+  - Redirected output is slow (one byte at a time through AH=40h)
+
+KNOWN BUGS
+===========
+
+- AH=41h (delete file) fails when called from a child program
+  (returns error 2 / file not found). Works correctly from shell
+  built-in DEL command. Root cause unknown — likely related to
+  resolve_path or cmd_buffer interaction with child segment context.
+  Workaround: use AH=13h (FCB delete) from programs.
+
+- GWBASIC.EXE won't run on MegaDOS. Clears screen then exits.
+  Suspected emulator-side issue with video mode change or
+  cache/execution state corruption. Works on real MS-DOS images.
+
+- AH=06h (direct console I/O) output is still intercepted by the
+  emulator for speed. Programs using AH=06h for output cannot be
+  redirected. Only AH=02h and AH=09h support redirection.
+
 TODO
 =====
 
