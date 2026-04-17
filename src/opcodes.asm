@@ -2828,14 +2828,11 @@ _ii_continue:
         jmp opcode_done
 
 _ii_int21:
-        ; Intercept console output functions. All else goes to DOS.
+        ; Only intercept AH=06 (direct console I/O output) for speed.
+        ; AH=02 and AH=09 must go through DOS handler for I/O redirection.
         lda reg_ah
-        cmp #$02
-        beq _ii_int21_ah02
         cmp #$06
         beq _ii_int21_ah06
-        cmp #$09
-        beq _ii_int21_ah09
         ; All other INT 21h functions: let DOS handle via IVT
         lda #$21
         jsr do_sw_interrupt

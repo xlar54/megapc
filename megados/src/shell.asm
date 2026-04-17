@@ -28,9 +28,14 @@ MAX_DIR_ENTRIES	equ	112	; Root dir entries (subdir = 32 per cluster)
 DIR_BUF_SIZE	equ	ROOT_DIR_SECS * 512	; 3584 bytes
 
 ; ============================================================================
-; Entry point
+; Entry point — jump over PSP-like header block
 ; ============================================================================
 start:
+
+; ============================================================================
+; Initialization
+; ============================================================================
+start_init:
 	; Set up our own stack
 	cli
 	mov	ax, SHELL_SEG
@@ -41,6 +46,9 @@ start:
 	; Set DS = CS = SHELL_SEG
 	push	cs
 	pop	ds
+
+	; Point exec_seg at our PSP (same segment, JFT at offset 0x18)
+	mov	word [exec_seg], SHELL_SEG
 
 	; Install interrupt vectors
 	xor	ax, ax
@@ -60,6 +68,10 @@ start:
 	; INT 24h — Critical error handler
 	mov	word [es:0x90], int24_handler
 	mov	word [es:0x92], SHELL_SEG
+
+	; Restore ES = SHELL_SEG
+	push	ds
+	pop	es
 
 	; Initialize memory management — create MCB chain
 	; First MCB at PROG_SEG (0x2000), one large free block
@@ -113,6 +125,39 @@ start:
 .env_failed:
 	mov	word [env_seg], 0
 .env_done:
+	; Allocate a paragraph block for the shell's own PSP
+	; We need at least 0x30 bytes (JFT at 0x18, 20 handles)
+	; Allocate 4 paragraphs (64 bytes) — plenty for a minimal PSP
+	mov	bx, 4
+	call	alloc_mem_core
+	jc	.psp_failed
+	mov	[exec_seg], ax
+	; Initialize the JFT at PSP:0x18
+	mov	es, ax
+	; Clear the PSP area
+	xor	di, di
+	xor	ax, ax
+	mov	cx, 32		; 64 bytes / 2
+	rep	stosw
+	; Set up JFT: handles 0-4 = SFT 0-4, rest = 0xFF
+	mov	byte [es:0x18], 0	; stdin
+	mov	byte [es:0x19], 1	; stdout
+	mov	byte [es:0x1A], 2	; stderr
+	mov	byte [es:0x1B], 3	; stdaux
+	mov	byte [es:0x1C], 4	; stdprn
+	mov	di, 0x1D
+	mov	al, 0xFF
+	mov	cx, MAX_HANDLES - 5
+	rep	stosb
+	; PSP:02 = memory top (not critical for shell)
+	; PSP:2C = environment segment
+	mov	ax, [env_seg]
+	mov	[es:0x2C], ax
+	jmp	.psp_done
+.psp_failed:
+	mov	word [exec_seg], 0
+.psp_done:
+
 	; Restore ES/DS
 	mov	ax, SHELL_SEG
 	mov	es, ax
@@ -130,6 +175,10 @@ cmd_loop:
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	mov	es, ax
+
+	; Restore redirected handles if active
+	call	redir_restore
+
 	cli
 	mov	ss, ax
 	mov	sp, 0xFFFE
@@ -418,6 +467,9 @@ cmd_loop:
 	mov	di, cmd_buffer
 	call	read_line
 
+	; Parse and set up I/O redirection before dispatch
+	call	redir_parse
+
 	; Skip leading spaces
 	mov	si, cmd_buffer
 	call	skip_spaces
@@ -425,6 +477,34 @@ cmd_loop:
 	; Empty line?
 	cmp	byte [si], 0
 	je	cmd_loop
+
+	; Activate redirection (open files, redirect handles)
+	; AH=3Ch inside redir_activate overwrites cmd_buffer, so save it first
+	push	si
+	push	di
+	push	cx
+	mov	si, cmd_buffer
+	mov	di, redir_cmd_save
+	mov	cx, MAX_CMD_LEN + 1
+	rep	movsb
+	pop	cx
+	pop	di
+	pop	si
+	call	redir_activate
+	; Restore cmd_buffer
+	push	si
+	push	di
+	push	cx
+	mov	si, redir_cmd_save
+	mov	di, cmd_buffer
+	mov	cx, MAX_CMD_LEN + 1
+	rep	movsb
+	pop	cx
+	pop	di
+	pop	si
+	; Re-parse SI from restored cmd_buffer
+	mov	si, cmd_buffer
+	call	skip_spaces
 
 cmd_dispatch:
 	; Check for built-in commands
@@ -992,12 +1072,7 @@ do_dir:
 	mov	byte [dir_col], 0
 
 	; Print volume header
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	push	si
 	mov	si, msg_vol_hdr
 	call	print_string
@@ -1008,31 +1083,18 @@ do_dir:
 	call	print_string
 	mov	al, [resolved_drive]
 	add	al, 'A'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, ':'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, '\'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	cmp	byte [dir_hdr_path], 0
 	je	.dir_hdr_no_path
 	mov	si, dir_hdr_path
 	call	print_string
 .dir_hdr_no_path:
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
+	call	shell_crlf
 	pop	si
 
 .dir_entry:
@@ -1069,21 +1131,18 @@ do_dir:
 	mov	cx, 8
 .print_name:
 	mov	al, [si]
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	inc	si
 	dec	cx
 	jnz	.print_name
 	; Space separator
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	; Print extension (3 chars)
 	mov	cx, 3
 .print_ext:
 	mov	al, [si]
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	inc	si
 	dec	cx
 	jnz	.print_ext
@@ -1100,10 +1159,9 @@ do_dir:
 	call	print_size_padded
 	; Three spaces after size
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
-	int	0x10
-	int	0x10
+	call	shell_putc
+	call	shell_putc
+	call	shell_putc
 	jmp	.dir_print_date
 
 .dir_show_dir:
@@ -1125,16 +1183,14 @@ do_dir:
 	and	ax, 0x0F
 	call	print_2digit_space
 	mov	al, '-'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	; Day
 	pop	ax
 	push	ax
 	and	ax, 0x1F
 	call	print_2digit
 	mov	al, '-'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	; Year
 	pop	ax
 	mov	cl, 9
@@ -1147,9 +1203,8 @@ do_dir:
 	call	print_2digit
 	; Two spaces
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
-	int	0x10
+	call	shell_putc
+	call	shell_putc
 	; Time
 	pop	si
 	push	si
@@ -1173,26 +1228,19 @@ do_dir:
 .dir_hr_ok:
 	call	print_2digit_space
 	mov	al, ':'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	mov	cl, 5
 	shr	ax, cl
 	and	ax, 0x3F
 	call	print_2digit
 	mov	al, bl
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	jmp	.dir_end_line
 .dir_no_date:
 .dir_no_time:
 .dir_end_line:
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	pop	si
 	pop	cx
 	inc	word [file_count]
@@ -1205,21 +1253,18 @@ do_dir:
 	mov	cx, 8
 .dir_w_name:
 	mov	al, [si]
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	inc	si
 	dec	cx
 	jnz	.dir_w_name
 	; Space
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	; Extension
 	mov	cx, 3
 .dir_w_ext:
 	mov	al, [si]
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	inc	si
 	dec	cx
 	jnz	.dir_w_ext
@@ -1227,8 +1272,7 @@ do_dir:
 	mov	cx, 4
 .dir_w_pad:
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	dec	cx
 	jnz	.dir_w_pad
 
@@ -1270,12 +1314,7 @@ do_dir:
 	je	.dir_done_summary
 	cmp	byte [dir_col], 0
 	je	.dir_done_summary
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 .dir_done_summary:
 	; Print summary
 	mov	ax, [file_count]
@@ -1317,20 +1356,10 @@ do_dir:
 	call	print_decimal_32
 	mov	si, msg_bytes_free
 	call	print_string
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 .dir_no_free:
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 .dir_error:
@@ -1346,12 +1375,7 @@ do_echo:
 	call	skip_spaces
 	call	print_string
 	; Print newline
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 ; ============================================================================
@@ -1489,9 +1513,7 @@ do_type:
 	je	.type_eof_pop
 .type_not_eof:
 	lodsb
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	shell_putc
 	; Decrement file size
 	sub	word [exec_size], 1
 	sbb	word [exec_size+2], 0
@@ -2334,14 +2356,11 @@ do_cd:
 	; No argument — print current path
 	mov	al, [cur_drive]
 	add	al, 'A'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, ':'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, '\'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	cmp	byte [cur_dir_pathlen], 0
 	je	.cd_print_nl
 	push	si
@@ -2349,12 +2368,7 @@ do_cd:
 	call	print_string
 	pop	si
 .cd_print_nl:
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 .cd_has_arg:
@@ -2965,20 +2979,13 @@ do_set:
 	mov	al, [es:si]
 	or	al, al
 	jz	.set_show_next
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	shell_putc
 	inc	si
 	jmp	.set_show_str
 .set_show_next:
 	inc	si			; Skip null terminator
 	; Print newline
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	.set_show_loop
 .set_show_done:
 	pop	si
@@ -3038,19 +3045,12 @@ do_set:
 	mov	al, [es:di]
 	or	al, al
 	jz	.set_prefix_printed
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	shell_putc
 	inc	di
 	jmp	.set_prefix_print
 .set_prefix_printed:
 	pop	di
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	.set_prefix_advance
 .set_prefix_skip:
 	pop	di
@@ -3334,14 +3334,12 @@ do_date:
 	mov	cx, 3
 .date_dow:
 	mov	al, [bx]
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	inc	bx
 	dec	cx
 	jnz	.date_dow
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	dx
 	pop	cx
 	pop	ax
@@ -3349,22 +3347,15 @@ do_date:
 	mov	al, dh			; Month
 	call	.print_2dig
 	mov	al, '-'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, dl			; Day
 	call	.print_2dig
 	mov	al, '-'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	ax, cx			; Year
 	call	.print_year
 	; Newline
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 .print_2dig:
@@ -3376,13 +3367,11 @@ do_date:
 	div	bl			; AL=tens, AH=ones
 	push	ax
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	mov	al, ah
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	bx
 	pop	ax
 	ret
@@ -3397,27 +3386,23 @@ do_date:
 	div	bx
 	push	dx
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	xor	dx, dx
 	mov	bx, 100
 	div	bx
 	push	dx
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	xor	dx, dx
 	mov	bx, 10
 	div	bx
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, dl
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	dx
 	pop	cx
 	pop	bx
@@ -3447,27 +3432,19 @@ do_time:
 	mov	al, ch			; Hour
 	call	do_date.print_2dig
 	mov	al, ':'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, cl			; Minute
 	call	do_date.print_2dig
 	mov	al, ':'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, dh			; Second
 	call	do_date.print_2dig
 	mov	al, '.'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	mov	al, dl			; Hundredths
 	call	do_date.print_2dig
 	; Newline
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 .time_msg:	db	'Current time is ', 0
@@ -4149,12 +4126,7 @@ batch_next_line:
 	push	si
 	mov	si, cmd_buffer
 	call	print_string
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	pop	si
 .bnl_skip_echo:
 
@@ -4187,12 +4159,7 @@ batch_next_line:
 	call	print_string
 	mov	ah, 0x00
 	int	0x16
-	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
-	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_crlf
 	jmp	cmd_loop
 
 .bnl_eof:
@@ -4210,13 +4177,11 @@ print_2digit:
 	div	bl			; AL = tens, AH = ones
 	push	ax
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	mov	al, ah
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	bx
 	pop	ax
 	ret
@@ -4238,13 +4203,11 @@ print_2digit_space:
 .p2ds_tens:
 	add	al, '0'
 .p2ds_print_tens:
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	mov	al, ah
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	bx
 	pop	ax
 	ret
@@ -4287,8 +4250,7 @@ print_size_padded:
 	jcxz	.psp_no_pad
 .psp_pad:
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	dec	cx
 	jnz	.psp_pad
 .psp_no_pad:
@@ -4357,8 +4319,7 @@ print_rpad_dec:
 .prpd_pad:
 	push	ax
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	pop	ax
 	dec	cx
 	jnz	.prpd_pad
@@ -5450,15 +5411,56 @@ int21_handler:
 
 ; --- AH=02: Display character (DL) ---
 .i21_02:
+	; Write character DL to stdout (handle 1)
+	; If handle 1 is a device, use INT 10h for speed
+	; If handle 1 is a file, use AH=40h to write
 	push	ax
 	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	bl, [es:0x18 + 1]	; JFT[1] = SFT index for stdout
+	xor	bh, bh
+	push	bx
+	mov	cl, 4
+	shl	bx, cl
+	test	byte [cs:file_handles + bx], 0x80
+	pop	bx
+	jnz	.i21_02_device
+	; File — write via AH=40h
+	mov	[cs:.i21_02_char], dl
+	pop	es
+	pop	si
+	mov	ah, 0x40
+	mov	bx, 1			; Handle 1 (stdout)
+	mov	cx, 1			; 1 byte
+	mov	dx, .i21_02_char
+	push	ds
+	push	cs
+	pop	ds
+	int	0x21
+	pop	ds
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	iret
+.i21_02_device:
+	; Device — use INT 10h teletype
+	pop	es
+	pop	si
 	mov	al, dl
 	mov	ah, 0x0E
 	mov	bx, 0x0007
 	int	0x10
+	pop	dx
+	pop	cx
 	pop	bx
 	pop	ax
 	iret
+.i21_02_char:	db	0
 
 ; --- AH=06: Direct console I/O ---
 ; DL=FF: input (ZF=1 if no char, AL=char if available)
@@ -5503,20 +5505,20 @@ int21_handler:
 ; --- AH=09: Print $-terminated string at DS:DX ---
 .i21_09:
 	push	ax
-	push	bx
+	push	dx
 	push	si
 	mov	si, dx
 .i21_09_loop:
 	lodsb
 	cmp	al, '$'
 	je	.i21_09_done
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	mov	dl, al
+	mov	ah, 0x02
+	int	0x21		; Recurse through AH=02 (handles redirection)
 	jmp	.i21_09_loop
 .i21_09_done:
 	pop	si
-	pop	bx
+	pop	dx
 	pop	ax
 	iret
 
@@ -6081,8 +6083,6 @@ int21_handler:
 .i21_3e:
 	cmp	bx, MAX_HANDLES
 	jae	.i21_3e_bad
-	cmp	bx, 5
-	jb	.i21_3e_ok
 	push	ax
 	push	cx
 	push	si
@@ -6141,7 +6141,7 @@ int21_handler:
 	; Search for entry with matching start cluster
 	mov	di, dir_buffer
 	mov	cx, [resolved_dir_entries]
-	mov	ax, [cs:file_handles + si + 2]	; Start cluster
+	mov	ax, [cs:file_handles + si + 2]	; Start cluster from SFT
 .i21_3e_search:
 	cmp	byte [di], 0
 	je	.i21_3e_not_found
@@ -6149,6 +6149,17 @@ int21_handler:
 	je	.i21_3e_next
 	cmp	[di+26], ax
 	je	.i21_3e_found
+	; Also match if dir entry has cluster 0 and file size 0
+	; (file was created empty, cluster allocated during write)
+	cmp	word [di+26], 0
+	jne	.i21_3e_next
+	cmp	word [di+28], 0
+	jne	.i21_3e_next
+	cmp	word [di+30], 0
+	jne	.i21_3e_next
+	; This is an empty entry — check if only one such entry exists
+	; to avoid ambiguity (skip for now, just take the first match)
+	jmp	.i21_3e_found
 .i21_3e_next:
 	add	di, 32
 	dec	cx
@@ -6159,6 +6170,9 @@ int21_handler:
 	jmp	.i21_3e_just_close
 
 .i21_3e_found:
+	; Update start cluster in directory entry (may have been allocated during write)
+	mov	ax, [cs:file_handles + si + 2]
+	mov	[di+26], ax
 	; Update file size in directory entry from file pointer
 	mov	ax, [cs:file_handles + si + 8]	; File pointer = actual bytes written
 	mov	[di+28], ax
@@ -6258,7 +6272,7 @@ int21_handler:
 	cmp	cx, 0
 	je	.i21_3f_done
 
-	; Read current cluster into dir_buffer
+	; Read current cluster into io_buffer (preserve dir_buffer)
 	mov	ax, [cs:file_handles + si + 4]	; Current cluster
 	cmp	ax, 0
 	je	.i21_3f_done
@@ -6273,7 +6287,7 @@ int21_handler:
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
-	mov	bx, dir_buffer
+	mov	bx, io_buffer
 	mov	ah, 0x02
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
@@ -6282,7 +6296,7 @@ int21_handler:
 	pop	cx
 	jc	.i21_3f_done
 
-	; Copy bytes from dir_buffer + cluster_offset to caller's buffer
+	; Copy bytes from io_buffer + cluster_offset to caller's buffer
 	mov	bx, [cs:file_handles + si + 6]	; Position in cluster
 	mov	di, [cs:.i21_3f_dx]	; Dest offset in caller's buffer
 
@@ -6293,7 +6307,7 @@ int21_handler:
 	jae	.i21_3f_next_cluster
 
 	; Copy one byte
-	mov	al, [dir_buffer + bx]
+	mov	al, [io_buffer + bx]
 	push	es
 	mov	es, [cs:.i21_3f_ds]
 	mov	[es:di], al
@@ -6487,10 +6501,10 @@ int21_handler:
 	cmp	cx, 0
 	je	.i21_40_write_done
 
-	; Read current cluster into dir_buffer (so we can modify it)
+	; Read current cluster into io_buffer (preserve dir_buffer)
 	mov	ax, [cs:file_handles + si + 4]
 	cmp	ax, 0
-	je	.i21_40_write_done
+	je	.i21_40_need_cluster	; No cluster yet — allocate first one
 	cmp	ax, 0xFF8
 	jae	.i21_40_need_cluster
 
@@ -6501,7 +6515,7 @@ int21_handler:
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
-	mov	bx, dir_buffer
+	mov	bx, io_buffer
 	mov	ah, 0x02
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
@@ -6509,7 +6523,7 @@ int21_handler:
 	pop	cx			; Restore byte count
 	jc	.i21_40_write_done
 
-	; Copy bytes from caller's buffer into dir_buffer
+	; Copy bytes from caller's buffer into io_buffer
 	mov	bx, [cs:file_handles + si + 6]	; Position in cluster
 	mov	di, [cs:.i21_40_dx]
 
@@ -6524,7 +6538,7 @@ int21_handler:
 	mov	es, [cs:.i21_40_ds]
 	mov	al, [es:di]
 	pop	es
-	mov	[dir_buffer + bx], al
+	mov	[io_buffer + bx], al
 	inc	bx
 	inc	di
 	dec	cx
@@ -6539,13 +6553,13 @@ int21_handler:
 	mov	[cs:file_handles + si + 6], bx
 	mov	[cs:.i21_40_dx], di
 
-	; Write cluster
+	; Write cluster from io_buffer
 	mov	ax, [cs:file_handles + si + 4]
 	push	cx			; Save byte count
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
-	mov	bx, dir_buffer
+	mov	bx, io_buffer
 	mov	ah, 0x03
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
@@ -6568,14 +6582,26 @@ int21_handler:
 	inc	ax
 	jmp	.i21_40_find_cl
 .i21_40_got_cl:
-	; Link previous cluster to this one
+	; AX = new free cluster
+	; Mark new cluster as EOF
 	push	ax
 	mov	bx, 0xFFF
-	call	fat12_write_cluster	; Mark new cluster as EOF
-	mov	ax, [cs:file_handles + si + 4]	; Previous cluster
+	call	fat12_write_cluster
+	; Check if this is the first cluster (previous = 0)
+	cmp	word [cs:file_handles + si + 4], 0
+	je	.i21_40_first_cl
+	; Link previous cluster → new
+	mov	ax, [cs:file_handles + si + 4]
 	pop	bx			; New cluster
 	push	bx
-	call	fat12_write_cluster	; Link previous → new
+	call	fat12_write_cluster
+	jmp	.i21_40_cl_done
+.i21_40_first_cl:
+	; First cluster — set as start cluster too
+	pop	ax
+	push	ax
+	mov	[cs:file_handles + si + 2], ax	; Start cluster
+.i21_40_cl_done:
 	call	write_fat
 	pop	ax
 	mov	[cs:file_handles + si + 4], ax	; Update current cluster
@@ -6588,7 +6614,7 @@ int21_handler:
 	pop	cx
 
 .i21_40_flush:
-	; Write current cluster back
+	; Write current cluster back from io_buffer
 	mov	[cs:file_handles + si + 6], bx
 	mov	[cs:.i21_40_dx], di
 
@@ -6599,7 +6625,7 @@ int21_handler:
 	call	cluster_to_chs
 	mov	ax, SHELL_SEG
 	mov	es, ax
-	mov	bx, dir_buffer
+	mov	bx, io_buffer
 	mov	ah, 0x03
 	mov	al, SECS_PER_CLUST
 	mov	dl, [resolved_drive]
@@ -7334,11 +7360,14 @@ int21_handler:
 	je	.i21_46_target_closed
 	dec	byte [cs:sft_refcount + bx]
 	jnz	.i21_46_target_closed
-	; Refcount hit 0 — mark SFT entry closed
+	; Refcount hit 0 — mark SFT entry closed (but not devices)
 	push	cx
 	mov	cl, 4
 	shl	bx, cl
+	test	byte [cs:file_handles + bx], 0x80
+	jnz	.i21_46_skip_clear	; Don't close device SFTs
 	mov	byte [cs:file_handles + bx], 0
+.i21_46_skip_clear:
 	pop	cx
 .i21_46_target_closed:
 	pop	bx
@@ -11443,19 +11472,37 @@ handle_to_sft:
 	stc
 	ret
 
+; shell_putc: output character in AL through stdout (INT 21h AH=02)
+; This ensures all shell output goes through handle 1 for redirection
+shell_putc:
+	push	ax
+	push	dx
+	mov	dl, al
+	mov	ah, 0x02
+	int	0x21
+	pop	dx
+	pop	ax
+	ret
+
+; shell_crlf: output CR+LF through stdout
+shell_crlf:
+	push	ax
+	mov	al, 0x0D
+	call	shell_putc
+	mov	al, 0x0A
+	call	shell_putc
+	pop	ax
+	ret
+
 print_string:
 	push	ax
-	push	bx
 .ps_loop:
 	lodsb
 	or	al, al
 	jz	.ps_done
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	shell_putc
 	jmp	.ps_loop
 .ps_done:
-	pop	bx
 	pop	ax
 	ret
 
@@ -11610,8 +11657,7 @@ print_decimal_32:
 .pd_print:
 	pop	ax
 	add	al, '0'
-	mov	ah, 0x0E
-	int	0x10
+	call	shell_putc
 	dec	cx
 	jnz	.pd_print
 
@@ -11684,6 +11730,288 @@ cmd_set		db	'SET', 0
 cmd_date	db	'DATE', 0
 cmd_time	db	'TIME', 0
 cmd_prompt	db	'PROMPT', 0
+
+; ============================================================================
+; I/O Redirection
+; ============================================================================
+
+; redir_parse: scan cmd_buffer for >, >>, < and extract filenames
+; Strips redirect syntax from cmd_buffer so commands don't see it
+redir_parse:
+	mov	byte [redir_out_mode], 0	; 0=none, 1=create, 2=append
+	mov	byte [redir_in_active], 0
+	mov	byte [redir_out_fname], 0
+	mov	byte [redir_in_fname], 0
+	mov	si, cmd_buffer
+.rp_scan:
+	lodsb
+	cmp	al, 0
+	je	.rp_done
+	cmp	al, '>'
+	je	.rp_out
+	cmp	al, '<'
+	je	.rp_in
+	jmp	.rp_scan
+.rp_out:
+	; Check for >> (append)
+	cmp	byte [si], '>'
+	jne	.rp_out_create
+	inc	si		; Skip second >
+	mov	byte [redir_out_mode], 2
+	jmp	.rp_out_copy
+.rp_out_create:
+	mov	byte [redir_out_mode], 1
+.rp_out_copy:
+	; Null-terminate cmd_buffer at the '>' position
+	mov	byte [si-1], 0
+	cmp	byte [redir_out_mode], 2
+	jne	.rp_out_copy2
+	mov	byte [si-2], 0		; Also null the first > for >>
+.rp_out_copy2:
+	; Skip spaces
+.rp_out_skip:
+	cmp	byte [si], ' '
+	jne	.rp_out_fname
+	inc	si
+	jmp	.rp_out_skip
+.rp_out_fname:
+	mov	di, redir_out_fname
+.rp_out_fc:
+	lodsb
+	cmp	al, ' '
+	je	.rp_out_fc_done
+	cmp	al, '<'
+	je	.rp_out_fc_in	; Output then input on same line
+	cmp	al, 0
+	je	.rp_out_fc_done
+	mov	[di], al
+	inc	di
+	jmp	.rp_out_fc
+.rp_out_fc_in:
+	mov	byte [di], 0
+	jmp	.rp_in		; Continue parsing input redirect
+.rp_out_fc_done:
+	mov	byte [di], 0
+	cmp	al, 0
+	je	.rp_done
+	jmp	.rp_scan
+.rp_in:
+	; Null-terminate cmd_buffer at '<'
+	mov	byte [si-1], 0
+	; Skip spaces
+.rp_in_skip:
+	cmp	byte [si], ' '
+	jne	.rp_in_fname
+	inc	si
+	jmp	.rp_in_skip
+.rp_in_fname:
+	mov	byte [redir_in_active], 1
+	mov	di, redir_in_fname
+.rp_in_fc:
+	lodsb
+	cmp	al, ' '
+	je	.rp_in_fc_done
+	cmp	al, '>'
+	je	.rp_in_fc_out
+	cmp	al, 0
+	je	.rp_in_fc_done
+	mov	[di], al
+	inc	di
+	jmp	.rp_in_fc
+.rp_in_fc_out:
+	mov	byte [di], 0
+	jmp	.rp_out
+.rp_in_fc_done:
+	mov	byte [di], 0
+	cmp	al, 0
+	je	.rp_done
+	jmp	.rp_scan
+.rp_done:
+	; Strip trailing spaces from cmd_buffer
+	mov	si, cmd_buffer
+.rp_find_end:
+	cmp	byte [si], 0
+	je	.rp_strip
+	inc	si
+	jmp	.rp_find_end
+.rp_strip:
+	dec	si
+	cmp	si, cmd_buffer
+	jb	.rp_ret
+	cmp	byte [si], ' '
+	jne	.rp_ret
+	mov	byte [si], 0
+	jmp	.rp_strip
+.rp_ret:
+	ret
+
+; redir_activate: open redirect files and swap handles
+redir_activate:
+	; Save original JFT entries for handles 0 and 1
+	push	es
+	mov	es, [exec_seg]
+	mov	al, [es:0x18]		; JFT[0] = stdin SFT index
+	mov	[redir_save_stdin], al
+	mov	al, [es:0x19]		; JFT[1] = stdout SFT index
+	mov	[redir_save_stdout], al
+	pop	es
+
+	; Handle output redirection
+	cmp	byte [redir_out_mode], 0
+	je	.ra_no_out
+	cmp	byte [redir_out_mode], 2
+	je	.ra_append
+	; Create/truncate
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, redir_out_fname
+	int	0x21
+	jc	.ra_out_err
+	mov	[redir_out_handle], ax
+	jmp	.ra_out_dup
+.ra_append:
+	; Open for write, seek to end
+	mov	ah, 0x3D
+	mov	al, 1		; Write
+	mov	dx, redir_out_fname
+	int	0x21
+	jc	.ra_out_create	; File doesn't exist — create it
+	mov	[redir_out_handle], ax
+	; Seek to end
+	mov	bx, ax
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jmp	.ra_out_dup
+.ra_out_create:
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, redir_out_fname
+	int	0x21
+	jc	.ra_out_err
+	mov	[redir_out_handle], ax
+.ra_out_dup:
+	; Directly point stdout (handle 1) at the file's SFT
+	push	es
+	mov	es, [exec_seg]
+	mov	bx, [redir_out_handle]
+	mov	al, [es:0x18 + bx]	; file handle's SFT index
+	mov	[es:0x19], al		; JFT[1] = same SFT
+	; Add one reference for stdout alias
+	xor	ah, ah
+	push	bx
+	mov	bx, ax
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+	pop	es
+	jmp	.ra_no_out
+.ra_out_fail_close:
+	; DUP2 failed — close the file and cancel redirection
+	mov	bx, [redir_out_handle]
+	mov	ah, 0x3E
+	int	0x21
+.ra_out_err:
+	mov	byte [redir_out_mode], 0
+.ra_no_out:
+
+	; Handle input redirection
+	cmp	byte [redir_in_active], 0
+	je	.ra_no_in
+	mov	ah, 0x3D
+	mov	al, 0		; Read
+	mov	dx, redir_in_fname
+	int	0x21
+	jc	.ra_in_err
+	mov	[redir_in_handle], ax
+	; Directly point stdin (handle 0) at the file's SFT
+	push	es
+	mov	es, [exec_seg]
+	mov	bx, ax
+	mov	al, [es:0x18 + bx]	; file handle's SFT index
+	mov	[es:0x18], al		; JFT[0] = same SFT
+	xor	ah, ah
+	push	bx
+	mov	bx, ax
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+	pop	es
+	jmp	.ra_no_in
+.ra_in_err:
+	mov	byte [redir_in_active], 0
+.ra_no_in:
+	ret
+
+; redir_restore: restore original handles if redirection was active
+redir_restore:
+	push	es
+
+	; Restore stdout
+	cmp	byte [redir_out_mode], 0
+	je	.rr_no_out
+
+	; Restore original stdout JFT entry first
+	mov	es, [exec_seg]
+	mov	al, [redir_save_stdout]
+	mov	[es:0x19], al
+
+	; Decrement the extra refcount we added for the stdout alias
+	mov	bx, [redir_out_handle]
+	push	bx
+	mov	bl, [es:0x18 + bx]	; SFT index
+	xor	bh, bh
+	cmp	byte [cs:sft_refcount + bx], 1
+	jbe	.rr_out_no_dec
+	dec	byte [cs:sft_refcount + bx]
+.rr_out_no_dec:
+	pop	bx
+
+	; Now close the redirect file handle (refcount should be 1 → hits 0)
+	mov	ah, 0x3E
+	int	0x21
+
+	mov	byte [redir_out_mode], 0
+.rr_no_out:
+
+	; Restore stdin
+	cmp	byte [redir_in_active], 0
+	je	.rr_no_in
+
+	; Restore original stdin JFT entry first
+	mov	es, [exec_seg]
+	mov	al, [redir_save_stdin]
+	mov	[es:0x18], al
+
+	; Decrement extra refcount
+	mov	bx, [redir_in_handle]
+	push	bx
+	mov	bl, [es:0x18 + bx]
+	xor	bh, bh
+	cmp	byte [cs:sft_refcount + bx], 1
+	jbe	.rr_in_no_dec
+	dec	byte [cs:sft_refcount + bx]
+.rr_in_no_dec:
+	pop	bx
+
+	; Close the redirect input handle
+	mov	ah, 0x3E
+	int	0x21
+
+	mov	byte [redir_in_active], 0
+.rr_no_in:
+	pop	es
+	ret
+
+; Redirection variables
+redir_out_mode:		db	0	; 0=none, 1=create, 2=append
+redir_in_active:	db	0
+redir_out_handle:	dw	0
+redir_in_handle:	dw	0
+redir_save_stdin:	db	0
+redir_save_stdout:	db	0
+redir_out_fname:	times 78 db 0
+redir_in_fname:		times 78 db 0
+redir_cmd_save:		times MAX_CMD_LEN + 1 db 0
 
 ; ============================================================================
 ; Variables
@@ -11823,4 +12151,5 @@ saved_int1c:	dd	0
 dir_buffer	equ	0x6000			; Fixed at SHELL_SEG:6000 (must be past code+data)
 fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:6E00
 batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:7200 (max ~8KB batch file)
+io_buffer	equ	batch_buffer + (2 * 512)	    ; At SHELL_SEG:7600 (1024 bytes for AH=3F/40)
 		; FAT: 2 * 512 = 1024 bytes
