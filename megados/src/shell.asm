@@ -142,33 +142,277 @@ cmd_loop:
 	jmp	batch_next_line
 
 .cmd_interactive:
-	; Print prompt with current path
+	; Print newline before prompt
 	mov	al, 0x0D
 	mov	ah, 0x0E
 	int	0x10
 	mov	al, 0x0A
 	mov	ah, 0x0E
 	int	0x10
+	; Find PROMPT= in environment
+	push	es
+	mov	es, [env_seg]
+	xor	si, si
+.prompt_scan:
+	cmp	byte [es:si], 0		; End of env
+	je	.prompt_default
+	; Check for "PROMPT="
+	cmp	byte [es:si], 'P'
+	jne	.prompt_skip
+	cmp	byte [es:si+1], 'R'
+	jne	.prompt_skip
+	cmp	byte [es:si+2], 'O'
+	jne	.prompt_skip
+	cmp	byte [es:si+3], 'M'
+	jne	.prompt_skip
+	cmp	byte [es:si+4], 'P'
+	jne	.prompt_skip
+	cmp	byte [es:si+5], 'T'
+	jne	.prompt_skip
+	cmp	byte [es:si+6], '='
+	jne	.prompt_skip
+	; Found — SI+7 points to format string
+	add	si, 7
+	jmp	.prompt_interpret
+.prompt_skip:
+	; Advance past this env string
+	cmp	byte [es:si], 0
+	je	.prompt_skip_next
+	inc	si
+	jmp	.prompt_skip
+.prompt_skip_next:
+	inc	si
+	jmp	.prompt_scan
+.prompt_default:
+	; No PROMPT in env — use $P$G
+	pop	es
+	; Hardcoded fallback
 	mov	al, [cur_drive]
-	add	al, 'A'		; 0='A', 1='B'
+	add	al, 'A'
 	mov	ah, 0x0E
 	int	0x10
 	mov	al, ':'
 	mov	ah, 0x0E
 	int	0x10
-	; Print backslash (always shown)
 	mov	al, '\'
 	mov	ah, 0x0E
 	int	0x10
-	; Print current path (if any)
 	cmp	byte [cur_dir_pathlen], 0
-	je	.prompt_done
+	je	.prompt_fb_done
+	push	si
 	mov	si, cur_dir_path
 	call	print_string
-.prompt_done:
+	pop	si
+.prompt_fb_done:
 	mov	al, '>'
 	mov	ah, 0x0E
 	int	0x10
+	jmp	.prompt_done
+
+.prompt_interpret:
+	; ES:SI = PROMPT format string in environment
+	mov	al, [es:si]
+	or	al, al
+	jz	.prompt_interp_done
+	inc	si
+	cmp	al, '$'
+	je	.prompt_dollar
+	; Regular character — print it
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+.prompt_dollar:
+	mov	al, [es:si]
+	or	al, al
+	jz	.prompt_interp_done
+	inc	si
+	; Uppercase the code
+	cmp	al, 'a'
+	jb	.prompt_code
+	cmp	al, 'z'
+	ja	.prompt_code
+	sub	al, 0x20
+.prompt_code:
+	cmp	al, 'P'
+	je	.prompt_path
+	cmp	al, 'G'
+	je	.prompt_gt
+	cmp	al, 'L'
+	je	.prompt_lt
+	cmp	al, 'N'
+	je	.prompt_drive
+	cmp	al, 'D'
+	je	.prompt_date
+	cmp	al, 'T'
+	je	.prompt_time
+	cmp	al, 'V'
+	je	.prompt_version
+	cmp	al, 'B'
+	je	.prompt_pipe
+	cmp	al, 'Q'
+	je	.prompt_eq
+	cmp	al, 'E'
+	je	.prompt_esc
+	cmp	al, 'H'
+	je	.prompt_bs
+	cmp	al, '$'
+	je	.prompt_dollar_lit
+	cmp	al, '_'
+	je	.prompt_crlf
+	; Unknown code — print $ and the char
+	push	ax
+	mov	al, '$'
+	mov	ah, 0x0E
+	int	0x10
+	pop	ax
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_path:
+	; $P — current drive and path
+	push	si
+	push	es
+	mov	al, [cur_drive]
+	add	al, 'A'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, ':'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, '\'
+	mov	ah, 0x0E
+	int	0x10
+	cmp	byte [cur_dir_pathlen], 0
+	je	.prompt_path_done
+	mov	si, cur_dir_path
+	call	print_string
+.prompt_path_done:
+	pop	es
+	pop	si
+	jmp	.prompt_interpret
+
+.prompt_gt:
+	mov	al, '>'
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_lt:
+	mov	al, '<'
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_drive:
+	mov	al, [cur_drive]
+	add	al, 'A'
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_date:
+	push	si
+	push	es
+	push	cx
+	push	dx
+	mov	ah, 0x2A
+	int	0x21
+	mov	al, dh
+	call	do_date.print_2dig
+	mov	al, '-'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dl
+	call	do_date.print_2dig
+	mov	al, '-'
+	mov	ah, 0x0E
+	int	0x10
+	mov	ax, cx
+	call	do_date.print_year
+	pop	dx
+	pop	cx
+	pop	es
+	pop	si
+	jmp	.prompt_interpret
+
+.prompt_time:
+	push	si
+	push	es
+	push	cx
+	push	dx
+	mov	ah, 0x2C
+	int	0x21
+	mov	al, ch
+	call	do_date.print_2dig
+	mov	al, ':'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, cl
+	call	do_date.print_2dig
+	mov	al, ':'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dh
+	call	do_date.print_2dig
+	pop	dx
+	pop	cx
+	pop	es
+	pop	si
+	jmp	.prompt_interpret
+
+.prompt_version:
+	push	si
+	push	es
+	mov	si, .prompt_ver_str
+	call	print_string
+	pop	es
+	pop	si
+	jmp	.prompt_interpret
+.prompt_ver_str: db	'MegaDOS 3.0', 0
+
+.prompt_pipe:
+	mov	al, '|'
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_eq:
+	mov	al, '='
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_esc:
+	mov	al, 27
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_bs:
+	mov	al, 8
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_dollar_lit:
+	mov	al, '$'
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_crlf:
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	jmp	.prompt_interpret
+
+.prompt_interp_done:
+	pop	es
+.prompt_done:
 
 	; Read command line
 	mov	di, cmd_buffer
@@ -231,6 +475,10 @@ cmd_dispatch:
 	mov	di, cmd_set
 	call	str_compare_cmd
 	je	do_set
+
+	mov	di, cmd_prompt
+	call	str_compare_cmd
+	je	do_prompt
 
 	mov	di, cmd_date
 	call	str_compare_cmd
@@ -2960,6 +3208,109 @@ do_set:
 .set_arg:	dw	0
 .set_namelen:	dw	0
 .set_in_name:	db	0
+
+; ============================================================================
+; PROMPT command — set prompt format string
+; ============================================================================
+do_prompt:
+	call	skip_spaces
+	; Remove existing PROMPT= from environment
+	push	es
+	mov	es, [env_seg]
+	xor	di, di
+.prompt_find_old:
+	cmp	byte [es:di], 0
+	je	.prompt_old_done
+	cmp	byte [es:di], 'P'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+1], 'R'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+2], 'O'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+3], 'M'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+4], 'P'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+5], 'T'
+	jne	.prompt_skip_old
+	cmp	byte [es:di+6], '='
+	jne	.prompt_skip_old
+	; Found — remove by shifting rest down
+	mov	bx, di
+.prompt_skip_val:
+	cmp	byte [es:bx], 0
+	je	.prompt_skipped
+	inc	bx
+	jmp	.prompt_skip_val
+.prompt_skipped:
+	inc	bx			; BX = start of next entry
+.prompt_shift:
+	mov	al, [es:bx]
+	mov	[es:di], al
+	cmp	al, 0
+	jne	.prompt_shift_next
+	cmp	byte [es:bx+1], 0
+	je	.prompt_shift_end
+.prompt_shift_next:
+	inc	bx
+	inc	di
+	jmp	.prompt_shift
+.prompt_shift_end:
+	mov	byte [es:di+1], 0
+	jmp	.prompt_find_old	; Re-scan in case of duplicates
+.prompt_skip_old:
+	cmp	byte [es:di], 0
+	je	.prompt_skip_old_next
+	inc	di
+	jmp	.prompt_skip_old
+.prompt_skip_old_next:
+	inc	di
+	jmp	.prompt_find_old
+.prompt_old_done:
+	; Find the actual end of env (don't trust DI from the scan)
+	xor	di, di
+.prompt_find_end:
+	cmp	byte [es:di], 0
+	je	.prompt_at_end
+.prompt_find_end_str:
+	cmp	byte [es:di], 0
+	je	.prompt_find_end_next
+	inc	di
+	jmp	.prompt_find_end_str
+.prompt_find_end_next:
+	inc	di
+	jmp	.prompt_find_end
+.prompt_at_end:
+	; DI = position of final null
+	; Now append PROMPT=<value>
+	; Get value from command line (SI points past "PROMPT ")
+	cmp	byte [si], 0
+	jne	.prompt_has_arg
+	; No argument — use default $P$G
+	mov	si, .prompt_default
+.prompt_has_arg:
+	; Write "PROMPT="
+	mov	byte [es:di], 'P'
+	mov	byte [es:di+1], 'R'
+	mov	byte [es:di+2], 'O'
+	mov	byte [es:di+3], 'M'
+	mov	byte [es:di+4], 'P'
+	mov	byte [es:di+5], 'T'
+	mov	byte [es:di+6], '='
+	add	di, 7
+	; Copy value (including spaces, until null)
+.prompt_copy_val:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	or	al, al
+	jnz	.prompt_copy_val
+	; Double null terminates env
+	mov	byte [es:di], 0
+	pop	es
+	jmp	cmd_loop
+
+.prompt_default: db	'$P$G', 0
 
 ; ============================================================================
 ; DATE command — display current date
@@ -11332,6 +11683,7 @@ cmd_rmdir	db	'RMDIR', 0
 cmd_set		db	'SET', 0
 cmd_date	db	'DATE', 0
 cmd_time	db	'TIME', 0
+cmd_prompt	db	'PROMPT', 0
 
 ; ============================================================================
 ; Variables
@@ -11468,7 +11820,7 @@ saved_int10:	dd	0
 saved_int1c:	dd	0
 
 		; Buffers at fixed high address in SHELL_SEG — well past code/data
-dir_buffer	equ	0x5800			; Fixed at SHELL_SEG:5800 (must be past code+data)
-fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:6600
-batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:6E00 (max ~8KB batch file)
+dir_buffer	equ	0x6000			; Fixed at SHELL_SEG:6000 (must be past code+data)
+fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:6E00
+batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:7200 (max ~8KB batch file)
 		; FAT: 2 * 512 = 1024 bytes
