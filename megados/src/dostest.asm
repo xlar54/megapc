@@ -1081,6 +1081,51 @@
 	call	fail
 .t50_done:
 
+	; === 51. Get default DPB (AH=1F) ===
+	mov	si, t_dpb
+	call	pstr
+	push	ds
+	mov	ah, 0x1F
+	int	0x21
+	cmp	al, 0
+	jne	.t51_fail
+	; DS:BX should point to DPB with bytes/sector = 512
+	cmp	word [bx+2], 512
+	jne	.t51_fail
+	pop	ds
+	call	pass
+	jmp	.t51_done
+.t51_fail:
+	pop	ds
+	call	fail
+.t51_done:
+
+	; === 52. Get DPB for drive (AH=32) ===
+	mov	si, t_dpb_drv
+	call	pstr
+	push	ds
+	mov	ah, 0x32
+	mov	dl, 1			; Drive A
+	int	0x21
+	cmp	al, 0
+	jne	.t52_fail
+	cmp	word [bx+2], 512
+	jne	.t52_fail
+	pop	ds
+	; Invalid drive should return AL=FF
+	mov	ah, 0x32
+	mov	dl, 5			; Drive E (doesn't exist)
+	int	0x21
+	cmp	al, 0xFF
+	jne	.t52_fail2
+	call	pass
+	jmp	.t52_done
+.t52_fail:
+	pop	ds
+.t52_fail2:
+	call	fail
+.t52_done:
+
 	; === Summary ===
 	call	nl
 	mov	si, msg_summary
@@ -1130,6 +1175,29 @@ nl:
 	mov	dl, 0x0A
 	mov	ah, 0x02
 	int	0x21
+	inc	byte [linecnt]
+	cmp	byte [linecnt], 22
+	jb	.nl_ret
+	; Pause
+	mov	byte [linecnt], 0
+	push	si
+	mov	si, msg_pause
+	call	pstr
+	pop	si
+	mov	ah, 0x08		; Wait for key (no echo)
+	int	0x21
+	; Erase the pause line with CR
+	push	si
+	mov	dl, 0x0D
+	mov	ah, 0x02
+	int	0x21
+	mov	si, msg_blank
+	call	pstr
+	mov	dl, 0x0D
+	mov	ah, 0x02
+	int	0x21
+	pop	si
+.nl_ret:
 	ret
 
 pdec:
@@ -1214,6 +1282,11 @@ t_fcbren	db	'47. FCB rename', 0
 t_getsetpsp	db	'48. Get/Set PSP', 0
 t_createnew	db	'49. Create new file', 0
 t_blkread	db	'50. FCB block read', 0
+t_dpb		db	'51. Get DPB', 0
+t_dpb_drv	db	'52. Get DPB drive', 0
+
+msg_pause	db	'-- Press a key --', 0
+msg_blank	db	'                  ', 0
 
 fname		db	'DOSTEST.TMP', 0
 fcb_tmpname	db	'FCBTEST.TMP', 0
@@ -1226,6 +1299,7 @@ exec_cmdtail	db	0, 0x0D		; Empty command tail (len=0, CR)
 wildcard	db	'*.COM', 0
 testdata	db	'ABCD'
 
+linecnt		db	0
 passes		dw	0
 fails		dw	0
 hdl1		dw	0

@@ -232,6 +232,14 @@ cmd_dispatch:
 	call	str_compare_cmd
 	je	do_set
 
+	mov	di, cmd_date
+	call	str_compare_cmd
+	je	do_date
+
+	mov	di, cmd_time
+	call	str_compare_cmd
+	je	do_time
+
 	; Check for drive switch (A: or B:)
 	mov	si, cmd_buffer
 	call	skip_spaces
@@ -2954,6 +2962,166 @@ do_set:
 .set_in_name:	db	0
 
 ; ============================================================================
+; DATE command — display current date
+; ============================================================================
+do_date:
+	; Print "Current date is "
+	mov	si, .date_msg
+	call	print_string
+	mov	ah, 0x2A
+	int	0x21
+	; CX=year, DH=month, DL=day, AL=day of week
+	push	ax
+	; Print day of week
+	xor	ah, ah
+	mov	bx, ax
+	shl	bx, 1
+	shl	bx, 1			; BX = AL * 4
+	add	bx, .dow_table
+	push	cx
+	push	dx
+	mov	cx, 3
+.date_dow:
+	mov	al, [bx]
+	mov	ah, 0x0E
+	int	0x10
+	inc	bx
+	dec	cx
+	jnz	.date_dow
+	mov	al, ' '
+	mov	ah, 0x0E
+	int	0x10
+	pop	dx
+	pop	cx
+	pop	ax
+	; Print MM-DD-YYYY
+	mov	al, dh			; Month
+	call	.print_2dig
+	mov	al, '-'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dl			; Day
+	call	.print_2dig
+	mov	al, '-'
+	mov	ah, 0x0E
+	int	0x10
+	mov	ax, cx			; Year
+	call	.print_year
+	; Newline
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	jmp	cmd_loop
+
+.print_2dig:
+	; Print AL as 2-digit decimal
+	push	ax
+	xor	ah, ah
+	push	bx
+	mov	bl, 10
+	div	bl			; AL=tens, AH=ones
+	push	ax
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	pop	ax
+	mov	al, ah
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	pop	bx
+	pop	ax
+	ret
+
+.print_year:
+	; Print AX as 4-digit year
+	push	bx
+	push	cx
+	push	dx
+	xor	dx, dx
+	mov	bx, 1000
+	div	bx
+	push	dx
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	pop	ax
+	xor	dx, dx
+	mov	bx, 100
+	div	bx
+	push	dx
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	pop	ax
+	xor	dx, dx
+	mov	bx, 10
+	div	bx
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dl
+	add	al, '0'
+	mov	ah, 0x0E
+	int	0x10
+	pop	dx
+	pop	cx
+	pop	bx
+	ret
+
+.date_msg:	db	'Current date is ', 0
+
+.dow_table:
+	db	'Sun '
+	db	'Mon '
+	db	'Tue '
+	db	'Wed '
+	db	'Thu '
+	db	'Fri '
+	db	'Sat '
+
+; ============================================================================
+; TIME command — display current time
+; ============================================================================
+do_time:
+	; Print "Current time is "
+	mov	si, .time_msg
+	call	print_string
+	mov	ah, 0x2C
+	int	0x21
+	; CH=hour, CL=minute, DH=second, DL=hundredths
+	mov	al, ch			; Hour
+	call	do_date.print_2dig
+	mov	al, ':'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, cl			; Minute
+	call	do_date.print_2dig
+	mov	al, ':'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dh			; Second
+	call	do_date.print_2dig
+	mov	al, '.'
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, dl			; Hundredths
+	call	do_date.print_2dig
+	; Newline
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	jmp	cmd_loop
+
+.time_msg:	db	'Current time is ', 0
+
+; ============================================================================
 ; save_drive_state — Save cur_dir_* to the current drive's slot
 ; ============================================================================
 save_drive_state:
@@ -4907,7 +5075,16 @@ int21_handler:
 	je	.i21_51
 	cmp	ah, 0x5B
 	je	.i21_5b
-	; Unhandled — just return
+	cmp	ah, 0x1F
+	je	.i21_1f
+	cmp	ah, 0x32
+	je	.i21_32
+	; Unhandled — return error (CF=1, AX=1 invalid function)
+	mov	ax, 1
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
 	iret
 
 ; --- AH=01: Read character with echo ---
@@ -9863,6 +10040,51 @@ int21_handler:
 	int	0x21
 	iret				; CF and AX already set by AH=3C
 
+; --- AH=1F: Get default DPB ---
+; Returns: AL=0, DS:BX = pointer to DPB
+.i21_1f:
+	push	cs
+	pop	ds
+	mov	bx, .dpb_data
+	xor	al, al
+	iret
+
+; --- AH=32: Get DPB for specific drive ---
+; Input: DL = drive (0=default, 1=A, 2=B)
+; Returns: AL=0, DS:BX = pointer to DPB / AL=FF invalid drive
+.i21_32:
+	cmp	dl, 2			; Only drives 0-1 (A)
+	ja	.i21_32_bad
+	push	cs
+	pop	ds
+	mov	bx, .dpb_data
+	xor	al, al
+	iret
+.i21_32_bad:
+	mov	al, 0xFF
+	iret
+
+; Drive Parameter Block for 360K floppy
+.dpb_data:
+	db	0			; +00: drive number (0=A)
+	db	0			; +01: unit number
+	dw	512			; +02: bytes per sector
+	db	1			; +04: sectors/cluster - 1
+	db	1			; +05: cluster shift (log2 of secs/cluster)
+	dw	1			; +06: first FAT sector
+	db	2			; +08: number of FATs
+	dw	112			; +09: root dir entries
+	dw	DATA_START_SEC		; +0B: first data sector
+	dw	(TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST + 1  ; +0D: max cluster + 1
+	db	2			; +0F: sectors per FAT
+	dw	ROOT_DIR_SEC		; +10: first root dir sector
+	dd	0			; +12: device driver header (N/A)
+	db	MEDIA_BYTE		; +16: media descriptor
+	db	0			; +17: access flag (0=disk accessed)
+	dd	0			; +18: next DPB pointer (0=last)
+	dw	0			; +1C: last cluster allocated
+	dw	0			; +1E: free clusters (0xFFFF=unknown)
+
 ; --- AH=2B: Set date ---
 ; Input: CX=year, DH=month, DL=day
 ; Returns: AL=0 success, AL=FF invalid
@@ -11108,6 +11330,8 @@ cmd_cd		db	'CD', 0
 cmd_mkdir	db	'MKDIR', 0
 cmd_rmdir	db	'RMDIR', 0
 cmd_set		db	'SET', 0
+cmd_date	db	'DATE', 0
+cmd_time	db	'TIME', 0
 
 ; ============================================================================
 ; Variables
