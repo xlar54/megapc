@@ -23,6 +23,7 @@
 	; input_buf+2 = start of text, input_buf+1 = length
 	mov	cl, [input_buf+1]
 	xor	ch, ch
+	jcxz	.name_done
 	mov	si, input_buf+2
 .print_name:
 	lodsb
@@ -31,6 +32,7 @@
 	int	0x21
 	dec	cx
 	jnz	.print_name
+.name_done:
 
 	; Print newline
 	mov	ah, 0x09

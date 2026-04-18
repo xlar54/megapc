@@ -36,7 +36,7 @@ SECS_PER_CLUST	equ	2	; Sectors per cluster
 FAT_SEC		equ	1	; First FAT sector
 TOTAL_SECS	equ	720	; Total sectors (360K)
 MEDIA_BYTE	equ	0xFD	; 360K floppy media descriptor
-MAX_CMD_LEN	equ	80
+MAX_CMD_LEN	equ	127
 MAX_DIR_ENTRIES	equ	112	; Root dir entries (subdir = 32 per cluster)
 DIR_BUF_SIZE	equ	ROOT_DIR_SECS * 512	; 3584 bytes
 
@@ -11750,6 +11750,34 @@ shell_crlf:
 	pop	ax
 	ret
 
+; shell_beep: short beep via PC speaker (PIT Timer 2)
+shell_beep:
+	push	ax
+	push	cx
+	; Set PIT Timer 2, mode 3, 1000 Hz (divider 1193)
+	mov	al, 0xB6
+	out	0x43, al
+	mov	al, 0xA9		; 1193 low byte
+	out	0x42, al
+	mov	al, 0x04		; 1193 high byte
+	out	0x42, al
+	; Speaker on
+	in	al, 0x61
+	or	al, 0x03
+	out	0x61, al
+	; Short delay (~50ms worth of loop iterations)
+	mov	cx, 0x2000
+.beep_delay:
+	dec	cx
+	jnz	.beep_delay
+	; Speaker off
+	in	al, 0x61
+	and	al, 0xFC
+	out	0x61, al
+	pop	cx
+	pop	ax
+	ret
+
 print_string:
 	push	ax
 .ps_loop:
@@ -11780,7 +11808,11 @@ read_line:
 	cmp	al, 0x08		; Backspace?
 	je	.rl_backspace
 	cmp	cx, MAX_CMD_LEN
-	jge	.rl_loop		; Buffer full
+	jb	.rl_accept
+	; Buffer full — beep via PC speaker
+	call	shell_beep
+	jmp	.rl_loop
+.rl_accept:
 
 	; Store character
 	stosb

@@ -5,6 +5,8 @@
 
 	push	cs
 	pop	ds
+	push	cs
+	pop	es
 
 	; === DOS Version (AH=30h) ===
 	mov	si, msg_ver
@@ -567,6 +569,7 @@ print_hex:
 	ret
 
 ; --- Data ---
+msg_retcode	db	'Last Return: ', 0
 msg_ver		db	'DOS Version: ', 0
 msg_drive	db	'Current Drive: ', 0
 msg_curdir	db	'Current Dir: ', 0
@@ -584,7 +587,6 @@ msg_err		db	' (error)', 0
 msg_dta		db	'DTA: ', 0
 msg_psp		db	'PSP Segment: ', 0
 msg_tail	db	'Cmd Tail: ', 0
-msg_retcode	db	'Last Return: ', 0
 msg_break	db	'Break Flag: ', 0
 msg_verify	db	'Verify Flag: ', 0
 msg_machine	db	'Machine: ', 0

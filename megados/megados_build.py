@@ -88,6 +88,8 @@ nasm_assemble('dostest.asm', 'DOSTEST.COM')
 nasm_assemble('child.asm', 'CHILD.COM')
 nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
 nasm_assemble('edlin.asm', 'EDLIN.COM')
+nasm_assemble('beep.asm', 'BEEP.COM')
+nasm_assemble('more.asm', 'MORE.COM')
 nasm_assemble('hello.asm', 'hello_code.bin')
 
 # Build HELLO.EXE from hello_code.bin
@@ -313,7 +315,8 @@ next_cluster = 2 + shell_clusters
 
 extra_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
                'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
-               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'EDLIN.COM', 'HELLO.EXE',
+               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'EDLIN.COM', 'BEEP.COM',
+               'MORE.COM', 'HELLO.EXE',
                'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
 for fname in extra_files:
