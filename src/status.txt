@@ -445,6 +445,20 @@ MEGADOS EXTERNAL PROGRAMS
   HDLTEST.COM Handle/device test suite (14 tests)
   SYSINFO.COM System information display
 
+ARCHITECTURAL LIMITATIONS
+==========================
+
+- Device handle I/O is not fully generic. When AH=02h (and other
+  character output calls) detects stdout is a device, it always
+  routes through the CON driver — not through whatever driver is
+  bound to that specific handle. This means if stdout were redirected
+  to AUX or PRN via handle manipulation, output would still go to CON.
+  The proper fix requires adding a driver pointer to each SFT entry
+  and restructuring how handles map to device drivers. Handles 0-4
+  are always bound to specific devices (stdin/stdout/stderr=CON,
+  stdaux=AUX, stdprn=PRN), so this only matters for non-standard
+  handle reassignment — extremely rare on a floppy system.
+
 KNOWN BUGS
 ===========
 

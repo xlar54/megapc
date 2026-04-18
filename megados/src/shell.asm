@@ -136,6 +136,7 @@ drv_con_int:
 
 .con_read:
 	; Read CX bytes from keyboard to transfer buffer
+	cld
 	mov	cx, [es:bx+18]		; Byte count
 	mov	di, [es:bx+14]		; Transfer offset
 	push	es
@@ -166,6 +167,7 @@ drv_con_int:
 
 .con_write:
 	; Write CX bytes from transfer buffer to screen
+	cld
 	mov	cx, [es:bx+18]		; Byte count
 	mov	si, [es:bx+14]		; Transfer offset
 	push	ds
@@ -324,6 +326,7 @@ drv_call_target: dd	0
 ; Input: DS:SI = 8-byte device name (space-padded)
 ; Output: ES:BX = driver header, CF=0 found / CF=1 not found
 drv_find:
+	cld
 	push	ax
 	push	cx
 	push	di
@@ -417,33 +420,46 @@ drv_read_char:
 ; attributes (bits 0+1). This allows a loaded replacement CON driver
 ; (like ANSI.SYS) to intercept console I/O.
 con_setup_esbx:
+	; Return cached CON driver pointer (fast path)
+	mov	bx, [cs:con_drv_cache_off]
+	mov	es, [cs:con_drv_cache_seg]
+	ret
+
+; con_find_con — Walk chain to find active CON driver and cache it
+; Called once at init and after DEVICE= loads
+con_find_con:
 	push	ax
+	push	bx
+	push	es
 	mov	bx, [cs:drv_chain_head]
 	mov	es, [cs:drv_chain_head+2]
-.cse_loop:
-	; Check for end of chain
+.cfc_loop:
 	cmp	bx, 0xFFFF
-	je	.cse_builtin
-	; Check if this driver has ISCIN+ISCOT (bits 0+1 of attribute)
-	mov	ax, [es:bx+4]		; Attribute word
-	and	ax, 0x0003		; ISCIN | ISCOT
+	je	.cfc_builtin
+	mov	ax, [es:bx+4]
+	and	ax, 0x0003
 	cmp	ax, 0x0003
-	je	.cse_found
-	; Next driver
-	mov	ax, [es:bx+2]		; Next segment
+	je	.cfc_found
+	mov	ax, [es:bx+2]
 	push	ax
-	mov	bx, [es:bx]		; Next offset
+	mov	bx, [es:bx]
 	pop	es
 	cmp	bx, 0xFFFF
-	jne	.cse_loop
-.cse_builtin:
-	; Fallback to built-in CON
+	jne	.cfc_loop
+.cfc_builtin:
 	mov	bx, drv_con
 	mov	ax, cs
 	mov	es, ax
-.cse_found:
+.cfc_found:
+	mov	[cs:con_drv_cache_off], bx
+	mov	[cs:con_drv_cache_seg], es
+	pop	es
+	pop	bx
 	pop	ax
 	ret
+
+con_drv_cache_off: dw	drv_con		; Default to built-in
+con_drv_cache_seg: dw	0		; Filled at init
 
 ; ============================================================================
 ; con_write_al — Write character in AL through CON driver (preserves all regs)
@@ -561,12 +577,14 @@ start_init:
 	; Point exec_seg at our PSP (same segment, JFT at offset 0x18)
 	mov	word [exec_seg], SHELL_SEG
 
-	; Initialize device driver chain segment pointers
+	; Initialize device driver chain segment pointers and CON cache
 	mov	word [drv_nul+2], SHELL_SEG	; NUL → CON segment
 	mov	word [drv_con+2], SHELL_SEG	; CON → AUX segment
 	mov	word [drv_aux+2], SHELL_SEG	; AUX → PRN segment
 	mov	word [drv_chain_head+2], SHELL_SEG
 	mov	word [drv_req_ptr+2], SHELL_SEG
+	mov	word [con_drv_cache_seg], SHELL_SEG
+	call	con_find_con		; Cache the CON driver pointer
 
 	; Install interrupt vectors
 	xor	ax, ax
@@ -5055,6 +5073,7 @@ str_on		db	'ON', 0
 ;         SI advanced past the filename
 ;
 parse_83_filename:
+	cld
 	push	ax
 	push	cx
 	push	di
@@ -13403,6 +13422,7 @@ process_config_sys:
 	cmp	ax, 0
 	je	.cfg_dev_read_done
 	add	di, ax
+	jc	.cfg_dev_read_err	; DI wrapped past 64K
 	jmp	.cfg_dev_read
 .cfg_dev_read_err:
 	; Read failed — close file, free memory, bail
@@ -13446,9 +13466,13 @@ process_config_sys:
 	mov	ah, 0x4A
 	int	0x21
 	pop	es
-	jc	.cfg_dev_resize_err	; Resize failed — continue anyway
-
-.cfg_dev_resize_err:
+	jnc	.cfg_dev_resized
+	; Resize failed — warn but continue with oversized block
+	push	si
+	mov	si, .cfg_msg_resize_warn
+	call	print_string
+	pop	si
+.cfg_dev_resized:
 	; Call the driver's INIT function BEFORE linking into chain
 	mov	es, [.cfg_dev_seg]
 	mov	byte [cs:drv_request], 22
@@ -13473,6 +13497,9 @@ process_config_sys:
 	mov	word [cs:drv_nul], 0	; New driver at offset 0 in its segment
 	mov	ax, [.cfg_dev_seg]
 	mov	[cs:drv_nul+2], ax
+
+	; Refresh CON driver cache (new driver may be a CON replacement)
+	call	con_find_con
 
 	; Print driver name
 	push	si
@@ -13605,6 +13632,7 @@ process_config_sys:
 .cfg_msg_not_found: db	'  Bad or missing: ', 0
 .cfg_msg_no_mem: db	'  Insufficient memory', 0x0D, 0x0A, 0
 .cfg_msg_init_fail: db	'  INIT failed: ', 0
+.cfg_msg_resize_warn: db	'  Warning: resize failed', 0x0D, 0x0A, 0
 
 config_sys_name: db	'CONFIG.SYS', 0
 cfg_line_buf:	times MAX_CMD_LEN+1 db 0
