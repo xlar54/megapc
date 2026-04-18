@@ -158,85 +158,215 @@ struct.pack_into('<H', boot, 24, SPT)
 struct.pack_into('<H', boot, 26, HEADS)
 
 # --- Boot code at 0x3E ---
-# Loads SHELL.COM from data area to 0800:0100, one sector at a time.
-# Uses DI for loop counter to avoid CX conflict with INT 13h CHS.
-code = bytearray()
+# Searches root directory for SHELL.COM, loads it via FAT chain.
+# Uses a separate NASM source file for clarity and reliability.
+#
+# The boot code is written as raw bytes here to avoid needing
+# a second assembler pass. It:
+#   1. Reads root directory (1 sector at a time) to 0800:0000
+#   2. Searches for "SHELL   COM" (11-byte 8.3 name)
+#   3. Gets start cluster from dir entry
+#   4. Reads FAT to 0800:0200
+#   5. Follows cluster chain, loading each cluster to 0800:0100+
+#   6. Jumps to 0800:0100
 
-# Set up segments
-code += bytes([0x31, 0xC0])          # XOR AX, AX
-code += bytes([0x8E, 0xD8])          # MOV DS, AX
-code += bytes([0xB8, 0x00, 0x08])    # MOV AX, 0x0800
-code += bytes([0x8E, 0xC0])          # MOV ES, AX
-code += bytes([0xBB, 0x00, 0x01])    # MOV BX, 0x0100
+# We'll build the boot code using a helper assembler approach:
+# write a small NASM boot stub, assemble it, and embed the result.
+import tempfile
 
-# DI = sector count, SI = current LBA
-code += bytes([0xBF, shell_sectors & 0xFF, (shell_sectors >> 8) & 0xFF])  # MOV DI, count
-code += bytes([0xBE, DATA_START_SEC & 0xFF, (DATA_START_SEC >> 8) & 0xFF])  # MOV SI, start
+boot_asm = f"""
+    cpu 8086
+    org 0x7C3E          ; Boot code starts at 0x3E in boot sector
 
-# read_loop:
-read_loop_offset = len(code)
+    ; Constants from disk geometry
+    SPT         equ {SPT}
+    HEADS       equ {HEADS}
+    ROOT_DIR_SEC equ {ROOT_DIR_START_SEC}
+    ROOT_DIR_SECS equ {ROOT_DIR_SECS}
+    DATA_START_SEC equ {DATA_START_SEC}
+    SECS_PER_CLUST equ {SECS_PER_CLUST}
+    FAT_SEC     equ 1           ; First FAT sector (after reserved)
+    SECS_PER_FAT equ {SECS_PER_FAT}
 
-# Save BX (load pointer) and DI (counter)
-code += bytes([0x53])                # PUSH BX
-code += bytes([0x57])                # PUSH DI
+    ; Set up stack and segments
+    cli
+    xor     ax, ax
+    mov     ss, ax
+    mov     sp, 0x7C00
+    sti
+    mov     ds, ax
 
-# LBA to CHS: AX = SI
-code += bytes([0x89, 0xF0])          # MOV AX, SI
-code += bytes([0x31, 0xD2])          # XOR DX, DX
-code += bytes([0xBB, SPT * HEADS, 0x00])  # MOV BX, SPT*HEADS
-code += bytes([0xF7, 0xF3])          # DIV BX  -> AX=cyl, DX=rem
-code += bytes([0x88, 0xC5])          # MOV CH, AL  (cylinder)
-code += bytes([0x89, 0xD0])          # MOV AX, DX
-code += bytes([0x31, 0xD2])          # XOR DX, DX
-code += bytes([0xBB, SPT, 0x00])     # MOV BX, SPT
-code += bytes([0xF7, 0xF3])          # DIV BX  -> AX=head, DX=sector
-code += bytes([0x88, 0xC6])          # MOV DH, AL  (head)
-code += bytes([0x88, 0xD1])          # MOV CL, DL
-code += bytes([0xFE, 0xC1])          # INC CL  (1-based)
+    ; Read root directory to 0800:0000
+    mov     ax, 0x0800
+    mov     es, ax
+    xor     bx, bx
+    mov     si, ROOT_DIR_SEC
+    mov     di, ROOT_DIR_SECS
+b_read_root:
+    call    b_read_sector
+    jc      b_disk_err
+    add     bx, 512
+    inc     si
+    dec     di
+    jnz     b_read_root
 
-# Restore BX and DI (does NOT touch CX)
-code += bytes([0x5F])                # POP DI
-code += bytes([0x5B])                # POP BX
+    ; Search for SHELL.COM
+    mov     si, 0
+    mov     cx, {ROOT_ENTRIES}
+b_search:
+    cmp     byte [es:si], 0
+    je      b_not_found
+    cmp     byte [es:si], 0xE5
+    je      b_search_next
+    push    cx
+    push    si
+    push    di
+    mov     di, b_shell_name
+    mov     cx, 11
+b_cmp:
+    mov     al, [es:si]
+    cmp     al, [di]
+    jne     b_cmp_fail
+    inc     si
+    inc     di
+    dec     cx
+    jnz     b_cmp
+    pop     di
+    pop     si
+    pop     cx
+    jmp     b_found
+b_cmp_fail:
+    pop     di
+    pop     si
+    pop     cx
+b_search_next:
+    add     si, 32
+    dec     cx
+    jnz     b_search
+b_not_found:
+    mov     si, b_msg_nf
+    jmp     b_print
+b_found:
+    mov     ax, [es:si+26]
+    mov     [b_cluster], ax
 
-# INT 13h AH=02 read 1 sector
-code += bytes([0xB8, 0x01, 0x02])    # MOV AX, 0x0201
-code += bytes([0xB2, 0x00])          # MOV DL, 0 (drive A)
-code += bytes([0xCD, 0x13])          # INT 13h
-code += bytes([0x72])                # JC error
-jc_offset = len(code)
-code += bytes([0x00])                # placeholder
+    ; Read FAT to 0050:0000 (separate segment, won't be overwritten)
+    push    es
+    mov     ax, 0x0050
+    mov     es, ax
+    xor     bx, bx
+    mov     si, FAT_SEC
+    mov     di, SECS_PER_FAT
+b_read_fat:
+    call    b_read_sector
+    jc      b_disk_err
+    add     bx, 512
+    inc     si
+    dec     di
+    jnz     b_read_fat
+    pop     es              ; ES back to 0x0800
 
-# Advance
-code += bytes([0x81, 0xC3, 0x00, 0x02])  # ADD BX, 512
-code += bytes([0x46])                     # INC SI
-code += bytes([0x4F])                     # DEC DI
-code += bytes([0x75])                     # JNZ read_loop
-jnz_target = read_loop_offset - (len(code) + 1)
-code += bytes([jnz_target & 0xFF])
+    ; Load clusters to 0800:0100
+    mov     bx, 0x0100
+b_load_cl:
+    mov     ax, [b_cluster]
+    cmp     ax, 0xFF8
+    jae     b_done
+    sub     ax, 2
+    mov     cl, SECS_PER_CLUST
+    xor     ch, ch
+    mul     cx
+    add     ax, DATA_START_SEC
+    mov     si, ax
+    mov     di, SECS_PER_CLUST
+b_read_cl:
+    call    b_read_sector
+    jc      b_disk_err
+    add     bx, 512
+    inc     si
+    dec     di
+    jnz     b_read_cl
+    ; Next cluster via FAT12
+    mov     ax, [b_cluster]
+    mov     si, ax
+    shr     si, 1
+    add     si, ax          ; SI = byte offset into FAT
+    push    es
+    mov     ax, 0x0050
+    mov     es, ax          ; ES = FAT segment
+    mov     ax, [es:si]
+    pop     es              ; ES back to 0x0800
+    test    word [b_cluster], 1
+    jz      b_even
+    shr     ax, 1
+    shr     ax, 1
+    shr     ax, 1
+    shr     ax, 1
+b_even:
+    and     ax, 0x0FFF
+    mov     [b_cluster], ax
+    jmp     b_load_cl
+b_done:
+    jmp     0x0800:0x0100
 
-# JMP FAR 0800:0100
-code += bytes([0xEA, 0x00, 0x01, 0x00, 0x08])
+b_read_sector:
+    push    bx
+    push    di
+    mov     ax, si
+    xor     dx, dx
+    mov     bx, SPT * HEADS
+    div     bx
+    mov     ch, al
+    mov     ax, dx
+    xor     dx, dx
+    mov     bx, SPT
+    div     bx
+    mov     dh, al
+    mov     cl, dl
+    inc     cl
+    pop     di
+    pop     bx
+    mov     ax, 0x0201
+    mov     dl, 0
+    int     0x13
+    ret
 
-# Error handler
-error_offset = len(code)
-code[jc_offset] = error_offset - (jc_offset + 1)
+b_disk_err:
+    mov     si, b_msg_err
+b_print:
+    lodsb
+    or      al, al
+    jz      b_halt
+    mov     ah, 0x0E
+    int     0x10
+    jmp     b_print
+b_halt:
+    hlt
+    jmp     b_halt
 
-errmsg_fixup = len(code) + 1
-code += bytes([0xBE, 0x00, 0x00])    # MOV SI, msg (fixup)
-print_loop = len(code)
-code += bytes([0xAC])                # LODSB
-code += bytes([0x08, 0xC0])          # OR AL, AL
-code += bytes([0x74, 0x04])          # JZ halt
-code += bytes([0xB4, 0x0E])          # MOV AH, 0x0E
-code += bytes([0xCD, 0x10])          # INT 10h
-code += bytes([0xEB, 0xF5])          # JMP print_loop
-code += bytes([0xF4])                # HLT
-code += bytes([0xEB, 0xFD])          # JMP $-2
+b_cluster:   dw  0
+b_shell_name: db  'SHELL   COM'
+b_msg_err:   db  'Disk error', 0
+b_msg_nf:    db  'No SHELL.COM', 0
+"""
 
-errmsg_offset = len(code)
-code[errmsg_fixup] = (0x7C00 + 0x3E + errmsg_offset) & 0xFF
-code[errmsg_fixup + 1] = ((0x7C00 + 0x3E + errmsg_offset) >> 8) & 0xFF
-code += b'Disk error loading shell\r\n\x00'
+# Assemble the boot code
+with tempfile.NamedTemporaryFile(suffix='.asm', delete=False, mode='w') as f:
+    f.write(boot_asm)
+    boot_asm_path = f.name
+boot_bin_path = boot_asm_path.replace('.asm', '.bin')
+
+result = subprocess.run(
+    [NASM, '-f', 'bin', '-o', boot_bin_path, boot_asm_path],
+    capture_output=True, text=True
+)
+if result.returncode != 0:
+    print(f"Boot code assembly error:\n{result.stderr}")
+    sys.exit(1)
+code = open(boot_bin_path, 'rb').read()
+os.unlink(boot_asm_path)
+os.unlink(boot_bin_path)
+print(f"  Boot code: {len(code)} bytes")
 
 print(f"  Boot code: {len(code)} bytes")
 assert len(code) + 0x3E < 510, "Boot code too large!"
