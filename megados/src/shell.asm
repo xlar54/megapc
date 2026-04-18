@@ -12,7 +12,20 @@
 ;   Sectors 12+:  Data area (cluster 2 = sector 12)
 
 	cpu	8086
-	org	0x0100		; .COM file format
+	org	0x0100		; Shell is loaded at SHELL_SEG:0100 by boot sector
+
+	jmp	start_code
+
+; ============================================================================
+; Buffers — placed at start so they have fixed addresses
+; ============================================================================
+	align 16
+dir_buffer:	times	(7 * 512) db 0		; 3584 bytes for root directory
+fat_buffer:	times	(2 * 512) db 0		; 1024 bytes for FAT
+batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
+io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
+
+start_code:
 
 SHELL_SEG	equ	0x0800	; Segment where shell is loaded
 PROG_SEG	equ	0x2000	; Segment where programs are loaded
@@ -559,6 +572,10 @@ cmd_dispatch:
 	mov	di, cmd_prompt
 	call	str_compare_cmd
 	je	do_prompt
+
+	mov	di, cmd_path
+	call	str_compare_cmd
+	je	do_path
 
 	mov	di, cmd_date
 	call	str_compare_cmd
@@ -3313,6 +3330,154 @@ do_prompt:
 .prompt_default: db	'$P$G', 0
 
 ; ============================================================================
+; PATH command — display or set executable search path
+; ============================================================================
+do_path:
+	call	skip_spaces
+	cmp	byte [si], 0
+	jne	.path_set
+	; No argument — display current PATH
+	push	es
+	mov	es, [env_seg]
+	xor	si, si
+.path_find:
+	cmp	byte [es:si], 0
+	je	.path_none
+	cmp	byte [es:si], 'P'
+	jne	.path_skip
+	cmp	byte [es:si+1], 'A'
+	jne	.path_skip
+	cmp	byte [es:si+2], 'T'
+	jne	.path_skip
+	cmp	byte [es:si+3], 'H'
+	jne	.path_skip
+	cmp	byte [es:si+4], '='
+	jne	.path_skip
+	; Found — print it
+	add	si, 5
+	push	si
+	mov	si, .path_msg
+	call	print_string
+	pop	si
+.path_print:
+	mov	al, [es:si]
+	or	al, al
+	jz	.path_print_done
+	call	shell_putc
+	inc	si
+	jmp	.path_print
+.path_print_done:
+	call	shell_crlf
+	pop	es
+	jmp	cmd_loop
+.path_skip:
+	cmp	byte [es:si], 0
+	je	.path_skip_next
+	inc	si
+	jmp	.path_skip
+.path_skip_next:
+	inc	si
+	jmp	.path_find
+.path_none:
+	pop	es
+	mov	si, .path_no_msg
+	call	print_string
+	call	shell_crlf
+	jmp	cmd_loop
+.path_set:
+	; Set PATH — reuse PROMPT's env manipulation approach
+	; Build "PATH=<value>" and insert into env
+	push	es
+	mov	es, [env_seg]
+	; Remove existing PATH=
+	xor	di, di
+.path_find_old:
+	cmp	byte [es:di], 0
+	je	.path_old_done
+	cmp	byte [es:di], 'P'
+	jne	.path_skip_old
+	cmp	byte [es:di+1], 'A'
+	jne	.path_skip_old
+	cmp	byte [es:di+2], 'T'
+	jne	.path_skip_old
+	cmp	byte [es:di+3], 'H'
+	jne	.path_skip_old
+	cmp	byte [es:di+4], '='
+	jne	.path_skip_old
+	; Found — remove by shifting
+	mov	bx, di
+.path_skip_val:
+	cmp	byte [es:bx], 0
+	je	.path_skipped
+	inc	bx
+	jmp	.path_skip_val
+.path_skipped:
+	inc	bx
+.path_shift:
+	mov	al, [es:bx]
+	mov	[es:di], al
+	cmp	al, 0
+	jne	.path_shift_next
+	cmp	byte [es:bx+1], 0
+	je	.path_shift_end
+.path_shift_next:
+	inc	bx
+	inc	di
+	jmp	.path_shift
+.path_shift_end:
+	mov	byte [es:di+1], 0
+	jmp	.path_find_old
+.path_skip_old:
+	cmp	byte [es:di], 0
+	je	.path_skip_old_next
+	inc	di
+	jmp	.path_skip_old
+.path_skip_old_next:
+	inc	di
+	jmp	.path_find_old
+.path_old_done:
+	; Find end of env
+	xor	di, di
+.path_find_end:
+	cmp	byte [es:di], 0
+	je	.path_at_end
+.path_find_end_str:
+	cmp	byte [es:di], 0
+	je	.path_find_end_next
+	inc	di
+	jmp	.path_find_end_str
+.path_find_end_next:
+	inc	di
+	jmp	.path_find_end
+.path_at_end:
+	; Write PATH=<value>
+	mov	byte [es:di], 'P'
+	mov	byte [es:di+1], 'A'
+	mov	byte [es:di+2], 'T'
+	mov	byte [es:di+3], 'H'
+	mov	byte [es:di+4], '='
+	add	di, 5
+	; Uppercase the path value
+.path_copy_val:
+	lodsb
+	cmp	al, 'a'
+	jb	.path_no_upper
+	cmp	al, 'z'
+	ja	.path_no_upper
+	sub	al, 0x20
+.path_no_upper:
+	mov	[es:di], al
+	inc	di
+	or	al, al
+	jnz	.path_copy_val
+	mov	byte [es:di], 0
+	pop	es
+	jmp	cmd_loop
+
+.path_msg:	db	'PATH=', 0
+.path_no_msg:	db	'No Path', 0
+
+; ============================================================================
 ; DATE command — display current date
 ; ============================================================================
 do_date:
@@ -4695,9 +4860,40 @@ do_exec:
 	jmp	.exec_retry_ext
 
 .exec_really_not_found:
+	; Before giving up, try searching PATH directories
+	cmp	byte [path_searched], 1
+	je	.exec_really_done	; Already searched PATH, give up
+	mov	byte [path_searched], 1
+	call	search_path
+	jnc	.exec_path_hit
+.exec_really_done:
+	mov	byte [path_searched], 0
 	mov	si, msg_bad_cmd
 	call	print_string
 	jmp	cmd_loop
+.exec_path_hit:
+	; search_path set resolved_dir_cluster/entries and exec_fname.
+	; Set up for the file search just like do_exec does.
+	mov	byte [path_searched], 0
+	; Set empty command tail (PATH-found programs get no args for now)
+	mov	word [exec_cmdtail_ptr], exec_empty_tail
+	; Extension retry: try .COM if no ext
+	mov	byte [exec_try_ext], 0
+	cmp	byte [exec_fname+8], ' '
+	jne	.exec_path_has_ext
+	mov	byte [exec_fname+8], 'C'
+	mov	byte [exec_fname+9], 'O'
+	mov	byte [exec_fname+10], 'M'
+	mov	byte [exec_try_ext], 1
+.exec_path_has_ext:
+	; Read the target directory and search
+	call	read_resolved_dir
+	jc	.exec_really_done
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	jmp	.search_entry
 
 .exec_found:
 	; Check if this is a .BAT file — run through batch processor
@@ -4834,6 +5030,26 @@ do_exec:
 	mov	cx, MAX_HANDLES
 	rep	movsb
 	pop	ds
+	; Increment refcounts for inherited FILE handles (5+)
+	; Device handles 0-4 are permanent and don't need refcounting
+	push	bx
+	mov	bx, 5
+.inherit_refcount:
+	cmp	bx, MAX_HANDLES
+	jae	.inherit_done
+	mov	al, [es:0x18 + bx]
+	cmp	al, 0xFF
+	je	.inherit_next
+	xor	ah, ah
+	push	bx
+	mov	bx, ax
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+.inherit_next:
+	inc	bx
+	jmp	.inherit_refcount
+.inherit_done:
+	pop	bx
 	pop	cx
 	pop	di
 
@@ -10901,11 +11117,30 @@ int21_handler:
 	push	cx
 	push	ds
 	mov	di, 0x18
-	mov	ds, [cs:.i21_4b_parent_seg]	; Parent PSP segment
+	mov	ds, [cs:.i21_4b_parent_seg]
 	mov	si, 0x18
 	mov	cx, MAX_HANDLES
 	rep	movsb
 	pop	ds
+	; Increment refcounts for inherited FILE handles (5+)
+	push	bx
+	mov	bx, 5
+.i21_4b_inherit_ref:
+	cmp	bx, MAX_HANDLES
+	jae	.i21_4b_inherit_done
+	mov	al, [es:0x18 + bx]
+	cmp	al, 0xFF
+	je	.i21_4b_inherit_next
+	xor	ah, ah
+	push	bx
+	mov	bx, ax
+	inc	byte [cs:sft_refcount + bx]
+	pop	bx
+.i21_4b_inherit_next:
+	inc	bx
+	jmp	.i21_4b_inherit_ref
+.i21_4b_inherit_done:
+	pop	bx
 	pop	cx
 	pop	di
 	; PSP:2C Environment
@@ -11747,6 +11982,7 @@ cmd_set		db	'SET', 0
 cmd_date	db	'DATE', 0
 cmd_time	db	'TIME', 0
 cmd_prompt	db	'PROMPT', 0
+cmd_path	db	'PATH', 0
 
 ; ============================================================================
 ; I/O Redirection
@@ -12013,6 +12249,323 @@ redir_in_fname:		times 78 db 0
 redir_cmd_save:		times MAX_CMD_LEN + 1 db 0
 
 ; ============================================================================
+; search_path — Search PATH directories for the current exec_fname
+; ============================================================================
+; Reads PATH= from environment, tries each directory
+; On success: cmd_buffer has the full path, CF=0
+; On failure: CF=1
+search_path:
+	; Save the original command name from cmd_buffer
+	mov	si, cmd_buffer
+	mov	di, path_cmd_save
+	mov	cx, MAX_CMD_LEN + 1
+	rep	movsb
+
+	; Find PATH= in environment
+	mov	es, [env_seg]
+	xor	si, si
+.sp_scan:
+	cmp	byte [es:si], 0		; End of env
+	je	.sp_not_found
+	; Check for PATH= (case-insensitive)
+	mov	al, [es:si]
+	and	al, 0xDF		; Uppercase
+	cmp	al, 'P'
+	jne	.sp_skip
+	mov	al, [es:si+1]
+	and	al, 0xDF
+	cmp	al, 'A'
+	jne	.sp_skip
+	mov	al, [es:si+2]
+	and	al, 0xDF
+	cmp	al, 'T'
+	jne	.sp_skip
+	mov	al, [es:si+3]
+	and	al, 0xDF
+	cmp	al, 'H'
+	jne	.sp_skip
+	cmp	byte [es:si+4], '='
+	jne	.sp_skip
+	add	si, 5			; SI past "PATH="
+	jmp	.sp_try_dirs
+.sp_skip:
+	cmp	byte [es:si], 0
+	je	.sp_skip_next
+	inc	si
+	jmp	.sp_skip
+.sp_skip_next:
+	inc	si
+	jmp	.sp_scan
+
+.sp_try_dirs:
+	; ES:SI points into PATH value (e.g., "A:\;A:\BIN;A:\UTILS")
+.sp_next_dir:
+	cmp	byte [es:si], 0
+	je	.sp_not_found
+
+	; Build full path: directory + \ + command name
+	mov	di, cmd_buffer
+.sp_copy_dir:
+	mov	al, [es:si]
+	cmp	al, 0
+	je	.sp_dir_done
+	cmp	al, ';'
+	je	.sp_dir_sep
+	; Uppercase the path character
+	cmp	al, 'a'
+	jb	.sp_no_upper
+	cmp	al, 'z'
+	ja	.sp_no_upper
+	sub	al, 0x20
+.sp_no_upper:
+	mov	[di], al
+	inc	di
+	inc	si
+	jmp	.sp_copy_dir
+.sp_dir_sep:
+	inc	si
+.sp_dir_done:
+	; Add backslash if not already there
+	cmp	byte [di-1], '\'
+	je	.sp_has_slash
+	mov	byte [di], '\'
+	inc	di
+.sp_has_slash:
+	; Append command name (just name, no args) + command tail
+	push	si
+	push	es
+	push	ds
+	pop	es			; ES = DS = SHELL_SEG
+	mov	si, path_cmd_save
+.sp_copy_cmd:
+	lodsb
+	cmp	al, 0
+	je	.sp_cmd_end
+	mov	[di], al
+	inc	di
+	jmp	.sp_copy_cmd
+.sp_cmd_end:
+	mov	byte [di], 0
+	pop	es
+	pop	si
+
+	; Search the PATH directory for the executable.
+	; cmd_buffer has the full path. Walk directory components,
+	; then search the target directory for the file.
+	mov	[sp_env_si], si		; Save env position
+	mov	[sp_env_es], es		; Save env segment
+
+	; Set up drive and starting directory from cmd_buffer
+	mov	si, cmd_buffer
+	mov	al, [cur_drive]
+	mov	[resolved_drive], al
+
+	; Check for drive letter
+	cmp	byte [si+1], ':'
+	jne	.sp_no_drv
+	mov	al, [si]
+	cmp	al, 'a'
+	jb	.sp_drv_ok
+	sub	al, 0x20
+.sp_drv_ok:
+	sub	al, 'A'
+	mov	[resolved_drive], al
+	add	si, 2
+.sp_no_drv:
+	; Check for absolute path
+	cmp	byte [si], '\'
+	jne	.sp_rel_dir
+	mov	word [resolved_dir_cluster], 0
+	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	inc	si
+	jmp	.sp_walk_path
+.sp_rel_dir:
+	mov	ax, [cur_dir_cluster]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cur_dir_entries]
+	mov	[resolved_dir_entries], ax
+
+.sp_walk_path:
+	; SI points into the remaining path in cmd_buffer
+	; Check if there's a backslash remaining (meaning more dirs to descend)
+	mov	di, si
+	xor	bx, bx
+.sp_check_bs:
+	cmp	byte [di], 0
+	je	.sp_check_bs_done
+	cmp	byte [di], '\'
+	jne	.sp_check_bs_next
+	mov	bx, 1
+.sp_check_bs_next:
+	inc	di
+	jmp	.sp_check_bs
+.sp_check_bs_done:
+	cmp	bx, 0
+	je	.sp_at_target_dir
+
+	; Manually parse directory name from SI into exec_fname
+	mov	di, exec_fname
+	push	cx
+	push	es
+	push	ds
+	pop	es			; ES = DS = SHELL_SEG for stosb
+	; Fill with spaces
+	push	di
+	mov	al, ' '
+	mov	cx, 11
+	rep	stosb
+	pop	di
+	; Copy name chars until \ or null, uppercasing
+	mov	cx, 8
+.sp_parse_dir:
+	mov	al, [si]
+	cmp	al, 0
+	je	.sp_parse_dir_done
+	cmp	al, '\'
+	je	.sp_parse_dir_done
+	cmp	al, ' '
+	je	.sp_parse_dir_done
+	cmp	al, 'a'
+	jb	.sp_parse_dir_store
+	cmp	al, 'z'
+	ja	.sp_parse_dir_store
+	sub	al, 0x20
+.sp_parse_dir_store:
+	mov	[di], al
+	inc	si
+	inc	di
+	dec	cx
+	jnz	.sp_parse_dir
+.sp_parse_dir_done:
+	pop	es
+	pop	cx
+	; Skip backslash
+	cmp	byte [si], '\'
+	jne	.sp_at_target_dir
+	inc	si
+	mov	[sp_path_si], si	; Save position for after dir lookup
+
+	; Read current resolved directory
+	call	read_resolved_dir
+	jc	.sp_try_fail
+	; Search for this directory entry
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	mov	ax, SHELL_SEG
+	mov	es, ax
+.sp_dir_search:
+	cmp	byte [si], 0
+	je	.sp_try_fail
+	cmp	byte [si], 0xE5
+	je	.sp_dir_next
+	test	byte [si+11], 0x10
+	jz	.sp_dir_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.sp_dir_found
+.sp_dir_next:
+	add	si, 32
+	dec	cx
+	jnz	.sp_dir_search
+	jmp	.sp_try_fail
+.sp_dir_found:
+	; Descend
+	mov	ax, [si+26]
+	mov	[resolved_dir_cluster], ax
+	mov	word [resolved_dir_entries], (SECS_PER_CLUST * 512) / 32
+	mov	si, [sp_path_si]
+	jmp	.sp_walk_path
+
+.sp_at_target_dir:
+	; We're at the target directory. Parse the command name.
+	mov	ax, SHELL_SEG
+	mov	es, ax			; Ensure ES = SHELL_SEG for parse_83_filename
+	mov	si, path_cmd_save
+	mov	di, exec_fname
+	call	parse_83_filename
+
+	; Read the target directory
+	call	read_resolved_dir
+	jc	.sp_try_fail
+
+	; Try .COM first
+	cmp	byte [exec_fname+8], ' '
+	jne	.sp_has_ext
+	mov	byte [exec_fname+8], 'C'
+	mov	byte [exec_fname+9], 'O'
+	mov	byte [exec_fname+10], 'M'
+.sp_has_ext:
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.sp_file_search:
+	cmp	byte [si], 0
+	je	.sp_try_ext
+	cmp	byte [si], 0xE5
+	je	.sp_file_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.sp_file_found
+.sp_file_next:
+	add	si, 32
+	dec	cx
+	jnz	.sp_file_search
+.sp_try_ext:
+	cmp	byte [exec_fname+8], 'C'
+	jne	.sp_try_exe
+	mov	byte [exec_fname+8], 'E'
+	mov	byte [exec_fname+9], 'X'
+	mov	byte [exec_fname+10], 'E'
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	jmp	.sp_file_search
+.sp_try_exe:
+	cmp	byte [exec_fname+8], 'E'
+	jne	.sp_try_fail
+	mov	byte [exec_fname+8], 'B'
+	mov	byte [exec_fname+9], 'A'
+	mov	byte [exec_fname+10], 'T'
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+	jmp	.sp_file_search
+
+.sp_try_fail:
+	mov	si, [sp_env_si]
+	mov	es, [sp_env_es]
+	jmp	.sp_next_dir
+
+.sp_file_found:
+	; File exists in this PATH directory!
+
+.sp_found:
+	; resolved_dir_cluster/entries and exec_fname are set
+	clc
+	ret
+
+.sp_not_found:
+	stc
+	ret
+
+path_searched:	db	0
+sp_saved_char:	db	0
+exec_empty_tail: db	0
+sp_env_si:	dw	0
+sp_env_es:	dw	0
+sp_path_si:	dw	0
+path_cmd_save:	times MAX_CMD_LEN + 1 db 0
+
+; ============================================================================
 ; Variables
 ; ============================================================================
 cmd_buffer:	times MAX_CMD_LEN+1 db 0
@@ -12147,9 +12700,5 @@ saved_int09:	dd	0
 saved_int10:	dd	0
 saved_int1c:	dd	0
 
-		; Buffers at fixed high address in SHELL_SEG — well past code/data
-dir_buffer	equ	0x6000			; Fixed at SHELL_SEG:6000 (must be past code+data)
-fat_buffer	equ	dir_buffer + (ROOT_DIR_SECS * 512)  ; At SHELL_SEG:6E00
-batch_buffer	equ	fat_buffer + (2 * 512)		    ; At SHELL_SEG:7200 (max ~8KB batch file)
-io_buffer	equ	batch_buffer + (2 * 512)	    ; At SHELL_SEG:7600 (1024 bytes for AH=3F/40)
+		; Buffers are at the start of the file (after jmp start_code)
 		; FAT: 2 * 512 = 1024 bytes
