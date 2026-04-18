@@ -424,27 +424,52 @@ con_setup_esbx:
 ; con_write_al — Write character in AL through CON driver (preserves all regs)
 ; ============================================================================
 con_write_al:
-	; Write char in AL through INT 10h (via CON driver path)
-	; For built-in CON: direct INT 10h. For replacement drivers,
-	; this would go through the driver chain via drv_write_char.
-	push	ax
+	; Write char in AL through CON device driver
 	push	bx
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	push	cx
+	push	es
+	; Store char
+	mov	[cs:drv_char_buf], al
+	; Build request packet
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 8	; WRITE
+	mov	word [cs:drv_request+3], 0
+	mov	word [cs:drv_request+14], drv_char_buf
+	mov	word [cs:drv_request+16], cs
+	mov	word [cs:drv_request+18], 1
+	; Call CON driver
+	mov	bx, cs
+	mov	es, bx
+	mov	bx, drv_con
+	call	drv_call
+	pop	es
+	pop	cx
 	pop	bx
-	pop	ax
 	ret
 
 ; ============================================================================
 ; con_read_al — Read one character from CON driver into AL (preserves other regs)
 ; ============================================================================
 con_read_al:
-	; Read char from keyboard (via CON driver path)
-	; For built-in CON: direct INT 16h.
+	; Read one char from CON device driver into AL
 	push	bx
-	mov	ah, 0x00
-	int	0x16
+	push	cx
+	push	es
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 4	; READ
+	mov	word [cs:drv_request+3], 0
+	mov	word [cs:drv_request+14], drv_char_buf
+	mov	word [cs:drv_request+16], cs
+	mov	word [cs:drv_request+18], 1
+	mov	bx, cs
+	mov	es, bx
+	mov	bx, drv_con
+	call	drv_call
+	mov	al, [cs:drv_char_buf]
+	pop	es
+	pop	cx
 	pop	bx
 	ret
 
@@ -453,13 +478,31 @@ con_read_al:
 ; Returns: ZF=1 if no char available, ZF=0 if char ready (AL = peeked char)
 ; ============================================================================
 con_check_input:
-	; Check if key available (via CON driver path)
-	; Returns: ZF=1 no char, ZF=0 char ready (AL = char)
+	; Check if key available via CON driver
+	; Returns: ZF=1 no char, ZF=0 char ready
 	push	bx
-	mov	ah, 0x01
-	int	0x16
+	push	cx
+	push	es
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 5	; NONDESTRUCTIVE READ
+	mov	word [cs:drv_request+3], 0
+	mov	bx, cs
+	mov	es, bx
+	mov	bx, drv_con
+	call	drv_call
+	; Check busy flag (bit 9 of status word)
+	test	word [cs:drv_request+3], 0x0200
+	pop	es
+	pop	cx
 	pop	bx
-	ret			; ZF set by INT 16h AH=01
+	jnz	.cci_busy
+	; Char available (ZF=0 from the test failing)
+	ret
+.cci_busy:
+	; No char — set ZF
+	xor	al, al		; ZF=1
+	ret
 
 ; Pointer to first driver in chain
 drv_chain_head:	dw	drv_nul, 0	; Segment filled at init
@@ -6278,8 +6321,7 @@ int21_handler:
 	add	di, 2		; Point to data area
 	xor	bx, bx		; Character count
 .i21_0a_loop:
-	mov	ah, 0x00
-	int	0x16		; Read key
+	call	con_read_al	; Read key from CON driver
 	cmp	al, 0x0D	; Enter?
 	je	.i21_0a_done
 	cmp	al, 0x08	; Backspace?
@@ -6288,23 +6330,19 @@ int21_handler:
 	jge	.i21_0a_loop
 	mov	[di+bx], al
 	inc	bx
-	; Echo
-	mov	ah, 0x0E
-	int	0x10
+	; Echo through CON driver
+	call	con_write_al
 	jmp	.i21_0a_loop
 .i21_0a_bs:
 	cmp	bx, 0
 	je	.i21_0a_loop
 	dec	bx
 	mov	al, 0x08
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	mov	al, 0x08
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	jmp	.i21_0a_loop
 .i21_0a_done:
 	mov	byte [di+bx], 0x0D	; CR at end
@@ -6312,11 +6350,9 @@ int21_handler:
 	mov	[di+1], bl		; Store actual length
 	; Echo CR/LF
 	mov	al, 0x0D
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	mov	al, 0x0A
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	pop	di
 	pop	cx
 	pop	bx
