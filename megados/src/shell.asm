@@ -88,13 +88,12 @@ drv_nul_int:
 	push	es
 	mov	es, [cs:drv_req_ptr+2]
 	mov	bx, [cs:drv_req_ptr]
-	mov	byte [es:bx+2], 0	; Command code (for reference)
-	mov	word [es:bx+3], 0x0100	; Status: done, no error
 	; For reads, set transfer count to 0 (EOF)
 	cmp	byte [es:bx+2], 4	; READ command?
 	jne	.nul_not_read
 	mov	word [es:bx+18], 0	; 0 bytes transferred
 .nul_not_read:
+	mov	word [es:bx+3], 0x0100	; Status: done, no error
 	pop	es
 	pop	bx
 	retf
@@ -412,25 +411,49 @@ drv_read_char:
 	ret
 
 ; ============================================================================
-; con_setup_esbx — Load ES:BX to point to CON driver header
+; con_setup_esbx — Load ES:BX to point to current CON driver
 ; ============================================================================
+; Walks the driver chain to find the first driver with ISCIN+ISCOT
+; attributes (bits 0+1). This allows a loaded replacement CON driver
+; (like ANSI.SYS) to intercept console I/O.
 con_setup_esbx:
+	push	ax
+	mov	bx, [cs:drv_chain_head]
+	mov	es, [cs:drv_chain_head+2]
+.cse_loop:
+	; Check for end of chain
+	cmp	bx, 0xFFFF
+	je	.cse_builtin
+	; Check if this driver has ISCIN+ISCOT (bits 0+1 of attribute)
+	mov	ax, [es:bx+4]		; Attribute word
+	and	ax, 0x0003		; ISCIN | ISCOT
+	cmp	ax, 0x0003
+	je	.cse_found
+	; Next driver
+	mov	ax, [es:bx+2]		; Next segment
+	push	ax
+	mov	bx, [es:bx]		; Next offset
+	pop	es
+	cmp	bx, 0xFFFF
+	jne	.cse_loop
+.cse_builtin:
+	; Fallback to built-in CON
 	mov	bx, drv_con
 	mov	ax, cs
 	mov	es, ax
+.cse_found:
+	pop	ax
 	ret
 
 ; ============================================================================
 ; con_write_al — Write character in AL through CON driver (preserves all regs)
 ; ============================================================================
 con_write_al:
-	; Write char in AL through CON device driver
+	; Write char in AL through active CON device driver
 	push	bx
 	push	cx
 	push	es
-	; Store char
 	mov	[cs:drv_char_buf], al
-	; Build request packet
 	mov	byte [cs:drv_request], 22
 	mov	byte [cs:drv_request+1], 0
 	mov	byte [cs:drv_request+2], 8	; WRITE
@@ -438,10 +461,7 @@ con_write_al:
 	mov	word [cs:drv_request+14], drv_char_buf
 	mov	word [cs:drv_request+16], cs
 	mov	word [cs:drv_request+18], 1
-	; Call CON driver
-	mov	bx, cs
-	mov	es, bx
-	mov	bx, drv_con
+	call	con_setup_esbx		; Find active CON driver
 	call	drv_call
 	pop	es
 	pop	cx
@@ -452,7 +472,7 @@ con_write_al:
 ; con_read_al — Read one character from CON driver into AL (preserves other regs)
 ; ============================================================================
 con_read_al:
-	; Read one char from CON device driver into AL
+	; Read one char from active CON device driver into AL
 	push	bx
 	push	cx
 	push	es
@@ -463,9 +483,7 @@ con_read_al:
 	mov	word [cs:drv_request+14], drv_char_buf
 	mov	word [cs:drv_request+16], cs
 	mov	word [cs:drv_request+18], 1
-	mov	bx, cs
-	mov	es, bx
-	mov	bx, drv_con
+	call	con_setup_esbx		; Find active CON driver
 	call	drv_call
 	mov	al, [cs:drv_char_buf]
 	pop	es
@@ -478,7 +496,7 @@ con_read_al:
 ; Returns: ZF=1 if no char available, ZF=0 if char ready (AL = peeked char)
 ; ============================================================================
 con_check_input:
-	; Check if key available via CON driver
+	; Check if key available via active CON driver
 	; Returns: ZF=1 no char, ZF=0 char ready
 	push	bx
 	push	cx
@@ -487,9 +505,7 @@ con_check_input:
 	mov	byte [cs:drv_request+1], 0
 	mov	byte [cs:drv_request+2], 5	; NONDESTRUCTIVE READ
 	mov	word [cs:drv_request+3], 0
-	mov	bx, cs
-	mov	es, bx
-	mov	bx, drv_con
+	call	con_setup_esbx		; Find active CON driver
 	call	drv_call
 	; Check busy flag (bit 9 of status word)
 	test	word [cs:drv_request+3], 0x0200
@@ -13383,10 +13399,29 @@ process_config_sys:
 	int	0x21
 	pop	ds
 	pop	di
+	jc	.cfg_dev_read_err	; Read failed
 	cmp	ax, 0
 	je	.cfg_dev_read_done
 	add	di, ax
 	jmp	.cfg_dev_read
+.cfg_dev_read_err:
+	; Read failed — close file, free memory, bail
+	mov	ah, 0x3E
+	mov	bx, [.cfg_dev_handle]
+	int	0x21
+	push	es
+	mov	es, [.cfg_dev_seg]
+	mov	ah, 0x49
+	int	0x21
+	pop	es
+	push	si
+	mov	si, .cfg_msg_not_found
+	call	print_string
+	mov	si, cfg_fname
+	call	print_string
+	call	shell_crlf
+	pop	si
+	ret
 .cfg_dev_read_done:
 	; Close the file
 	mov	ah, 0x3E
@@ -13411,42 +13446,41 @@ process_config_sys:
 	mov	ah, 0x4A
 	int	0x21
 	pop	es
+	jc	.cfg_dev_resize_err	; Resize failed — continue anyway
 
-	; The driver header is at the start of the loaded file
-	; Link it into the driver chain (insert after NUL)
+.cfg_dev_resize_err:
+	; Call the driver's INIT function BEFORE linking into chain
 	mov	es, [.cfg_dev_seg]
-	; Set the driver's next pointer to what NUL currently points to
-	mov	ax, [cs:drv_nul]	; Current NUL→next offset
-	mov	[es:0], ax
-	mov	ax, [cs:drv_nul+2]	; Current NUL→next segment
-	mov	[es:2], ax
-	; Point NUL→next to the new driver
-	mov	word [cs:drv_nul], 0	; New driver at offset 0 in its segment
-	mov	ax, [.cfg_dev_seg]
-	mov	[cs:drv_nul+2], ax
-
-	; Call the driver's INIT function
-	; Build INIT request packet
 	mov	byte [cs:drv_request], 22
 	mov	byte [cs:drv_request+1], 0
 	mov	byte [cs:drv_request+2], 0	; Command = INIT
 	mov	word [cs:drv_request+3], 0	; Status
-	; Pass the config line remainder as init data
-	; (INIT packet has pointer to rest of CONFIG.SYS line at offset 18)
 	mov	word [cs:drv_request+18], si	; Command line offset
 	mov	word [cs:drv_request+20], ds	; Command line segment
-
-	; Call strategy + interrupt
 	mov	bx, 0			; Driver header at ES:0
 	call	drv_call
+
+	; Check INIT status — bit 15 = error
+	test	word [cs:drv_request+3], 0x8000
+	jnz	.cfg_dev_init_fail
+
+	; INIT succeeded — link driver into chain (insert after NUL)
+	mov	es, [.cfg_dev_seg]
+	mov	ax, [cs:drv_nul]	; Current NUL→next offset
+	mov	[es:0], ax
+	mov	ax, [cs:drv_nul+2]	; Current NUL→next segment
+	mov	[es:2], ax
+	mov	word [cs:drv_nul], 0	; New driver at offset 0 in its segment
+	mov	ax, [.cfg_dev_seg]
+	mov	[cs:drv_nul+2], ax
 
 	; Print driver name
 	push	si
 	mov	si, .cfg_msg_device
 	call	print_string
-	; Print 8-byte name from header
 	push	es
 	push	cx
+	mov	es, [.cfg_dev_seg]
 	mov	si, 10			; Name at header+10
 	mov	cx, 8
 .cfg_dev_name:
@@ -13462,6 +13496,22 @@ process_config_sys:
 	pop	es
 	pop	si
 	call	shell_crlf
+	ret
+
+.cfg_dev_init_fail:
+	; INIT failed — free memory, report error
+	push	es
+	mov	es, [.cfg_dev_seg]
+	mov	ah, 0x49
+	int	0x21
+	pop	es
+	push	si
+	mov	si, .cfg_msg_init_fail
+	call	print_string
+	mov	si, cfg_fname
+	call	print_string
+	call	shell_crlf
+	pop	si
 	ret
 
 .cfg_dev_err:
@@ -13554,6 +13604,7 @@ process_config_sys:
 .cfg_msg_device: db	'  Device: ', 0
 .cfg_msg_not_found: db	'  Bad or missing: ', 0
 .cfg_msg_no_mem: db	'  Insufficient memory', 0x0D, 0x0A, 0
+.cfg_msg_init_fail: db	'  INIT failed: ', 0
 
 config_sys_name: db	'CONFIG.SYS', 0
 cfg_line_buf:	times MAX_CMD_LEN+1 db 0
