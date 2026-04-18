@@ -314,6 +314,12 @@ _beep_wait:
         ; Initialize sprite cursor
         jsr cursor_init
 
+        ; Drain any stray keypresses from the hardware keyboard queue
+-       lda $D610
+        beq +
+        sta $D610               ; Dequeue
+        bra -
++
         ; Enter main emulation loop
         jmp main_loop
 

@@ -1634,12 +1634,47 @@ do_dir:
 	mov	word [file_count], 0
 	mov	byte [dir_col], 0
 
-	; Print volume header
+	; Print volume header — scan for volume label entry
 	call	shell_crlf
+	push	si
+	push	cx
+	mov	si, dir_buffer
+.vol_scan:
+	cmp	byte [si], 0		; End of directory
+	je	.vol_none
+	cmp	byte [si], 0xE5		; Deleted
+	je	.vol_scan_next
+	test	byte [si+11], 0x08	; Volume label attribute?
+	jnz	.vol_found
+.vol_scan_next:
+	add	si, 32
+	dec	cx
+	jnz	.vol_scan
+.vol_none:
+	pop	cx
+	pop	si
 	push	si
 	mov	si, msg_vol_hdr
 	call	print_string
 	pop	si
+	jmp	.vol_hdr_done
+.vol_found:
+	pop	cx
+	; Print " Volume in drive is "
+	push	si
+	mov	si, msg_vol_is
+	call	print_string
+	pop	si
+	; Print the 11-char label
+	mov	cx, 11
+.vol_print:
+	lodsb
+	call	shell_putc
+	dec	cx
+	jnz	.vol_print
+	call	shell_crlf
+	pop	si
+.vol_hdr_done:
 	; Print "Directory of  X:\"
 	push	si
 	mov	si, msg_dir_of
@@ -7526,6 +7561,7 @@ int21_handler:
 	cmp	bx, MAX_HANDLES
 	jae	.i21_42_bad
 	mov	[cs:.i21_42_method], al	; Save method before AL is clobbered
+	push	es
 	push	si
 	call	handle_to_sft
 	jc	.i21_42_bad_pop
@@ -7617,6 +7653,7 @@ int21_handler:
 	mov	dx, [cs:file_handles + si + 10]
 
 	pop	si
+	pop	es
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
@@ -7633,6 +7670,7 @@ int21_handler:
 
 .i21_42_bad_pop:
 	pop	si
+	pop	es
 	jmp	.i21_42_bad
 
 .i21_42_method:	db	0
@@ -12647,6 +12685,7 @@ msg_cd_root	db	'\', 0
 msg_dir_tag	db	'  <DIR>', 0x0D, 0x0A, 0
 msg_dir_tag_fmt	db	' <DIR>       ', 0
 msg_vol_hdr	db	' Volume in drive has no label', 0x0D, 0x0A, 0
+msg_vol_is	db	' Volume in drive is ', 0
 msg_dir_of	db	' Directory of  ', 0
 
 cmd_dir		db	'DIR', 0
