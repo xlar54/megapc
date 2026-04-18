@@ -388,6 +388,35 @@ Not implemented:
 
 Limits: 255 lines max, 253 chars per line.
 
+MEGADOS SHELL COMMANDS
+=======================
+
+Built-in commands:
+  DIR [/W]    List files              MKDIR     Create directory
+  TYPE        Display file            RMDIR     Remove directory
+  COPY        Copy file               CD        Change directory
+  DEL         Delete file              SET       Environment variables
+  REN         Rename file              PROMPT    Set prompt format
+  CLS         Clear screen             DATE      Show current date
+  VER         Show version             TIME      Show current time
+  ECHO        Print text               REM       Comment (batch)
+  PAUSE       Wait for key             PATH      Set executable search path
+  A:/B:       Switch drive
+
+Prompt $-codes: $P $G $L $N $D $T $V $B $Q $E $H $$ $_
+
+Command line: 127 characters max (beeps via PC speaker at limit)
+
+MEGADOS PATH SEARCH
+====================
+
+PATH command sets the executable search path. When a command is not
+found in the current directory, the shell searches each PATH directory
+for .COM, .EXE, and .BAT files. Case-insensitive PATH= env lookup.
+Child programs inherit command line arguments via PATH search.
+
+Example: PATH A:\BIN;A:\UTILS
+
 MEGADOS I/O REDIRECTION
 ========================
 
@@ -395,6 +424,7 @@ Implemented: >, >>, < for built-in commands and external programs.
 Shell output goes through INT 21h AH=02h which checks if stdout
 is a device or file. AH=09h also routes through AH=02h.
 Child programs inherit parent JFT (including redirected handles).
+Refcounts incremented for file handles (5+) during JFT inherit.
 
 Limitations:
   - No pipe (|) support
@@ -402,6 +432,18 @@ Limitations:
   - No quoted filenames or filenames with spaces
   - Programs using INT 10h directly bypass redirection
   - Redirected output is slow (one byte at a time through AH=40h)
+  - AH=06h output still intercepted by emulator (bypasses redirection)
+
+MEGADOS EXTERNAL PROGRAMS
+==========================
+
+  EDLIN.COM   Line editor (see EDLIN section below)
+  MORE.COM    Display file one screen at a time (Q to quit)
+  BEEP.COM    PC speaker test (PIT Timer 2 tones)
+  ARGS.COM    Display command line arguments (test utility)
+  DOSTEST.COM Compatibility test suite (52 tests)
+  HDLTEST.COM Handle/device test suite (14 tests)
+  SYSINFO.COM System information display
 
 KNOWN BUGS
 ===========
@@ -416,9 +458,11 @@ KNOWN BUGS
   Suspected emulator-side issue with video mode change or
   cache/execution state corruption. Works on real MS-DOS images.
 
-- AH=06h (direct console I/O) output is still intercepted by the
-  emulator for speed. Programs using AH=06h for output cannot be
-  redirected. Only AH=02h and AH=09h support redirection.
+- Emulator data cache can corrupt tail end of loaded program memory.
+  Workaround: place critical strings earlier in program data section.
+
+- Running DOSTEST twice may show minor handle leaks (refcount drift
+  for device handles inherited across program invocations).
 
 TODO
 =====

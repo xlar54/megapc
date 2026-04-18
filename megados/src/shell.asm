@@ -3344,13 +3344,21 @@ do_path:
 .path_find:
 	cmp	byte [es:si], 0
 	je	.path_none
-	cmp	byte [es:si], 'P'
+	mov	al, [es:si]
+	and	al, 0xDF
+	cmp	al, 'P'
 	jne	.path_skip
-	cmp	byte [es:si+1], 'A'
+	mov	al, [es:si+1]
+	and	al, 0xDF
+	cmp	al, 'A'
 	jne	.path_skip
-	cmp	byte [es:si+2], 'T'
+	mov	al, [es:si+2]
+	and	al, 0xDF
+	cmp	al, 'T'
 	jne	.path_skip
-	cmp	byte [es:si+3], 'H'
+	mov	al, [es:si+3]
+	and	al, 0xDF
+	cmp	al, 'H'
 	jne	.path_skip
 	cmp	byte [es:si+4], '='
 	jne	.path_skip
@@ -3395,13 +3403,21 @@ do_path:
 .path_find_old:
 	cmp	byte [es:di], 0
 	je	.path_old_done
-	cmp	byte [es:di], 'P'
+	mov	al, [es:di]
+	and	al, 0xDF
+	cmp	al, 'P'
 	jne	.path_skip_old
-	cmp	byte [es:di+1], 'A'
+	mov	al, [es:di+1]
+	and	al, 0xDF
+	cmp	al, 'A'
 	jne	.path_skip_old
-	cmp	byte [es:di+2], 'T'
+	mov	al, [es:di+2]
+	and	al, 0xDF
+	cmp	al, 'T'
 	jne	.path_skip_old
-	cmp	byte [es:di+3], 'H'
+	mov	al, [es:di+3]
+	and	al, 0xDF
+	cmp	al, 'H'
 	jne	.path_skip_old
 	cmp	byte [es:di+4], '='
 	jne	.path_skip_old
