@@ -25,6 +25,249 @@ fat_buffer:	times	(2 * 512) db 0		; 1024 bytes for FAT
 batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
 io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
 
+; ============================================================================
+; Device Driver Chain — built-in character device drivers
+; ============================================================================
+; Each header: 4 bytes next ptr, 2 bytes attr, 2 bytes strategy,
+;              2 bytes interrupt, 8 bytes name = 18 bytes
+;
+; Driver attribute bits:
+;   Bit 15 = 1: character device (0 = block device)
+;   Bit 14 = 1: IOCTL supported
+;   Bit  3 = 1: clock device
+;   Bit  2 = 1: NUL device
+;   Bit  1 = 1: standard output (CON)
+;   Bit  0 = 1: standard input (CON)
+
+; Request header stored here for driver calls
+drv_request:	times 30 db 0
+drv_req_ptr:	dw	drv_request	; Strategy saves request pointer here
+		dw	0		; Segment (filled at init)
+
+; NUL device — first in chain (always first, per DOS convention)
+drv_nul:
+	dw	drv_con, 0		; Next = CON (segment filled at init)
+	dw	0x8004			; Char device + NUL attribute
+	dw	drv_strategy		; Shared strategy routine
+	dw	drv_nul_int		; NUL interrupt routine
+	db	'NUL     '		; Device name
+
+; CON device — console (keyboard + screen)
+drv_con:
+	dw	drv_aux, 0		; Next = AUX
+	dw	0x8013			; Char device + ISCIN + ISCOT + SPECIAL
+	dw	drv_strategy
+	dw	drv_con_int
+	db	'CON     '
+
+; AUX device — auxiliary (serial port stub)
+drv_aux:
+	dw	drv_prn, 0		; Next = PRN
+	dw	0x8000			; Char device
+	dw	drv_strategy
+	dw	drv_aux_int
+	db	'AUX     '
+
+; PRN device — printer (stub)
+drv_prn:
+	dw	0xFFFF, 0xFFFF		; Last in chain
+	dw	0x8000			; Char device
+	dw	drv_strategy
+	dw	drv_prn_int
+	db	'PRN     '
+
+; Shared strategy routine — just saves the request packet pointer
+drv_strategy:
+	mov	[cs:drv_req_ptr], bx
+	mov	[cs:drv_req_ptr+2], es
+	retf
+
+; NUL driver interrupt — discards output, returns EOF on input
+drv_nul_int:
+	push	bx
+	push	es
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	byte [es:bx+2], 0	; Command code (for reference)
+	mov	word [es:bx+3], 0x0100	; Status: done, no error
+	; For reads, set transfer count to 0 (EOF)
+	cmp	byte [es:bx+2], 4	; READ command?
+	jne	.nul_not_read
+	mov	word [es:bx+18], 0	; 0 bytes transferred
+.nul_not_read:
+	pop	es
+	pop	bx
+	retf
+
+; CON driver interrupt — console I/O
+drv_con_int:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	push	es
+	push	ds
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	al, [es:bx+2]		; Command code
+
+	cmp	al, 0			; INIT
+	je	.con_init
+	cmp	al, 4			; READ
+	je	.con_read
+	cmp	al, 8			; WRITE
+	je	.con_write
+	cmp	al, 5			; NONDESTRUCTIVE READ
+	je	.con_nd_read
+	cmp	al, 6			; INPUT STATUS
+	je	.con_in_status
+	cmp	al, 7			; INPUT FLUSH
+	je	.con_in_flush
+	cmp	al, 10			; OUTPUT STATUS
+	je	.con_out_status
+	; Unknown command — return done
+	mov	word [es:bx+3], 0x0100
+	jmp	.con_done
+
+.con_init:
+	mov	word [es:bx+3], 0x0100	; Done
+	jmp	.con_done
+
+.con_read:
+	; Read CX bytes from keyboard to transfer buffer
+	mov	cx, [es:bx+18]		; Byte count
+	mov	di, [es:bx+14]		; Transfer offset
+	push	es
+	mov	es, [cs:drv_req_ptr+2]
+	mov	ds, [es:bx+16]		; Transfer segment
+	pop	es
+	push	es
+	push	ds
+	pop	es			; ES:DI = transfer buffer
+	xor	dx, dx			; Bytes read
+.con_read_loop:
+	jcxz	.con_read_done
+	mov	ah, 0x00
+	int	0x16			; Wait for key
+	stosb				; Store in buffer
+	dec	cx
+	inc	dx
+	jmp	.con_read_loop
+.con_read_done:
+	pop	es
+	push	cs
+	pop	ds
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	[es:bx+18], dx		; Actual bytes read
+	mov	word [es:bx+3], 0x0100	; Done
+	jmp	.con_done
+
+.con_write:
+	; Write CX bytes from transfer buffer to screen
+	mov	cx, [es:bx+18]		; Byte count
+	mov	si, [es:bx+14]		; Transfer offset
+	push	ds
+	mov	ds, [es:bx+16]		; Transfer segment
+	xor	dx, dx			; Bytes written
+.con_write_loop:
+	jcxz	.con_write_done
+	lodsb
+	mov	ah, 0x0E
+	push	bx
+	mov	bx, 0x0007
+	int	0x10
+	pop	bx
+	dec	cx
+	inc	dx
+	jmp	.con_write_loop
+.con_write_done:
+	pop	ds
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	[es:bx+18], dx		; Actual bytes written
+	mov	word [es:bx+3], 0x0100	; Done
+	jmp	.con_done
+
+.con_nd_read:
+	; Non-destructive read — check if key available
+	mov	ah, 0x01
+	int	0x16
+	jz	.con_nd_none
+	mov	[es:bx+13], al		; Character
+	mov	word [es:bx+3], 0x0100	; Done
+	jmp	.con_done
+.con_nd_none:
+	mov	word [es:bx+3], 0x0200	; Busy (no char available)
+	jmp	.con_done
+
+.con_in_status:
+	mov	ah, 0x01
+	int	0x16
+	jz	.con_in_not_ready
+	mov	word [es:bx+3], 0x0100	; Done (ready)
+	jmp	.con_done
+.con_in_not_ready:
+	mov	word [es:bx+3], 0x0200	; Busy
+	jmp	.con_done
+
+.con_in_flush:
+	; Flush keyboard buffer
+.con_flush_loop:
+	mov	ah, 0x01
+	int	0x16
+	jz	.con_flush_done
+	mov	ah, 0x00
+	int	0x16
+	jmp	.con_flush_loop
+.con_flush_done:
+	mov	word [es:bx+3], 0x0100
+	jmp	.con_done
+
+.con_out_status:
+	mov	word [es:bx+3], 0x0100	; Always ready
+	jmp	.con_done
+
+.con_done:
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	retf
+
+; AUX driver interrupt — stub
+drv_aux_int:
+	push	bx
+	push	es
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	word [es:bx+3], 0x0100	; Done
+	mov	word [es:bx+18], 0	; 0 bytes transferred
+	pop	es
+	pop	bx
+	retf
+
+; PRN driver interrupt — stub
+drv_prn_int:
+	push	bx
+	push	es
+	mov	es, [cs:drv_req_ptr+2]
+	mov	bx, [cs:drv_req_ptr]
+	mov	word [es:bx+3], 0x0100	; Done
+	mov	word [es:bx+18], 0
+	pop	es
+	pop	bx
+	retf
+
+; Pointer to first driver in chain
+drv_chain_head:	dw	drv_nul, 0	; Segment filled at init
+
 start_code:
 
 SHELL_SEG	equ	0x0800	; Segment where shell is loaded
@@ -62,6 +305,13 @@ start_init:
 
 	; Point exec_seg at our PSP (same segment, JFT at offset 0x18)
 	mov	word [exec_seg], SHELL_SEG
+
+	; Initialize device driver chain segment pointers
+	mov	word [drv_nul+2], SHELL_SEG	; NUL → CON segment
+	mov	word [drv_con+2], SHELL_SEG	; CON → AUX segment
+	mov	word [drv_aux+2], SHELL_SEG	; AUX → PRN segment
+	mov	word [drv_chain_head+2], SHELL_SEG
+	mov	word [drv_req_ptr+2], SHELL_SEG
 
 	; Install interrupt vectors
 	xor	ax, ax
