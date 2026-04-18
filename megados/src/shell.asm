@@ -477,9 +477,28 @@ cmd_loop:
 	pop	es
 .prompt_done:
 
-	; Read command line
+	; Read command line via INT 21h AH=0A (enables DOSKEY hook)
+	mov	byte [input_buf], MAX_CMD_LEN
+	mov	byte [input_buf+1], 0
+	mov	ah, 0x0A
+	mov	dx, input_buf
+	int	0x21
+	; Print newline after input
+	mov	al, 0x0D
+	mov	ah, 0x0E
+	int	0x10
+	mov	al, 0x0A
+	mov	ah, 0x0E
+	int	0x10
+	; Copy input to cmd_buffer and null-terminate
+	mov	si, input_buf + 2
 	mov	di, cmd_buffer
-	call	read_line
+	xor	ch, ch
+	mov	cl, [input_buf+1]	; Actual length
+	jcxz	.input_empty
+	rep	movsb
+.input_empty:
+	mov	byte [di], 0
 
 	; Parse and set up I/O redirection before dispatch
 	call	redir_parse
@@ -5203,10 +5222,11 @@ do_exec:
 	cmp	ax, 0xFF8
 	jb	.load_cluster
 
-	; Save BIOS vectors before launching program
+	; Save all vectors before launching program (preserves TSR hooks)
 	push	ds
 	xor	ax, ax
 	mov	ds, ax
+	; BIOS vectors
 	mov	ax, [ds:0x20]
 	mov	[cs:saved_int08], ax
 	mov	ax, [ds:0x22]
@@ -5223,6 +5243,27 @@ do_exec:
 	mov	[cs:saved_int1c], ax
 	mov	ax, [ds:0x72]
 	mov	[cs:saved_int1c+2], ax
+	; DOS vectors (INT 20h-24h)
+	mov	ax, [ds:0x80]
+	mov	[cs:saved_int20], ax
+	mov	ax, [ds:0x82]
+	mov	[cs:saved_int20+2], ax
+	mov	ax, [ds:0x84]
+	mov	[cs:saved_int21], ax
+	mov	ax, [ds:0x86]
+	mov	[cs:saved_int21+2], ax
+	mov	ax, [ds:0x88]
+	mov	[cs:saved_int22], ax
+	mov	ax, [ds:0x8A]
+	mov	[cs:saved_int22+2], ax
+	mov	ax, [ds:0x8C]
+	mov	[cs:saved_int23], ax
+	mov	ax, [ds:0x8E]
+	mov	[cs:saved_int23+2], ax
+	mov	ax, [ds:0x90]
+	mov	[cs:saved_int24], ax
+	mov	ax, [ds:0x92]
+	mov	[cs:saved_int24+2], ax
 	pop	ds
 
 	; Check if .EXE by looking at first two bytes (MZ signature)
@@ -5646,6 +5687,8 @@ int21_handler:
 	je	.i21_1f
 	cmp	ah, 0x32
 	je	.i21_32
+	cmp	ah, 0x31
+	je	.i21_31
 	; Unhandled — return error (CF=1, AX=1 invalid function)
 	mov	ax, 1
 	push	bp
@@ -11400,6 +11443,53 @@ int21_handler:
 .i21_4b_parent_seg:	dw	0
 .i21_4b_cmdtail_seg:	dw	0
 
+; --- AH=31: Terminate and Stay Resident ---
+; Input: AL = return code, DX = paragraphs to keep resident
+.i21_31:
+	xor	ah, ah
+	mov	[cs:last_return_code], ax
+	; Resize the program's memory block to DX paragraphs
+	mov	bx, dx
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	ah, 0x4A
+	int	0x21
+	pop	es
+	; Close file handles 5+ (like AH=4Ch)
+	push	bx
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	bx, 5
+.i21_31_close:
+	cmp	bx, MAX_HANDLES
+	jae	.i21_31_closed
+	cmp	byte [es:0x18 + bx], 0xFF
+	je	.i21_31_close_next
+	push	bx
+	mov	ah, 0x3E
+	int	0x21
+	pop	bx
+.i21_31_close_next:
+	inc	bx
+	jmp	.i21_31_close
+.i21_31_closed:
+	pop	es
+	pop	bx
+	; Return to shell WITHOUT freeing memory or restoring vectors
+	; The TSR's interrupt hooks stay active
+	mov	ax, [cs:shell_psp_seg]
+	mov	[cs:exec_seg], ax
+	mov	word [cs:dta_seg], SHELL_SEG
+	mov	word [cs:dta_off], 0x0080
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	jmp	cmd_loop
+
 ; --- AH=4C: Terminate with return code ---
 .i21_4c:
 	; Save return code
@@ -11513,6 +11603,7 @@ int20_handler:
 int20_handler_restore_vectors:
 	xor	ax, ax
 	mov	es, ax
+	; Restore BIOS vectors
 	mov	ax, [cs:saved_int08]
 	mov	[es:0x20], ax
 	mov	ax, [cs:saved_int08+2]
@@ -11529,16 +11620,27 @@ int20_handler_restore_vectors:
 	mov	[es:0x70], ax
 	mov	ax, [cs:saved_int1c+2]
 	mov	[es:0x72], ax
-	mov	word [es:0x80], int20_handler
-	mov	word [es:0x82], SHELL_SEG
-	mov	word [es:0x84], int21_handler
-	mov	word [es:0x86], SHELL_SEG
-	mov	word [es:0x88], int20_handler
-	mov	word [es:0x8A], SHELL_SEG
-	mov	word [es:0x8C], int23_handler
-	mov	word [es:0x8E], SHELL_SEG
-	mov	word [es:0x90], int24_handler
-	mov	word [es:0x92], SHELL_SEG
+	; Restore DOS vectors (preserves TSR hooks)
+	mov	ax, [cs:saved_int20]
+	mov	[es:0x80], ax
+	mov	ax, [cs:saved_int20+2]
+	mov	[es:0x82], ax
+	mov	ax, [cs:saved_int21]
+	mov	[es:0x84], ax
+	mov	ax, [cs:saved_int21+2]
+	mov	[es:0x86], ax
+	mov	ax, [cs:saved_int22]
+	mov	[es:0x88], ax
+	mov	ax, [cs:saved_int22+2]
+	mov	[es:0x8A], ax
+	mov	ax, [cs:saved_int23]
+	mov	[es:0x8C], ax
+	mov	ax, [cs:saved_int23+2]
+	mov	[es:0x8E], ax
+	mov	ax, [cs:saved_int24]
+	mov	[es:0x90], ax
+	mov	ax, [cs:saved_int24+2]
+	mov	[es:0x92], ax
 	ret
 
 ; ============================================================================
@@ -12638,6 +12740,9 @@ path_cmd_save:	times MAX_CMD_LEN + 1 db 0
 ; ============================================================================
 ; Variables
 ; ============================================================================
+input_buf:	db	MAX_CMD_LEN	; Max length
+		db	0		; Actual length
+		times MAX_CMD_LEN+1 db 0 ; Data + CR
 cmd_buffer:	times MAX_CMD_LEN+1 db 0
 exec_fname:	times 11 db ' '
 		db	0		; null terminator
@@ -12770,6 +12875,11 @@ saved_int08:	dd	0
 saved_int09:	dd	0
 saved_int10:	dd	0
 saved_int1c:	dd	0
+saved_int20:	dd	0
+saved_int21:	dd	0
+saved_int22:	dd	0
+saved_int23:	dd	0
+saved_int24:	dd	0
 
 		; Buffers are at the start of the file (after jmp start_code)
 		; FAT: 2 * 512 = 1024 bytes
