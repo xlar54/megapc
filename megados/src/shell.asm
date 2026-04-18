@@ -4876,8 +4876,26 @@ do_exec:
 	; search_path set resolved_dir_cluster/entries and exec_fname.
 	; Set up for the file search just like do_exec does.
 	mov	byte [path_searched], 0
-	; Set empty command tail (PATH-found programs get no args for now)
+	; Find command tail in path_cmd_save (skip past command name)
+	push	si
+	mov	si, path_cmd_save
+.exec_path_skip_name:
+	lodsb
+	cmp	al, ' '
+	je	.exec_path_found_tail
+	cmp	al, 0
+	je	.exec_path_no_tail
+	jmp	.exec_path_skip_name
+.exec_path_no_tail:
+	; No arguments — use empty tail
 	mov	word [exec_cmdtail_ptr], exec_empty_tail
+	jmp	.exec_path_tail_done
+.exec_path_found_tail:
+	; SI points past the space — back up to include the space
+	dec	si
+	mov	[exec_cmdtail_ptr], si
+.exec_path_tail_done:
+	pop	si
 	; Extension retry: try .COM if no ext
 	mov	byte [exec_try_ext], 0
 	cmp	byte [exec_fname+8], ' '
