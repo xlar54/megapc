@@ -265,6 +265,152 @@ drv_prn_int:
 	pop	bx
 	retf
 
+; ============================================================================
+; drv_call — Call a device driver with a prepared request packet
+; ============================================================================
+; Input: ES:BX = pointer to driver header
+;        drv_request must be filled with the request packet
+; Output: drv_request status word has the result
+drv_call:
+	push	ax
+	push	bx
+	push	cx
+	push	di
+	push	ds
+	push	es
+	; Save driver header location
+	mov	[cs:drv_call_hdr_off], bx
+	mov	[cs:drv_call_hdr_seg], es
+	; Set up ES:BX = request packet for strategy
+	mov	ax, cs
+	mov	es, ax
+	mov	bx, drv_request
+	; Build far call target for strategy
+	push	es			; Save req packet ES
+	push	bx			; Save req packet BX
+	mov	ds, [cs:drv_call_hdr_seg]
+	mov	di, [cs:drv_call_hdr_off]
+	mov	ax, [ds:di+6]		; Strategy offset
+	mov	[cs:drv_call_target], ax
+	mov	ax, ds			; Strategy segment = driver segment
+	mov	[cs:drv_call_target+2], ax
+	pop	bx
+	pop	es
+	; Call strategy (ES:BX = request packet)
+	call	far [cs:drv_call_target]
+	; Build far call target for interrupt
+	mov	ds, [cs:drv_call_hdr_seg]
+	mov	di, [cs:drv_call_hdr_off]
+	mov	ax, [ds:di+8]		; Interrupt offset
+	mov	[cs:drv_call_target], ax
+	mov	ax, ds
+	mov	[cs:drv_call_target+2], ax
+	; Call interrupt
+	call	far [cs:drv_call_target]
+	; Restore
+	pop	es
+	pop	ds
+	pop	di
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+drv_call_hdr_off: dw	0
+drv_call_hdr_seg: dw	0
+drv_call_target: dd	0
+
+; ============================================================================
+; drv_find — Find a device driver by name
+; ============================================================================
+; Input: DS:SI = 8-byte device name (space-padded)
+; Output: ES:BX = driver header, CF=0 found / CF=1 not found
+drv_find:
+	push	ax
+	push	cx
+	push	di
+	mov	bx, [drv_chain_head]
+	mov	es, [drv_chain_head+2]
+.df_loop:
+	; Check for end of chain
+	cmp	bx, 0xFFFF
+	jne	.df_check
+	cmp	word [es:bx], 0xFFFF
+	je	.df_not_found
+.df_check:
+	; Compare name (8 bytes at header+10)
+	push	si
+	lea	di, [bx+10]
+	mov	cx, 8
+	repe	cmpsb
+	pop	si
+	je	.df_found
+	; Next driver
+	mov	ax, [es:bx+2]		; Next segment
+	mov	bx, [es:bx]		; Next offset
+	mov	es, ax
+	cmp	bx, 0xFFFF
+	jne	.df_loop
+	; Check if segment is also FFFF
+	mov	ax, es
+	cmp	ax, 0xFFFF
+	jne	.df_loop
+.df_not_found:
+	pop	di
+	pop	cx
+	pop	ax
+	stc
+	ret
+.df_found:
+	pop	di
+	pop	cx
+	pop	ax
+	clc
+	ret
+
+; ============================================================================
+; drv_write_char — Write one character through a device driver
+; ============================================================================
+; Input: AL = character, ES:BX = driver header
+drv_write_char:
+	push	ax
+	push	cx
+	; Store char in a temp buffer
+	mov	[cs:drv_char_buf], al
+	; Build request packet for WRITE
+	mov	byte [cs:drv_request], 22	; Header length
+	mov	byte [cs:drv_request+1], 0	; Unit
+	mov	byte [cs:drv_request+2], 8	; Command = WRITE
+	mov	word [cs:drv_request+3], 0	; Status
+	mov	word [cs:drv_request+14], drv_char_buf	; Transfer offset
+	mov	word [cs:drv_request+16], cs	; Transfer segment
+	mov	word [cs:drv_request+18], 1	; Count = 1 byte
+	call	drv_call
+	pop	cx
+	pop	ax
+	ret
+
+drv_char_buf:	db	0
+
+; ============================================================================
+; drv_read_char — Read one character from a device driver
+; ============================================================================
+; Input: ES:BX = driver header
+; Output: AL = character read
+drv_read_char:
+	push	cx
+	; Build request packet for READ
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 4	; Command = READ
+	mov	word [cs:drv_request+3], 0
+	mov	word [cs:drv_request+14], drv_char_buf
+	mov	word [cs:drv_request+16], cs
+	mov	word [cs:drv_request+18], 1	; Count = 1
+	call	drv_call
+	mov	al, [cs:drv_char_buf]
+	pop	cx
+	ret
+
 ; Pointer to first driver in chain
 drv_chain_head:	dw	drv_nul, 0	; Segment filled at init
 
@@ -426,6 +572,9 @@ start_init:
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ds, ax
+
+	; Process CONFIG.SYS if it exists
+	call	process_config_sys
 
 	; Run AUTOEXEC.BAT if it exists
 	mov	si, autoexec_name
@@ -12986,6 +13135,353 @@ sp_env_si:	dw	0
 sp_env_es:	dw	0
 sp_path_si:	dw	0
 path_cmd_save:	times MAX_CMD_LEN + 1 db 0
+
+; ============================================================================
+; process_config_sys — Read and process CONFIG.SYS at boot
+; ============================================================================
+process_config_sys:
+	; Try to open CONFIG.SYS
+	mov	ah, 0x3D
+	mov	al, 0			; Read only
+	mov	dx, config_sys_name
+	int	0x21
+	jc	.cfg_done		; File not found — skip silently
+	mov	[.cfg_handle], ax
+
+	; Read and process line by line
+.cfg_read_line:
+	mov	di, cfg_line_buf
+	mov	cx, MAX_CMD_LEN
+.cfg_read_char:
+	push	cx
+	mov	ah, 0x3F
+	mov	bx, [.cfg_handle]
+	mov	cx, 1
+	mov	dx, .cfg_char
+	int	0x21
+	pop	cx
+	cmp	ax, 0			; EOF
+	je	.cfg_eof
+	mov	al, [.cfg_char]
+	cmp	al, 0x0D		; CR
+	je	.cfg_cr
+	cmp	al, 0x0A		; LF = end of line
+	je	.cfg_process_line
+	cmp	al, 0x1A		; Ctrl-Z
+	je	.cfg_eof
+	mov	[di], al
+	inc	di
+	dec	cx
+	jnz	.cfg_read_char
+.cfg_cr:
+	; Skip LF after CR
+	push	cx
+	mov	ah, 0x3F
+	mov	bx, [.cfg_handle]
+	mov	cx, 1
+	mov	dx, .cfg_char
+	int	0x21
+	pop	cx
+.cfg_process_line:
+	mov	byte [di], 0
+	call	.cfg_parse_line
+	jmp	.cfg_read_line
+
+.cfg_eof:
+	; Process any remaining partial line
+	cmp	di, cfg_line_buf
+	je	.cfg_close
+	mov	byte [di], 0
+	call	.cfg_parse_line
+.cfg_close:
+	mov	ah, 0x3E
+	mov	bx, [.cfg_handle]
+	int	0x21
+.cfg_done:
+	ret
+
+.cfg_handle:	dw	0
+.cfg_char:	db	0
+
+; Parse one CONFIG.SYS line from cfg_line_buf
+.cfg_parse_line:
+	mov	si, cfg_line_buf
+	call	skip_spaces
+	; Skip empty lines and comments (lines starting with ;)
+	cmp	byte [si], 0
+	je	.cfg_line_done
+	cmp	byte [si], ';'
+	je	.cfg_line_done
+
+	; Check for DEVICE=
+	push	si
+	mov	di, .cfg_str_device
+	call	.cfg_match_keyword
+	je	.cfg_device_match
+	pop	si
+
+	; Check for FILES=
+	push	si
+	mov	di, .cfg_str_files
+	call	.cfg_match_keyword
+	je	.cfg_files_match
+	pop	si
+
+	; Check for BREAK=
+	push	si
+	mov	di, .cfg_str_break
+	call	.cfg_match_keyword
+	je	.cfg_break_match
+	pop	si
+
+	; Check for BUFFERS= (accept but ignore)
+	; Check for LASTDRIVE= (accept but ignore)
+	; Check for SHELL= (accept but ignore — we are the shell)
+	; Check for COUNTRY= (accept but ignore)
+
+	; Unknown directive — ignore
+.cfg_line_done:
+	ret
+
+.cfg_device_match:
+	pop	ax			; Discard saved SI
+	jmp	.cfg_device
+.cfg_files_match:
+	pop	ax
+	jmp	.cfg_files
+.cfg_break_match:
+	pop	ax
+	jmp	.cfg_break
+
+; --- DEVICE= handler ---
+.cfg_device:
+	; SI points past "DEVICE="
+	; Load the .SYS file and initialize it
+	call	skip_spaces
+
+	; Copy filename to cfg_fname (AH=3Dh will overwrite cmd_buffer)
+	push	si
+	mov	di, cfg_fname
+.cfg_copy_fname:
+	lodsb
+	mov	[di], al
+	inc	di
+	cmp	al, ' '
+	je	.cfg_fname_end
+	or	al, al
+	jnz	.cfg_copy_fname
+.cfg_fname_end:
+	mov	byte [di-1], 0
+	pop	si
+
+	; Try to open the driver file
+	mov	dx, cfg_fname		; DS:DX = filename
+	mov	ah, 0x3D
+	mov	al, 0
+	int	0x21
+	jc	.cfg_dev_err
+
+	mov	[.cfg_dev_handle], ax
+
+	; Allocate memory for the driver
+	mov	bx, 0xFFFF
+	call	alloc_mem_core		; Probe for largest block
+	cmp	bx, 4			; Need at least 64 bytes
+	jb	.cfg_dev_no_mem
+	call	alloc_mem_core		; Allocate it
+	jc	.cfg_dev_no_mem
+	mov	[.cfg_dev_seg], ax
+
+	; Read the file into the allocated segment
+	mov	es, ax
+	xor	di, di
+	mov	bx, [.cfg_dev_handle]
+.cfg_dev_read:
+	push	di
+	mov	ah, 0x3F
+	mov	cx, 512
+	mov	dx, di
+	push	ds
+	push	es
+	pop	ds			; DS = driver segment for read buffer
+	int	0x21
+	pop	ds
+	pop	di
+	cmp	ax, 0
+	je	.cfg_dev_read_done
+	add	di, ax
+	jmp	.cfg_dev_read
+.cfg_dev_read_done:
+	; Close the file
+	mov	ah, 0x3E
+	mov	bx, [.cfg_dev_handle]
+	int	0x21
+
+	; Resize memory block to actual size needed
+	; DI = bytes read. Convert to paragraphs.
+	mov	ax, di
+	add	ax, 15
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	mov	bx, ax
+	or	bx, bx
+	jnz	.cfg_dev_resize
+	mov	bx, 1			; At least 1 paragraph
+.cfg_dev_resize:
+	push	es
+	mov	es, [.cfg_dev_seg]
+	mov	ah, 0x4A
+	int	0x21
+	pop	es
+
+	; The driver header is at the start of the loaded file
+	; Link it into the driver chain (insert after NUL)
+	mov	es, [.cfg_dev_seg]
+	; Set the driver's next pointer to what NUL currently points to
+	mov	ax, [cs:drv_nul]	; Current NUL→next offset
+	mov	[es:0], ax
+	mov	ax, [cs:drv_nul+2]	; Current NUL→next segment
+	mov	[es:2], ax
+	; Point NUL→next to the new driver
+	mov	word [cs:drv_nul], 0	; New driver at offset 0 in its segment
+	mov	ax, [.cfg_dev_seg]
+	mov	[cs:drv_nul+2], ax
+
+	; Call the driver's INIT function
+	; Build INIT request packet
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 0	; Command = INIT
+	mov	word [cs:drv_request+3], 0	; Status
+	; Pass the config line remainder as init data
+	; (INIT packet has pointer to rest of CONFIG.SYS line at offset 18)
+	mov	word [cs:drv_request+18], si	; Command line offset
+	mov	word [cs:drv_request+20], ds	; Command line segment
+
+	; Call strategy + interrupt
+	mov	bx, 0			; Driver header at ES:0
+	call	drv_call
+
+	; Print driver name
+	push	si
+	mov	si, .cfg_msg_device
+	call	print_string
+	; Print 8-byte name from header
+	push	es
+	push	cx
+	mov	si, 10			; Name at header+10
+	mov	cx, 8
+.cfg_dev_name:
+	mov	al, [es:si]
+	cmp	al, ' '
+	je	.cfg_dev_name_done
+	call	shell_putc
+	inc	si
+	dec	cx
+	jnz	.cfg_dev_name
+.cfg_dev_name_done:
+	pop	cx
+	pop	es
+	pop	si
+	call	shell_crlf
+	ret
+
+.cfg_dev_err:
+	push	si
+	mov	si, .cfg_msg_not_found
+	call	print_string
+	pop	si
+	call	print_string
+	call	shell_crlf
+	ret
+
+.cfg_dev_no_mem:
+	; Close file and report error
+	mov	ah, 0x3E
+	mov	bx, [.cfg_dev_handle]
+	int	0x21
+	push	si
+	mov	si, .cfg_msg_no_mem
+	call	print_string
+	pop	si
+	ret
+
+.cfg_dev_handle: dw	0
+.cfg_dev_seg:	dw	0
+
+; --- FILES= handler ---
+.cfg_files:
+	; SI points past "FILES="
+	call	skip_spaces
+	; Parse number (ignored for now — MAX_HANDLES is compile-time)
+	; Just acknowledge it
+	ret
+
+; --- BREAK= handler ---
+.cfg_break:
+	; SI points past "BREAK="
+	call	skip_spaces
+	cmp	byte [si], 'O'
+	jne	.cfg_break_check_lower
+	cmp	byte [si+1], 'N'
+	jne	.cfg_break_off
+	mov	byte [break_flag], 1
+	ret
+.cfg_break_check_lower:
+	cmp	byte [si], 'o'
+	jne	.cfg_break_off
+	cmp	byte [si+1], 'n'
+	jne	.cfg_break_off
+	mov	byte [break_flag], 1
+	ret
+.cfg_break_off:
+	mov	byte [break_flag], 0
+	ret
+
+; --- Keyword matcher ---
+; Compare SI (input) with DI (keyword), case-insensitive, until '='
+; Returns ZF=1 if match, SI advanced past '='
+.cfg_match_keyword:
+.cfg_mk_loop:
+	mov	al, [di]
+	cmp	al, 0			; End of keyword
+	je	.cfg_mk_check_eq
+	mov	ah, [si]
+	; Uppercase AH
+	cmp	ah, 'a'
+	jb	.cfg_mk_cmp
+	cmp	ah, 'z'
+	ja	.cfg_mk_cmp
+	sub	ah, 0x20
+.cfg_mk_cmp:
+	cmp	al, ah
+	jne	.cfg_mk_fail
+	inc	si
+	inc	di
+	jmp	.cfg_mk_loop
+.cfg_mk_check_eq:
+	cmp	byte [si], '='
+	jne	.cfg_mk_fail
+	inc	si			; Skip '='
+	; Match! ZF=1
+	xor	al, al			; Set ZF
+	ret
+.cfg_mk_fail:
+	or	al, 1			; Clear ZF
+	ret
+
+.cfg_str_device: db	'DEVICE', 0
+.cfg_str_files:	db	'FILES', 0
+.cfg_str_break:	db	'BREAK', 0
+.cfg_msg_device: db	'  Device: ', 0
+.cfg_msg_not_found: db	'  Bad or missing: ', 0
+.cfg_msg_no_mem: db	'  Insufficient memory', 0x0D, 0x0A, 0
+
+config_sys_name: db	'CONFIG.SYS', 0
+cfg_line_buf:	times MAX_CMD_LEN+1 db 0
+cfg_fname:	times 78 db 0
 
 ; ============================================================================
 ; Variables
