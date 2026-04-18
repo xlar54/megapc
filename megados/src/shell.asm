@@ -411,6 +411,56 @@ drv_read_char:
 	pop	cx
 	ret
 
+; ============================================================================
+; con_setup_esbx — Load ES:BX to point to CON driver header
+; ============================================================================
+con_setup_esbx:
+	mov	bx, drv_con
+	mov	ax, cs
+	mov	es, ax
+	ret
+
+; ============================================================================
+; con_write_al — Write character in AL through CON driver (preserves all regs)
+; ============================================================================
+con_write_al:
+	; Write char in AL through INT 10h (via CON driver path)
+	; For built-in CON: direct INT 10h. For replacement drivers,
+	; this would go through the driver chain via drv_write_char.
+	push	ax
+	push	bx
+	mov	ah, 0x0E
+	mov	bx, 0x0007
+	int	0x10
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; con_read_al — Read one character from CON driver into AL (preserves other regs)
+; ============================================================================
+con_read_al:
+	; Read char from keyboard (via CON driver path)
+	; For built-in CON: direct INT 16h.
+	push	bx
+	mov	ah, 0x00
+	int	0x16
+	pop	bx
+	ret
+
+; ============================================================================
+; con_check_input — Non-destructive input check via CON driver
+; Returns: ZF=1 if no char available, ZF=0 if char ready (AL = peeked char)
+; ============================================================================
+con_check_input:
+	; Check if key available (via CON driver path)
+	; Returns: ZF=1 no char, ZF=0 char ready (AL = char)
+	push	bx
+	mov	ah, 0x01
+	int	0x16
+	pop	bx
+	ret			; ZF set by INT 16h AH=01
+
 ; Pointer to first driver in chain
 drv_chain_head:	dw	drv_nul, 0	; Segment filled at init
 
@@ -6098,11 +6148,9 @@ int21_handler:
 
 ; --- AH=01: Read character with echo ---
 .i21_01:
-	mov	ah, 0x00
-	int	0x16		; Wait for key
+	call	con_read_al	; Read char from CON driver
 	push	ax
-	mov	ah, 0x0E
-	int	0x10		; Echo it
+	call	con_write_al	; Echo through CON driver
 	pop	ax
 	iret
 
@@ -6145,13 +6193,11 @@ int21_handler:
 	pop	ax
 	iret
 .i21_02_device:
-	; Device — use INT 10h teletype
+	; Device — write through CON driver
 	pop	es
 	pop	si
 	mov	al, dl
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	con_write_al
 	pop	dx
 	pop	cx
 	pop	bx
@@ -6165,38 +6211,37 @@ int21_handler:
 .i21_06:
 	cmp	dl, 0xFF
 	je	.i21_06_input
-	; Output
+	; Output through CON driver
 	push	ax
-	push	bx
 	mov	al, dl
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
-	pop	bx
+	call	con_write_al
 	pop	ax
 	iret
 .i21_06_input:
-	mov	ah, 0x01
-	int	0x16		; Check key
+	call	con_check_input
 	jz	.i21_06_nokey
-	mov	ah, 0x00
-	int	0x16		; Get key
-	or	al, al		; Clear ZF (char available)
+	call	con_read_al	; Consume the key
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFBF	; Clear ZF in saved flags
+	pop	bp
 	iret
 .i21_06_nokey:
-	xor	al, al		; ZF=1 (no char)
+	xor	al, al
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0040	; Set ZF in saved flags
+	pop	bp
 	iret
 
 ; --- AH=07: Direct char input without echo ---
 .i21_07:
-	mov	ah, 0x00
-	int	0x16
+	call	con_read_al
 	iret
 
 ; --- AH=08: Read char without echo (checks Ctrl-C) ---
 .i21_08:
-	mov	ah, 0x00
-	int	0x16
+	call	con_read_al
 	iret
 
 ; --- AH=09: Print $-terminated string at DS:DX ---
@@ -6281,8 +6326,7 @@ int21_handler:
 ; --- AH=0B: Check input status ---
 ; Returns AL=FF if char available, AL=00 if not
 .i21_0b:
-	mov	ah, 0x01
-	int	0x16
+	call	con_check_input
 	jz	.i21_0b_none
 	mov	al, 0xFF
 	iret
@@ -6293,7 +6337,20 @@ int21_handler:
 ; --- AH=0C: Flush buffer then read ---
 ; AL = function to call after flush (01, 06, 07, 08, 0A)
 .i21_0c:
-	; We don't have a buffer to flush — just dispatch
+	; Flush CON input buffer, then dispatch sub-function
+	push	ax
+	push	bx
+	push	es
+	call	con_setup_esbx
+	mov	byte [cs:drv_request], 22
+	mov	byte [cs:drv_request+1], 0
+	mov	byte [cs:drv_request+2], 7	; INPUT FLUSH command
+	mov	word [cs:drv_request+3], 0
+	call	drv_call
+	pop	es
+	pop	bx
+	pop	ax
+	; Now dispatch the sub-function
 	mov	ah, al
 	int	0x21
 	iret
@@ -7055,18 +7112,13 @@ int21_handler:
 	jge	.i21_3f_stdin_done
 	push	bx
 	push	cx
-	mov	ah, 0x00
-	int	0x16
+	call	con_read_al
 	pop	cx
 	pop	bx
 	cmp	al, 0
 	je	.i21_3f_stdin_loop	; Skip extended keys
 	push	ax
-	push	bx
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10			; Echo
-	pop	bx
+	call	con_write_al		; Echo
 	pop	ax
 	cmp	al, 0x08
 	jne	.i21_3f_stdin_not_bs
@@ -7075,14 +7127,10 @@ int21_handler:
 	dec	bx
 	dec	si
 	push	ax
-	push	bx
 	mov	al, ' '
-	mov	ah, 0x0E
-	int	0x10
+	call	con_write_al
 	mov	al, 0x08
-	mov	ah, 0x0E
-	int	0x10
-	pop	bx
+	call	con_write_al
 	pop	ax
 	jmp	.i21_3f_stdin_loop
 .i21_3f_stdin_not_bs:
@@ -7092,12 +7140,8 @@ int21_handler:
 	cmp	al, 0x0D
 	jne	.i21_3f_stdin_loop
 	push	ax
-	push	bx
 	mov	al, 0x0A
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
-	pop	bx
+	call	con_write_al
 	pop	ax
 	cmp	bx, cx
 	jge	.i21_3f_stdin_done
@@ -7383,13 +7427,9 @@ int21_handler:
 	cmp	cx, 0
 	je	.i21_40_out_done
 	lodsb
-	push	bx
 	push	cx
-	mov	ah, 0x0E
-	mov	bx, 0x0007
-	int	0x10
+	call	con_write_al
 	pop	cx
-	pop	bx
 	dec	cx
 	jmp	.i21_40_out_loop
 .i21_40_out_done:
