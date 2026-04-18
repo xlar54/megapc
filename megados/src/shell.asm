@@ -145,6 +145,7 @@ start_init:
 	call	alloc_mem_core
 	jc	.psp_failed
 	mov	[exec_seg], ax
+	mov	[shell_psp_seg], ax
 	; Initialize the JFT at PSP:0x18
 	mov	es, ax
 	; Clear the PSP area
@@ -11458,6 +11459,9 @@ int21_handler:
 ; Entry point for INT 20h / INT 22h program termination
 int20_handler:
 	call	int20_handler_restore_vectors
+	; Restore exec_seg to the shell's own PSP
+	mov	ax, [cs:shell_psp_seg]
+	mov	[cs:exec_seg], ax
 	; Restore DTA to shell default
 	mov	word [cs:dta_seg], SHELL_SEG
 	mov	word [cs:dta_off], 0x0080
@@ -12617,6 +12621,7 @@ mcb_first:	dw	PROG_SEG	; First MCB segment
 exec_cluster:	dw	0
 exec_size:	dd	0
 exec_parent_psp: dw	0		; Saved parent PSP for JFT inherit
+shell_psp_seg:	dw	0		; Shell's own PSP segment (never changes)
 exec_seg:	dw	0		; Allocated segment for program
 		dw	0		; CS for EXE far jump
 		dw	0		; IP for EXE far jump
