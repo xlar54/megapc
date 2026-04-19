@@ -641,7 +641,7 @@ start_init:
 	; Fill environment block
 	mov	es, ax
 	xor	di, di
-	; COMSPEC=A:\SHELL.COM
+	; COMSPEC=A:\COMMAND.COM
 	mov	si, env_comspec
 	call	.env_copy_str
 	; PATH=A:\

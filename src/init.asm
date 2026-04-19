@@ -414,6 +414,19 @@ _cga_loop:
         ldz #0
         sta [temp_ptr],z
 
+        ; Clear BASIC re-entry flag at 0000:050F ($4050F)
+        ; GWBASIC checks this and refuses to run if nonzero
+        lda #$0F
+        sta temp_ptr
+        lda #$05
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        ldz #0
+        sta [temp_ptr],z
+
         ; --- Set up BDA (BIOS Data Area) at $40400 ---
         ; Equipment word at $40410: bit 0=floppy present
         lda #$10
