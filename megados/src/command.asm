@@ -1222,21 +1222,30 @@ cmd_dispatch:
 ; DIR — list root directory
 ; ============================================================================
 do_dir:
-	; Check for /W switch
 	mov	byte [dir_wide], 0
+	mov	byte [dir_show_all], 0
+.dir_parse_switches:
 	call	skip_spaces
 	cmp	byte [si], '/'
-	jne	.dir_no_switch
-	cmp	byte [si+1], 'W'
-	je	.dir_set_wide
-	cmp	byte [si+1], 'w'
-	je	.dir_set_wide
-	jmp	.dir_no_switch
-.dir_set_wide:
+	jne	.dir_switches_done
+	inc	si
+	mov	al, [si]
+	or	al, 0x20		; Lowercase
+	cmp	al, 'w'
+	je	.dir_sw_wide
+	cmp	al, 'a'
+	je	.dir_sw_all
+	dec	si			; Not a known switch, back up
+	jmp	.dir_switches_done
+.dir_sw_wide:
 	mov	byte [dir_wide], 1
-	add	si, 2
-	call	skip_spaces
-.dir_no_switch:
+	inc	si
+	jmp	.dir_parse_switches
+.dir_sw_all:
+	mov	byte [dir_show_all], 1
+	inc	si
+	jmp	.dir_parse_switches
+.dir_switches_done:
 	mov	byte [wild_active], 0
 
 	; Check for optional path argument
@@ -1725,6 +1734,13 @@ do_dir:
 	mov	al, [si+11]
 	test	al, 0x08		; Volume label?
 	jnz	.dir_next
+
+	; Skip hidden and system files unless /A
+	cmp	byte [dir_show_all], 1
+	je	.dir_attr_ok
+	test	al, 0x06		; Hidden (0x02) or System (0x04)?
+	jnz	.dir_next
+.dir_attr_ok:
 
 	; Wildcard filter
 	cmp	byte [wild_active], 0
@@ -9372,22 +9388,125 @@ int21_handler:
 ; Input: AL=0 get, AL=1 set, DS:DX = filename, CX = attrs (for set)
 ; Returns: CX = attributes (for get), CF on error
 .i21_43:
-	cmp	al, 0
-	je	.i21_43_get
-	; Set: just return success (ignore)
+	push	bx
+	push	si
+	push	di
+	push	es
+	mov	[cs:.i21_43_func], al	; Save sub-function (0=get, 1=set)
+	mov	[cs:.i21_43_cx], cx	; Save new attributes for set
+
+	; Copy filename from caller's DS:DX to cmd_buffer
+	mov	[cs:.i21_43_ds], ds
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	push	si
+	mov	si, dx
+	push	ds
+	mov	ds, [cs:.i21_43_ds]
+	mov	di, cmd_buffer
+	mov	cx, 64
+.i21_43_copy:
+	lodsb
+	mov	[es:di], al
+	inc	di
+	or	al, al
+	jz	.i21_43_copied
+	dec	cx
+	jnz	.i21_43_copy
+	mov	byte [es:di-1], 0
+.i21_43_copied:
+	pop	ds
+	pop	si
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+
+	; Resolve path
+	mov	si, cmd_buffer
+	call	resolve_path
+	jc	.i21_43_err
+
+	; Read directory
+	call	read_resolved_dir
+	jc	.i21_43_err
+
+	; Find file
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_43_search:
+	cmp	byte [si], 0
+	je	.i21_43_err
+	cmp	byte [si], 0xE5
+	je	.i21_43_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_43_found
+.i21_43_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_43_search
+.i21_43_err:
+	mov	ds, [cs:.i21_43_ds]
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
+	mov	ax, 2			; File not found
 	push	bp
 	mov	bp, sp
-	and	word [bp+6], 0xFFFE
+	or	word [bp+6], 0x0001	; Set CF
 	pop	bp
 	iret
-.i21_43_get:
-	; Return normal file attributes
-	mov	cx, 0x0020		; Archive
+
+.i21_43_found:
+	cmp	byte [cs:.i21_43_func], 0
+	jne	.i21_43_set
+
+	; Get: return attributes in CX
+	xor	ch, ch
+	mov	cl, [si+11]
+	mov	ds, [cs:.i21_43_ds]
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
 	push	bp
 	mov	bp, sp
-	and	word [bp+6], 0xFFFE
+	and	word [bp+6], 0xFFFE	; Clear CF
 	pop	bp
 	iret
+
+.i21_43_set:
+	; Set: write new attribute byte and save directory
+	mov	ax, [cs:.i21_43_cx]
+	mov	[si+11], al
+	; Write directory back
+	cmp	word [resolved_dir_cluster], 0
+	jne	.i21_43_write_sub
+	call	write_resolved_dir
+	jmp	.i21_43_set_done
+.i21_43_write_sub:
+	call	write_resolved_dir
+.i21_43_set_done:
+	mov	ds, [cs:.i21_43_ds]
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE	; Clear CF
+	pop	bp
+	iret
+
+.i21_43_func:	db	0
+.i21_43_cx:	dw	0
+.i21_43_ds:	dw	0
 
 ; --- AH=4E: FindFirst ---
 ; Input: DS:DX = ASCIIZ filespec (with wildcards), CX = search attributes
@@ -14123,6 +14242,7 @@ sft_devinfo:				; IOCTL device info word per SFT entry
 	times (MAX_HANDLES - 5) dw 0	; File handles: 0 = disk file
 file_count:	dw	0
 dir_wide:	db	0
+dir_show_all:	db	0			; 1 = show hidden/system files (/A)
 dir_col:	db	0			; Column counter for wide mode
 dir_hdr_path:	times 65 db 0			; Path string for DIR header display
 
