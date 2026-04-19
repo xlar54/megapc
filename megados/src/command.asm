@@ -709,6 +709,18 @@ start_init:
 	mov	es, ax
 	mov	ds, ax
 
+	; Clear inter-application communication area at 0000:0500-05FF
+	; Boot sector loads FAT here (0050:0000) which leaves stale data.
+	; GWBASIC checks 0000:050F as a re-entry flag — must be zero.
+	push	es
+	xor	ax, ax
+	mov	es, ax
+	mov	di, 0x0500
+	mov	cx, 128		; Clear 256 bytes (0500-05FF)
+	cld
+	rep	stosw
+	pop	es
+
 	; Process CONFIG.SYS if it exists
 	call	process_config_sys
 
@@ -6062,8 +6074,9 @@ do_exec:
 	mov	[es:0x14], ax
 	pop	ds
 
-	; PSP:16 — Parent PSP segment (shell's own segment)
-	mov	word [es:0x16], SHELL_SEG
+	; PSP:16 — Parent PSP segment (actual shell PSP, not code segment)
+	mov	ax, [cs:shell_psp_seg]
+	mov	[es:0x16], ax
 
 	; PSP:18 — Job File Table (20 bytes)
 	; Fill all 20 with 0xFF (closed), then set standard handles
@@ -8211,24 +8224,107 @@ int21_handler:
 .i21_4a:
 	push	ax
 	push	cx
+	push	dx
 	push	es
 	mov	ax, es
 	dec	ax
-	mov	es, ax			; ES = MCB
-	mov	cx, [es:0x03]		; Current size
+	mov	es, ax			; ES = our MCB
+	mov	cx, [es:0x03]		; CX = current size in paragraphs
 	cmp	bx, cx
 	jbe	.i21_4a_shrink
-	; Growing — not supported (would need to check next block)
-	mov	bx, cx			; Return current size as max
+
+	; --- Growing ---
+	; Need to absorb the next free block
+	cmp	byte [es:0x00], 'Z'
+	je	.i21_4a_cant_grow	; Last MCB — nowhere to grow
+
+	; Find next MCB
+	mov	ax, es
+	add	ax, cx
+	inc	ax			; AX = next MCB segment
+	push	es
+	mov	es, ax
+
+	; Next block must be free
+	cmp	word [es:0x01], 0
+	jne	.i21_4a_cant_grow_pop
+
+	; Total available = current + 1 (next header) + next_size
+	mov	dx, cx
+	add	dx, [es:0x03]
+	inc	dx			; DX = total available
+	cmp	dx, bx
+	jb	.i21_4a_cant_grow_pop	; Not enough even with next block
+
+	; Save next block's type before we overwrite it
+	mov	al, [es:0x00]		; 'M' or 'Z'
+	mov	[cs:.i21_4a_next_type], al
+
+	pop	es			; ES = our MCB
+
+	; Can we split, or is it an exact fit?
+	cmp	bx, dx
+	je	.i21_4a_grow_exact
+
+	; --- Split: grow to BX, create free block from remainder ---
+	mov	[es:0x03], bx		; Set our new size
+	mov	byte [es:0x00], 'M'	; We're not last (free block follows)
+
+	; Create new free MCB at our_seg + BX + 1
+	mov	ax, es
+	add	ax, bx
+	inc	ax
+	push	es
+	mov	es, ax
+	mov	al, [cs:.i21_4a_next_type]
+	mov	[es:0x00], al		; Inherit type from absorbed block
+	mov	word [es:0x01], 0	; Free
+	mov	ax, dx
+	sub	ax, bx
+	dec	ax			; Remainder = total - requested - 1
+	mov	[es:0x03], ax
 	pop	es
+	jmp	.i21_4a_done
+
+.i21_4a_grow_exact:
+	; Exact fit — absorb entire next block
+	mov	[es:0x03], bx
+	mov	al, [cs:.i21_4a_next_type]
+	mov	[es:0x00], al		; Inherit type ('M' or 'Z')
+	jmp	.i21_4a_done
+
+.i21_4a_cant_grow_pop:
+	pop	es
+.i21_4a_cant_grow:
+	; Return error with max available in BX
+	mov	bx, cx			; Start with current size
+	; If next block is free, include it
+	cmp	byte [es:0x00], 'Z'
+	je	.i21_4a_grow_err
+	mov	ax, es
+	add	ax, cx
+	inc	ax
+	push	es
+	mov	es, ax
+	cmp	word [es:0x01], 0
+	jne	.i21_4a_next_not_free
+	add	bx, [es:0x03]
+	inc	bx
+.i21_4a_next_not_free:
+	pop	es
+.i21_4a_grow_err:
+	pop	es
+	pop	dx
 	pop	cx
 	pop	ax
-	mov	ax, 8
+	mov	ax, 8			; Insufficient memory
 	push	bp
 	mov	bp, sp
-	or	word [bp+6], 0x0001
+	or	word [bp+6], 0x0001	; Set CF
 	pop	bp
 	iret
+
+.i21_4a_next_type: db 0
 .i21_4a_shrink:
 	; Shrinking — adjust size, create free block after
 	; CX = old size, BX = new size, ES = MCB
@@ -8260,6 +8356,7 @@ int21_handler:
 	pop	es
 .i21_4a_done:
 	pop	es
+	pop	dx
 	pop	cx
 	pop	ax
 	push	bp
@@ -12056,18 +12153,47 @@ int21_handler:
 	cmp	al, 0
 	jne	.i21_38_set
 	mov	bx, 1			; Country code = USA
-	; Fill buffer at DS:DX with US defaults
+	; Fill buffer at DS:DX with US country info
+	push	ax
+	push	cx
+	push	si
 	push	di
 	push	es
-	mov	es, [cs:exec_seg]	; Caller's DS might differ
-	; For safety, just clear CF and return
+	; Caller's DS:DX is the destination buffer
+	push	ds
+	pop	es			; ES = caller's DS
+	mov	di, dx			; ES:DI = destination
+	push	cs
+	pop	ds			; DS = SHELL_SEG (source)
+	mov	si, .i21_38_us_data
+	mov	cx, 17			; 34 bytes / 2
+	cld
+	rep	movsw
+	push	es
+	pop	ds			; Restore caller's DS
 	pop	es
 	pop	di
+	pop	si
+	pop	cx
+	pop	ax
 	push	bp
 	mov	bp, sp
 	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
+.i21_38_us_data:
+	dw	0			; Date format (0=USA: mm/dd/yy)
+	db	'$', 0, 0, 0, 0	; Currency symbol (ASCIIZ, 5 bytes)
+	db	',', 0			; Thousands separator
+	db	'.', 0			; Decimal separator
+	db	'-', 0			; Date separator
+	db	':', 0			; Time separator
+	db	0			; Currency format
+	db	2			; Digits after decimal in currency
+	db	0			; Time format (0=12hr, 1=24hr)
+	dd	0			; Case map call address
+	db	',', 0			; Data list separator
+	times 5 dw 0			; Reserved
 .i21_38_set:
 	; Set country — ignore
 	push	bp
@@ -12594,7 +12720,7 @@ int21_handler:
 	; The TSR's interrupt hooks stay active
 	mov	ax, [cs:shell_psp_seg]
 	mov	[cs:exec_seg], ax
-	mov	word [cs:dta_seg], SHELL_SEG
+	mov	[cs:dta_seg], ax
 	mov	word [cs:dta_off], 0x0080
 	mov	ax, SHELL_SEG
 	mov	ds, ax
@@ -12701,8 +12827,8 @@ int20_handler:
 	; Restore exec_seg to the shell's own PSP
 	mov	ax, [cs:shell_psp_seg]
 	mov	[cs:exec_seg], ax
-	; Restore DTA to shell default
-	mov	word [cs:dta_seg], SHELL_SEG
+	; Restore DTA to shell PSP default
+	mov	[cs:dta_seg], ax
 	mov	word [cs:dta_off], 0x0080
 	; Restore shell state and return
 	mov	ax, SHELL_SEG
@@ -12987,8 +13113,8 @@ int23_handler:
 	; Restore exec_seg to shell's PSP
 	mov	ax, [shell_psp_seg]
 	mov	[exec_seg], ax
-	; Restore DTA to shell default
-	mov	word [dta_seg], SHELL_SEG
+	; Restore DTA to shell PSP default
+	mov	[dta_seg], ax
 	mov	word [dta_off], 0x0080
 .int23_no_free:
 	; Restore segments

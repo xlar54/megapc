@@ -54,6 +54,8 @@ _ml_no_tab:
         lda raw_opcode
         sta $8F00
 
+        ; (trace/debug code removed)
+
         ; --- Real-time timer tick using MEGA65 frame counter ---
         ; $D7FA increments every video frame (~50/60 Hz)
         ; PC INT 8 fires at ~18.2 Hz. At 50 Hz, fire every ~3 frames.
