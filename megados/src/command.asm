@@ -2962,6 +2962,7 @@ cluster_to_chs:
 ; Output: CF on error, ES:BX preserved
 ;
 read_cluster_data:
+	call	ensure_geo
 	push	ax
 	push	bx
 	push	cx
@@ -3006,6 +3007,7 @@ read_cluster_data:
 ; Output: CF on error, ES:BX preserved
 ;
 write_cluster_data:
+	call	ensure_geo
 	push	ax
 	push	bx
 	push	cx
@@ -7567,14 +7569,15 @@ int21_handler:
 	je	.i21_3e_found
 	; Also match if dir entry has cluster 0 and file size 0
 	; (file was created empty, cluster allocated during write)
+	; But skip directory entries (. and .. have cluster 0, size 0)
+	test	byte [di+11], 0x10	; Directory attribute?
+	jnz	.i21_3e_next		; Skip directories
 	cmp	word [di+26], 0
 	jne	.i21_3e_next
 	cmp	word [di+28], 0
 	jne	.i21_3e_next
 	cmp	word [di+30], 0
 	jne	.i21_3e_next
-	; This is an empty entry — check if only one such entry exists
-	; to avoid ambiguity (skip for now, just take the first match)
 	jmp	.i21_3e_found
 .i21_3e_next:
 	add	di, 32
@@ -8162,7 +8165,7 @@ int21_handler:
 	; 32-bit divide: DX:AX / 1024
 	mov	dx, [cs:file_handles + si + 10]	; Position high
 	mov	ax, [cs:file_handles + si + 8]	; Position low
-	mov	bx, [geo_bpc]
+	mov	bx, [cs:geo_bpc]
 	div	bx			; AX = clusters to skip, DX = position in cluster
 	mov	[cs:file_handles + si + 6], dx	; Position within cluster
 
