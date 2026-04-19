@@ -329,7 +329,7 @@ start:
 	cmp	byte [di], 0xE5		; Deleted
 	je	.got_slot
 	; Check if COMMAND.COM already exists — overwrite it
-	cmp	byte [di], 'S'
+	cmp	byte [di], 'C'
 	jne	.next_slot
 	push	si
 	push	di
