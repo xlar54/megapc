@@ -94,6 +94,7 @@ nasm_assemble('sys.asm', 'SYS.COM')
 nasm_assemble('label.asm', 'LABEL.COM')
 nasm_assemble('attrib.asm', 'ATTRIB.COM')
 nasm_assemble('find.asm', 'FIND.COM')
+nasm_assemble('mem.asm', 'MEM.COM')
 nasm_assemble('doskey.asm', 'DOSKEY.COM')
 nasm_assemble('testdrv.asm', 'TESTDRV.SYS')
 nasm_assemble('beep.asm', 'BEEP.COM')
@@ -455,7 +456,7 @@ next_cluster = 2 + shell_clusters
 # --- Files in root directory ---
 root_files = ['EDLIN.COM', 'BEEP.COM', 'MORE.COM', 'DOSKEY.COM',
               'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
-              'ATTRIB.COM', 'FIND.COM',
+              'ATTRIB.COM', 'FIND.COM', 'MEM.COM',
               'TESTDRV.SYS', 'CONFIG.SYS',
               'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
