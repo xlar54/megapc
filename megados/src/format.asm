@@ -3,29 +3,16 @@
 ;   /S = copy system files (make bootable)
 ;   /V:label = set volume label
 ;   /Q = quick format (skip verify)
+; Detects disk geometry via INT 13h AH=08h — works with any floppy format.
 	cpu	8086
 	org	0x0100
-
-; Disk geometry (360K)
-BYTES_PER_SEC	equ	512
-SECS_PER_CLUST	equ	2
-RESERVED_SECS	equ	1
-NUM_FATS	equ	2
-SECS_PER_FAT	equ	2
-ROOT_ENTRIES	equ	112
-TOTAL_SECS	equ	720
-SPT		equ	9
-HEADS		equ	2
-MEDIA_BYTE	equ	0xFD
-ROOT_DIR_SEC	equ	5	; First root dir sector
-ROOT_DIR_SECS	equ	7	; Root dir sectors
-DATA_START_SEC	equ	12	; First data sector
 
 start:
 	push	cs
 	pop	ds
 	push	cs
 	pop	es
+	cld
 
 	; Parse command line
 	mov	si, 0x0081
@@ -37,18 +24,12 @@ start:
 	je	usage
 	cmp	al, 0
 	je	usage
-	; Uppercase
+	or	al, 0x20
 	cmp	al, 'a'
-	jb	.drv_ok
-	cmp	al, 'z'
-	ja	.drv_ok
-	sub	al, 0x20
-.drv_ok:
-	cmp	al, 'A'
 	jb	usage
-	cmp	al, 'B'
+	cmp	al, 'z'
 	ja	usage
-	sub	al, 'A'
+	sub	al, 'a'
 	mov	[drive], al
 	inc	si
 	cmp	byte [si], ':'
@@ -70,17 +51,12 @@ start:
 	jne	usage
 	inc	si
 	mov	al, [si]
-	cmp	al, 'a'
-	jb	.sw_upper
-	cmp	al, 'z'
-	ja	.sw_upper
-	sub	al, 0x20
-.sw_upper:
-	cmp	al, 'S'
+	or	al, 0x20
+	cmp	al, 's'
 	je	.sw_sys
-	cmp	al, 'Q'
+	cmp	al, 'q'
 	je	.sw_quick
-	cmp	al, 'V'
+	cmp	al, 'v'
 	je	.sw_vol
 	jmp	usage
 
@@ -97,7 +73,6 @@ start:
 	cmp	byte [si], ':'
 	jne	usage
 	inc	si
-	; Copy volume label (up to 11 chars)
 	mov	di, vol_label
 	mov	cx, 11
 .copy_vol:
@@ -110,31 +85,146 @@ start:
 	je	.vol_done
 	cmp	al, '/'
 	je	.vol_done
-	; Uppercase
 	cmp	al, 'a'
 	jb	.vol_store
 	cmp	al, 'z'
 	ja	.vol_store
 	sub	al, 0x20
 .vol_store:
-	mov	[di], al
-	inc	di
+	stosb
 	inc	si
 	dec	cx
 	jnz	.copy_vol
 .vol_done:
 	; Pad with spaces
-	jcxz	.vol_padded
-.vol_pad:
-	mov	byte [di], ' '
-	inc	di
-	dec	cx
-	jnz	.vol_pad
-.vol_padded:
+	mov	al, ' '
+	rep	stosb
 	jmp	.parse_switch
 
 .parse_done:
-	; Confirm
+	; ============================================================
+	; Detect disk geometry via INT 13h AH=08h
+	; ============================================================
+	mov	ah, 0x08
+	mov	dl, [drive]
+	int	0x13
+	jc	.detect_err
+
+	; CL bits 0-5 = max sector, CH = max cylinder, DH = max head, BL = type
+	mov	al, cl
+	and	al, 0x3F
+	mov	[geo_spt], al		; Sectors per track
+	mov	al, ch
+	inc	al
+	mov	[geo_cyls], al		; Cylinders (max+1)
+	mov	al, dh
+	inc	al
+	mov	[geo_heads], al		; Heads (max+1)
+	mov	[geo_type], bl		; BIOS drive type
+
+	; Look up format parameters from geometry
+	; Total sectors = cyls * heads * spt
+	xor	ah, ah
+	mov	al, [geo_cyls]
+	mul	byte [geo_heads]	; AX = cyls * heads
+	xor	dh, dh
+	mov	dl, [geo_spt]
+	mul	dx			; DX:AX = total sectors (fits in AX for floppies)
+	mov	[bpb_totsec], ax
+
+	; SPT and heads
+	xor	ah, ah
+	mov	al, [geo_spt]
+	mov	[bpb_spt], ax
+	mov	al, [geo_heads]
+	mov	[bpb_heads], ax
+
+	; Determine format-specific BPB values from total sectors
+	; 720  = 360K  (40*2*9)  → SPC=2, SPF=2, root=112, media=FD
+	; 1440 = 720K  (80*2*9)  → SPC=2, SPF=3, root=112, media=F9
+	; 2400 = 1.2MB (80*2*15) → SPC=1, SPF=7, root=224, media=F9
+	; 2880 = 1.44MB(80*2*18) → SPC=1, SPF=9, root=224, media=F0
+	mov	ax, [bpb_totsec]
+	cmp	ax, 720
+	je	.fmt_360k
+	cmp	ax, 1440
+	je	.fmt_720k
+	cmp	ax, 2400
+	je	.fmt_1200k
+	cmp	ax, 2880
+	je	.fmt_1440k
+	; Unknown — default to 360K-like
+	jmp	.fmt_360k
+
+.fmt_360k:
+	mov	byte [bpb_spc], 2
+	mov	word [bpb_spf], 2
+	mov	word [bpb_rootents], 112
+	mov	byte [bpb_media], 0xFD
+	jmp	.fmt_detected
+
+.fmt_720k:
+	mov	byte [bpb_spc], 2
+	mov	word [bpb_spf], 3
+	mov	word [bpb_rootents], 112
+	mov	byte [bpb_media], 0xF9
+	jmp	.fmt_detected
+
+.fmt_1200k:
+	mov	byte [bpb_spc], 1
+	mov	word [bpb_spf], 7
+	mov	word [bpb_rootents], 224
+	mov	byte [bpb_media], 0xF9
+	jmp	.fmt_detected
+
+.fmt_1440k:
+	mov	byte [bpb_spc], 1
+	mov	word [bpb_spf], 9
+	mov	word [bpb_rootents], 224
+	mov	byte [bpb_media], 0xF0
+	; fall through
+
+.fmt_detected:
+	; Compute derived values
+	mov	word [bpb_bps], 512
+	mov	word [bpb_reserved], 1
+	mov	byte [bpb_nfats], 2
+
+	; root_dir_sec = reserved + nfats * spf
+	mov	ax, [bpb_spf]
+	shl	ax, 1			; * 2 FATs
+	inc	ax			; + 1 reserved
+	mov	[root_dir_sec], ax
+
+	; root_dir_secs = (rootents * 32) / 512
+	mov	ax, [bpb_rootents]
+	mov	cl, 5
+	shl	ax, cl			; * 32
+	mov	cl, 9
+	shr	ax, cl			; / 512
+	mov	[root_dir_secs], ax
+
+	; data_start = root_dir_sec + root_dir_secs
+	mov	ax, [root_dir_sec]
+	add	ax, [root_dir_secs]
+	mov	[data_start], ax
+
+	; bytes_per_cluster
+	xor	ah, ah
+	mov	al, [bpb_spc]
+	mov	cl, 9
+	shl	ax, cl			; * 512
+	mov	[bytes_per_clust], ax
+
+	jmp	.confirm
+
+.detect_err:
+	mov	si, msg_no_disk
+	call	pstr
+	jmp	exit
+
+.confirm:
+	; Print warning
 	mov	si, msg_warn1
 	call	pstr
 	mov	al, [drive]
@@ -148,8 +238,7 @@ start:
 	; Wait for Y/N
 	mov	ah, 0x08
 	int	0x21
-	cmp	al, 'Y'
-	je	.confirmed
+	or	al, 0x20
 	cmp	al, 'y'
 	je	.confirmed
 	mov	si, msg_abort
@@ -163,67 +252,46 @@ start:
 	mov	si, msg_formatting
 	call	pstr
 
-	; Use sector buffer at end of program
 	mov	bx, sector_buf
 
 	; Step 1: Write boot sector
 	mov	si, msg_boot
 	call	pstr
 	call	build_boot_sector
-	mov	ax, 0		; LBA 0
+	mov	ax, 0
 	call	write_sector
 	jc	disk_err
 
 	; Step 2: Write FATs
 	mov	si, msg_fat
 	call	pstr
-	; Build empty FAT sector with media byte
-	mov	di, sector_buf
-	xor	ax, ax
-	mov	cx, 256
-	rep	stosw		; Clear 512 bytes
-	mov	byte [sector_buf], MEDIA_BYTE
-	mov	byte [sector_buf+1], 0xFF
-	mov	byte [sector_buf+2], 0xFF
-	; Write FAT1 sector 1
-	mov	ax, 1
-	call	write_sector
-	jc	disk_err
-	; Clear for second FAT sector
-	mov	byte [sector_buf], 0
-	mov	byte [sector_buf+1], 0
-	mov	byte [sector_buf+2], 0
-	; Write FAT1 sector 2
-	mov	ax, 2
-	call	write_sector
-	jc	disk_err
-	; Write FAT2 (copy of FAT1)
-	; Rebuild first sector
-	mov	byte [sector_buf], MEDIA_BYTE
-	mov	byte [sector_buf+1], 0xFF
-	mov	byte [sector_buf+2], 0xFF
-	mov	ax, 3
-	call	write_sector
-	jc	disk_err
-	mov	byte [sector_buf], 0
-	mov	byte [sector_buf+1], 0
-	mov	byte [sector_buf+2], 0
-	mov	ax, 4
-	call	write_sector
-	jc	disk_err
-
-	; Step 3: Write empty root directory
-	mov	si, msg_rootdir
-	call	pstr
 	; Clear sector buffer
+	push	cs
+	pop	es
+	cld
 	mov	di, sector_buf
 	xor	ax, ax
 	mov	cx, 256
 	rep	stosw
-	; Write 7 root dir sectors
-	mov	ax, ROOT_DIR_SEC
-	mov	cx, ROOT_DIR_SECS
-.write_rootdir:
+	; First FAT sector has media byte
+	mov	al, [bpb_media]
+	mov	[sector_buf], al
+	mov	byte [sector_buf+1], 0xFF
+	mov	byte [sector_buf+2], 0xFF
+	; Write first sector of FAT1
+	mov	bx, sector_buf
+	mov	ax, 1			; LBA 1
+	call	write_sector
+	jc	disk_err
+	; Clear and write remaining FAT1 sectors
+	mov	byte [sector_buf], 0
+	mov	byte [sector_buf+1], 0
+	mov	byte [sector_buf+2], 0
+	mov	cx, [bpb_spf]
+	dec	cx			; Already wrote first sector
+	mov	ax, 2			; LBA 2
+.write_fat1:
+	jcxz	.fat1_done
 	push	cx
 	push	ax
 	call	write_sector
@@ -232,26 +300,82 @@ start:
 	jc	disk_err
 	inc	ax
 	dec	cx
+	jmp	.write_fat1
+.fat1_done:
+	; Write FAT2 (same pattern)
+	mov	al, [bpb_media]
+	mov	[sector_buf], al
+	mov	byte [sector_buf+1], 0xFF
+	mov	byte [sector_buf+2], 0xFF
+	; FAT2 starts at reserved + spf
+	mov	ax, [bpb_spf]
+	inc	ax			; + 1 reserved
+	push	ax
+	call	write_sector
+	jc	disk_err
+	pop	ax
+	inc	ax
+	mov	byte [sector_buf], 0
+	mov	byte [sector_buf+1], 0
+	mov	byte [sector_buf+2], 0
+	mov	cx, [bpb_spf]
+	dec	cx
+.write_fat2:
+	jcxz	.fat2_done
+	push	cx
+	push	ax
+	call	write_sector
+	pop	ax
+	pop	cx
+	jc	disk_err
+	inc	ax
+	dec	cx
+	jmp	.write_fat2
+.fat2_done:
+
+	; Step 3: Write empty root directory
+	mov	si, msg_rootdir
+	call	pstr
+	push	cs
+	pop	es
+	cld
+	mov	di, sector_buf
+	xor	ax, ax
+	mov	cx, 256
+	rep	stosw
+	mov	ax, [root_dir_sec]
+	mov	cx, [root_dir_secs]
+.write_rootdir:
+	push	cx
+	push	ax
+	mov	bx, sector_buf
+	call	write_sector
+	pop	ax
+	pop	cx
+	jc	disk_err
+	inc	ax
+	dec	cx
 	jnz	.write_rootdir
 
-	; Step 4: Volume label (if specified)
+	; Step 4: Volume label
 	cmp	byte [vol_label], 0
 	je	.no_vol
 	mov	si, msg_label
 	call	pstr
-	; Build dir entry with volume label attribute
+	push	cs
+	pop	es
+	cld
 	mov	di, sector_buf
 	xor	ax, ax
 	mov	cx, 256
-	rep	stosw		; Clear
-	; Copy label to first dir entry
+	rep	stosw
 	mov	si, vol_label
 	mov	di, sector_buf
 	mov	cx, 11
 	rep	movsb
-	mov	byte [sector_buf+11], 0x08	; Volume label attribute
-	; Write first root dir sector
-	mov	ax, ROOT_DIR_SEC
+	mov	byte [sector_buf+11], 0x08
+	mov	bx, sector_buf
+	mov	ax, [root_dir_sec]
 	call	write_sector
 	jc	disk_err
 .no_vol:
@@ -261,8 +385,8 @@ start:
 	je	.skip_verify
 	mov	si, msg_verify
 	call	pstr
-	xor	ax, ax		; Start at sector 0
-	mov	cx, TOTAL_SECS
+	xor	ax, ax
+	mov	cx, [bpb_totsec]
 .verify_loop:
 	push	cx
 	push	ax
@@ -277,7 +401,6 @@ start:
 .verify_err:
 	mov	si, msg_bad_sec
 	call	pstr
-	; Continue anyway
 .verify_ok:
 .skip_verify:
 
@@ -286,13 +409,14 @@ start:
 	je	do_sys
 after_sys:
 
-	; Done!
+	; Done
 	call	crlf
 	mov	si, msg_done
 	call	pstr
-	; Print bytes free
-	; Free = (TOTAL_SECS - DATA_START_SEC) * 512
-	mov	ax, (TOTAL_SECS - DATA_START_SEC) * BYTES_PER_SEC / 1024
+	; Print KB free = (total_secs - data_start) * 512 / 1024
+	mov	ax, [bpb_totsec]
+	sub	ax, [data_start]
+	shr	ax, 1			; * 512 / 1024 = / 2
 	call	pdec
 	mov	si, msg_kfree
 	call	pstr
@@ -322,16 +446,15 @@ do_sys:
 
 	; Open SHELL.COM from current drive
 	mov	ah, 0x3D
-	mov	al, 0		; Read
+	mov	al, 0
 	mov	dx, shell_fname
 	int	0x21
 	jc	.sys_err
 	mov	[sys_handle], ax
 
-	; Read SHELL.COM and write to target disk
-	; First, read the file size
+	; Get file size
 	mov	bx, ax
-	mov	ax, 0x4202	; Seek to end
+	mov	ax, 0x4202
 	xor	cx, cx
 	xor	dx, dx
 	int	0x21
@@ -344,23 +467,15 @@ do_sys:
 	mov	bx, [sys_handle]
 	int	0x21
 
-	; Calculate clusters needed
-	mov	ax, [sys_size]
-	add	ax, SECS_PER_CLUST * BYTES_PER_SEC - 1
-	mov	cl, 10		; / 1024 (bytes per cluster)
-	shr	ax, cl
-	inc	ax		; Round up
-	mov	[sys_clusters], ax
-
 	; Read file and write to data area, cluster by cluster
-	mov	word [cur_cluster], 2	; First data cluster
-	mov	ax, DATA_START_SEC
+	mov	word [cur_cluster], 2
+	mov	ax, [data_start]
 	mov	[cur_lba], ax
+
 .sys_read_loop:
-	; Read one cluster from file (1024 bytes = 2 sectors)
 	mov	ah, 0x3F
 	mov	bx, [sys_handle]
-	mov	cx, SECS_PER_CLUST * BYTES_PER_SEC
+	mov	cx, [bytes_per_clust]
 	mov	dx, sector_buf
 	int	0x21
 	jc	.sys_err
@@ -368,104 +483,128 @@ do_sys:
 	je	.sys_read_done
 	mov	[.sys_bytes_read], ax
 
-	; Write sectors to target disk
+	; Write sectors of this cluster
 	push	ax
+	xor	ch, ch
+	mov	cl, [bpb_spc]
+	mov	bx, sector_buf
 	mov	ax, [cur_lba]
+.sys_write_secs:
+	push	cx
+	push	ax
 	call	write_sector
+	pop	ax
+	pop	cx
 	jc	disk_err
-	inc	word [cur_lba]
-	; Write second sector of cluster
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.sys_write_secs
 	mov	ax, [cur_lba]
-	mov	bx, sector_buf + 512
-	call	write_sector
-	mov	bx, sector_buf		; Reset BX
-	jc	disk_err
-	inc	word [cur_lba]
+	xor	ch, ch
+	mov	cl, [bpb_spc]
+	add	ax, cx
+	mov	[cur_lba], ax
 	pop	ax
 
-	; Update FAT chain
-	mov	ax, [cur_cluster]
+	; Track cluster
 	inc	word [cur_cluster]
 
-	; Check if more data
-	cmp	word [.sys_bytes_read], SECS_PER_CLUST * BYTES_PER_SEC
+	; More data?
+	mov	ax, [.sys_bytes_read]
+	cmp	ax, [bytes_per_clust]
 	je	.sys_read_loop
 
 .sys_read_done:
-	; Close file
 	mov	ah, 0x3E
 	mov	bx, [sys_handle]
 	int	0x21
 
-	; Now write the FAT with the cluster chain
-	; Build FAT in sector_buf (clear full 1024 bytes for both FAT sectors)
+	; Build FAT with cluster chain in sector_buf
+	; Need enough space for all FAT sectors
+	push	cs
+	pop	es
+	cld
 	mov	di, sector_buf
+	mov	ax, [bpb_spf]
+	mov	bx, 256
+	mul	bx			; AX = spf * 256 words
+	mov	cx, ax
 	xor	ax, ax
-	mov	cx, 512
-	rep	stosw		; Clear 1024 bytes
-	mov	byte [sector_buf], MEDIA_BYTE
+	rep	stosw
+	mov	al, [bpb_media]
+	mov	[sector_buf], al
 	mov	byte [sector_buf+1], 0xFF
 	mov	byte [sector_buf+2], 0xFF
-	; Write cluster chain: 2→3→4→...→EOF
-	mov	ax, 2		; First cluster
+
+	; Write chain: 2→3→4→...→EOF
+	mov	ax, 2
 	mov	cx, [cur_cluster]
-	sub	cx, 2		; Number of clusters used
-	dec	cx		; Last one gets EOF
+	sub	cx, 2
+	dec	cx
 .sys_fat_chain:
 	jcxz	.sys_fat_eof
-	; Write next cluster (AX+1) into FAT entry AX
 	push	cx
 	mov	bx, ax
-	inc	bx		; Next cluster number
+	inc	bx
 	call	fat12_write
 	pop	cx
 	inc	ax
 	dec	cx
 	jmp	.sys_fat_chain
 .sys_fat_eof:
-	; Write EOF for last cluster
 	mov	bx, 0xFFF
 	call	fat12_write
 
-	; Write FAT to disk (both copies)
-	mov	bx, sector_buf		; fat12_write destroys BX
-	mov	ax, 1
-	call	write_sector
-	jc	disk_err
-	mov	bx, sector_buf + 512
-	mov	ax, 2
-	call	write_sector
-	jc	disk_err
-	; FAT2
+	; Write FAT1 (all sectors)
 	mov	bx, sector_buf
-	mov	ax, 3
+	mov	ax, 1			; FAT1 starts at LBA 1
+	mov	cx, [bpb_spf]
+.sys_wf1:
+	push	cx
+	push	ax
 	call	write_sector
+	pop	ax
+	pop	cx
 	jc	disk_err
-	mov	bx, sector_buf + 512
-	mov	ax, 4
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.sys_wf1
+	; Write FAT2
+	mov	bx, sector_buf
+	mov	ax, [bpb_spf]
+	inc	ax			; FAT2 start = reserved + spf
+	mov	cx, [bpb_spf]
+.sys_wf2:
+	push	cx
+	push	ax
 	call	write_sector
+	pop	ax
+	pop	cx
 	jc	disk_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.sys_wf2
 
 	; Write root dir entry for SHELL.COM
-	; Clear dir sector
+	push	cs
+	pop	es
+	cld
 	mov	di, sector_buf
 	xor	ax, ax
 	mov	cx, 256
 	rep	stosw
-	; Check if volume label — if so, label is entry 0, shell is entry 1
 	mov	di, sector_buf
 	cmp	byte [vol_label], 0
-	je	.sys_no_vol_entry
-	; Write volume label entry first
-	push	di
+	je	.sys_no_vol
 	mov	si, vol_label
 	mov	cx, 11
 	rep	movsb
 	mov	byte [sector_buf+11], 0x08
-	pop	di
-	add	di, 32		; Next entry
-.sys_no_vol_entry:
-	; Write SHELL.COM dir entry
+	add	di, 32 - 11		; DI already advanced 11 by movsb
+.sys_no_vol:
 	mov	byte [di+0], 'S'
 	mov	byte [di+1], 'H'
 	mov	byte [di+2], 'E'
@@ -477,15 +616,14 @@ do_sys:
 	mov	byte [di+8], 'C'
 	mov	byte [di+9], 'O'
 	mov	byte [di+10], 'M'
-	mov	byte [di+11], 0x20	; Archive attribute
-	mov	word [di+26], 2		; Start cluster
+	mov	byte [di+11], 0x20
+	mov	word [di+26], 2
 	mov	ax, [sys_size]
 	mov	[di+28], ax
 	mov	ax, [sys_size+2]
 	mov	[di+30], ax
-	; Write root dir first sector
 	mov	bx, sector_buf
-	mov	ax, ROOT_DIR_SEC
+	mov	ax, [root_dir_sec]
 	call	write_sector
 	jc	disk_err
 
@@ -499,25 +637,23 @@ do_sys:
 .sys_bytes_read: dw	0
 
 ; ============================================================================
-; FAT12 write helper — write value BX into FAT entry AX
-; Operates on sector_buf (1024 bytes = 2 FAT sectors)
+; FAT12 write — value BX into FAT entry AX (operates on sector_buf)
 ; ============================================================================
 fat12_write:
 	push	cx
 	push	dx
 	push	si
 	mov	si, ax
+	mov	cx, ax
 	shr	si, 1
-	add	si, ax		; SI = byte offset (cluster * 1.5)
+	add	si, cx
 	mov	dx, [sector_buf + si]
-	test	ax, 1
+	test	cx, 1
 	jnz	.fat_odd
-	; Even cluster: low 12 bits
 	and	dx, 0xF000
 	or	dx, bx
 	jmp	.fat_store
 .fat_odd:
-	; Odd cluster: high 12 bits
 	and	dx, 0x000F
 	push	cx
 	mov	cl, 4
@@ -532,10 +668,12 @@ fat12_write:
 	ret
 
 ; ============================================================================
-; Build boot sector in sector_buf
+; Build boot sector in sector_buf — uses BPB variables
 ; ============================================================================
 build_boot_sector:
-	; Clear
+	push	cs
+	pop	es
+	cld
 	mov	di, sector_buf
 	xor	ax, ax
 	mov	cx, 256
@@ -549,28 +687,36 @@ build_boot_sector:
 	mov	si, oem_name
 	mov	cx, 8
 	rep	movsb
-	; BPB
-	mov	word [sector_buf+11], BYTES_PER_SEC
-	mov	byte [sector_buf+13], SECS_PER_CLUST
-	mov	word [sector_buf+14], RESERVED_SECS
-	mov	byte [sector_buf+16], NUM_FATS
-	mov	word [sector_buf+17], ROOT_ENTRIES
-	mov	word [sector_buf+19], TOTAL_SECS
-	mov	byte [sector_buf+21], MEDIA_BYTE
-	mov	word [sector_buf+22], SECS_PER_FAT
-	mov	word [sector_buf+24], SPT
-	mov	word [sector_buf+26], HEADS
+	; BPB from variables
+	mov	ax, [bpb_bps]
+	mov	[sector_buf+11], ax
+	mov	al, [bpb_spc]
+	mov	[sector_buf+13], al
+	mov	ax, [bpb_reserved]
+	mov	[sector_buf+14], ax
+	mov	al, [bpb_nfats]
+	mov	[sector_buf+16], al
+	mov	ax, [bpb_rootents]
+	mov	[sector_buf+17], ax
+	mov	ax, [bpb_totsec]
+	mov	[sector_buf+19], ax
+	mov	al, [bpb_media]
+	mov	[sector_buf+21], al
+	mov	ax, [bpb_spf]
+	mov	[sector_buf+22], ax
+	mov	ax, [bpb_spt]
+	mov	[sector_buf+24], ax
+	mov	ax, [bpb_heads]
+	mov	[sector_buf+26], ax
 	; Boot signature
 	mov	byte [sector_buf+510], 0x55
 	mov	byte [sector_buf+511], 0xAA
-	; If /S, we should write boot code here too
-	; For now, non-bootable — just BPB
+	; If /S, copy boot code from drive A
 	cmp	byte [opt_sys], 1
 	jne	.boot_no_sys
-	; Copy boot code from current boot sector (sector 0 of drive A)
 	push	bx
 	push	ax
-	mov	bx, sector_buf + 512	; Temp buffer
+	mov	bx, sector_buf + 512
 	mov	ah, 0x02
 	mov	al, 1
 	mov	ch, 0
@@ -579,7 +725,7 @@ build_boot_sector:
 	mov	dl, 0		; Drive A
 	int	0x13
 	jc	.boot_no_copy
-	; Copy boot code (0x3E to 0x1FD) from drive A's boot sector
+	; Copy boot code (after BPB) from drive A
 	mov	si, sector_buf + 512 + 0x3E
 	mov	di, sector_buf + 0x3E
 	mov	cx, 0x1FE - 0x3E
@@ -591,9 +737,8 @@ build_boot_sector:
 	ret
 
 ; ============================================================================
-; Disk I/O — read/write sector using LBA
+; Disk I/O
 ; ============================================================================
-; AX = LBA sector number, BX = buffer (DS:BX)
 write_sector:
 	push	ax
 	push	bx
@@ -601,7 +746,7 @@ write_sector:
 	push	dx
 	call	lba_to_chs
 	mov	dl, [drive]
-	mov	ax, 0x0301	; Write 1 sector
+	mov	ax, 0x0301
 	int	0x13
 	pop	dx
 	pop	cx
@@ -616,7 +761,7 @@ read_sector:
 	push	dx
 	call	lba_to_chs
 	mov	dl, [drive]
-	mov	ax, 0x0201	; Read 1 sector
+	mov	ax, 0x0201
 	int	0x13
 	pop	dx
 	pop	cx
@@ -624,20 +769,25 @@ read_sector:
 	pop	ax
 	ret
 
-; LBA in AX → CHS in CH/CL/DH, BX preserved
+; LBA in AX → CHS — uses BPB variables
 lba_to_chs:
 	push	bx
+	push	ax
+	mov	ax, [bpb_spt]
+	mul	word [bpb_heads]
+	mov	bx, ax
+	pop	ax
+	push	ax
 	xor	dx, dx
-	mov	bx, SPT * HEADS
 	div	bx
 	mov	ch, al		; Cylinder
 	mov	ax, dx
 	xor	dx, dx
-	mov	bx, SPT
-	div	bx
+	div	word [bpb_spt]
 	mov	dh, al		; Head
 	mov	cl, dl
 	inc	cl		; Sector (1-based)
+	pop	ax
 	pop	bx
 	ret
 
@@ -698,7 +848,7 @@ pdec:
 	ret
 
 ; ============================================================================
-; Data
+; Messages
 ; ============================================================================
 msg_usage	db	'Usage: FORMAT drive: [/S] [/V:label] [/Q]', 0x0D, 0x0A, 0
 msg_warn1	db	'WARNING: All data on drive ', 0
@@ -717,19 +867,48 @@ msg_sys_err	db	'  Cannot copy system files', 0x0D, 0x0A, 0
 msg_done	db	'Format complete.', 0x0D, 0x0A, 0
 msg_kfree	db	'KB available on disk', 0x0D, 0x0A, 0
 msg_disk_err	db	'Disk error during format.', 0x0D, 0x0A, 0
+msg_no_disk	db	'Drive not ready', 0x0D, 0x0A, 0
 
 oem_name	db	'MEGADOS '
 shell_fname	db	'SHELL.COM', 0
 
+; ============================================================================
+; Data
+; ============================================================================
 drive		db	0
 opt_sys		db	0
 opt_quick	db	0
 vol_label	times 11 db 0
+
+; Detected geometry
+geo_spt		db	0
+geo_cyls	db	0
+geo_heads	db	0
+geo_type	db	0
+
+; BPB variables
+bpb_bps		dw	512
+bpb_spc		db	0
+bpb_reserved	dw	1
+bpb_nfats	db	2
+bpb_rootents	dw	0
+bpb_totsec	dw	0
+bpb_media	db	0
+bpb_spf		dw	0
+bpb_spt		dw	0
+bpb_heads	dw	0
+
+; Derived
+root_dir_sec	dw	0
+root_dir_secs	dw	0
+data_start	dw	0
+bytes_per_clust	dw	0
+
+; System file copy state
 sys_handle	dw	0
 sys_size	dd	0
-sys_clusters	dw	0
 cur_cluster	dw	0
 cur_lba		dw	0
 
-; Sector buffer — must be at least 1024 bytes for FAT write
+; Sector buffer — must be large enough for FAT write (up to 9*512 = 4608)
 sector_buf:

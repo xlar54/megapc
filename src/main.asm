@@ -97,7 +97,8 @@ TBL_BIOS_19     = TBL_BASE + (19 * 256)
 ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
 FLOPPY_A_ATTIC  = $8100000      ; Floppy A image in attic (1.44MB at +1MB)
 FLOPPY_B_ATTIC  = $8200000      ; Floppy B image in attic (1.44MB at +2MB)
-SCREEN_SAVE_ATTIC = $8300000    ; Screen save area in attic (for TAB menu)
+SCREEN_SAVE_ATTIC = $8400000    ; Screen save area in attic (for TAB menu)
+                                ; Must be past floppy B max ($8200000 + 1.44MB = $8368000)
 
 ; --- Cache constants ---
 CACHE_LINES     = 4             ; Number of cache lines
@@ -571,6 +572,24 @@ _resume_restore_zp:
         lda #0
         jsr detect_floppy_geom_drive
 +
+        lda floppy_b_loaded
+        beq +
+        lda #1
+        jsr detect_floppy_geom_drive
++
+        ; Set BDA disk-change flag (0040:003E) so shell re-reads BPB
+        lda #$3E
+        sta temp_ptr
+        lda #$04
+        sta temp_ptr+1
+        lda #$04
+        sta temp_ptr+2
+        lda #$00
+        sta temp_ptr+3
+        lda #$FF
+        ldz #0
+        sta [temp_ptr],z
+
         ; Restore screen from attic
         jsr menu_restore_screen
 
@@ -600,6 +619,24 @@ _resume_restore_zp:
         sta scr_col
         jsr cursor_update
 
+        ; Drain stray keypresses from menu interaction
+        ; Drain twice with a brief delay — keyboard hardware may buffer
+-       lda $D610
+        beq +
+        sta $D610
+        bra -
++       ldx #0
+        ldy #0
+-       dey
+        bne -
+        dex
+        bne -
+        ; Drain again after delay
+-       lda $D610
+        beq +
+        sta $D610
+        bra -
++
         ; Resume main loop (segment bases intact from ZP restore)
         jmp main_loop
 

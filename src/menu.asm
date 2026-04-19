@@ -331,6 +331,18 @@ menu_do_resume:
         ; Resume — only if running
         lda menu_emu_started
         beq show_menu           ; Not running, redraw menu
+        ; Drain keyboard thoroughly — wait for key release then drain
+        ldx #0
+        ldy #0
+-       dey
+        bne -
+        dex
+        bne -
+-       lda $D610
+        beq +
+        sta $D610
+        bra -
++
         jmp resume_emulation
 
 menu_do_drive_a:
@@ -807,7 +819,7 @@ menu_save_screen:
         lda #$00
         sta dma_dst_lo
         sta dma_dst_hi
-        lda #$30                ; SCREEN_SAVE_ATTIC = $8300000
+        lda #$40                ; SCREEN_SAVE_ATTIC = $8400000
         sta dma_dst_bank
 
         lda #<2000
@@ -828,8 +840,8 @@ menu_save_screen:
         sta dma_dst_lo
         lda #$07
         sta dma_dst_hi
-        lda #$30
-        sta dma_dst_bank        ; $83007D0
+        lda #$40
+        sta dma_dst_bank        ; $84007D0
 
         lda #<2000
         sta dma_count_lo
@@ -846,7 +858,7 @@ menu_restore_screen:
         lda #$00
         sta dma_src_lo
         sta dma_src_hi
-        lda #$30
+        lda #$40
         sta dma_src_bank
 
         lda #<SCREEN_BASE
@@ -867,7 +879,7 @@ menu_restore_screen:
         sta dma_src_lo
         lda #$07
         sta dma_src_hi
-        lda #$30
+        lda #$40
         sta dma_src_bank
 
         lda #$00

@@ -1,6 +1,6 @@
 MEGA8086 Emulator — Status
 ===========================
-Last updated: 2026-04-11
+Last updated: 2026-04-18
 
 WORKING DOS VERSIONS
 =====================
@@ -477,6 +477,14 @@ KNOWN BUGS
 
 - Running DOSTEST twice may show minor handle leaks (refcount drift
   for device handles inherited across program invocations).
+
+- Stray keypress after menu resume: occasionally after returning from
+  the TAB menu to the emulation, a phantom keypress is prepended to
+  the next command, causing "Bad command or file name". Multiple drain
+  attempts at both the emulator ($D610) and DOS (AH=0Ch) levels have
+  not fully resolved it. Suspected MEGA65 keyboard hardware timing —
+  key events may arrive after the drain loop completes. Affects any
+  running program, not just the shell.
 
 TODO
 =====

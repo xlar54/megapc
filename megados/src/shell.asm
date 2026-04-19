@@ -20,8 +20,8 @@
 ; Buffers — placed at start so they have fixed addresses
 ; ============================================================================
 	align 16
-dir_buffer:	times	(7 * 512) db 0		; 3584 bytes for root directory
-fat_buffer:	times	(2 * 512) db 0		; 1024 bytes for FAT
+dir_buffer:	times	(14 * 512) db 0		; 7168 bytes for root directory (up to 1.44MB)
+fat_buffer:	times	(9 * 512) db 0		; 4608 bytes for FAT (up to 1.44MB)
 batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
 io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
 
@@ -1458,10 +1458,12 @@ do_dir:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.dir_is_sub
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.dir_resolved
 .dir_is_sub:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 	jmp	.dir_resolved
 
 .dir_wildcard:
@@ -1551,10 +1553,12 @@ do_dir:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.dir_is_sub_wild
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.dir_resolved_wild
 .dir_is_sub_wild:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 
 .dir_resolved_wild:
 	call	read_resolved_dir
@@ -1928,10 +1932,9 @@ do_dir:
 	jc	.dir_no_free
 	xor	bx, bx			; Free cluster count
 	mov	ax, 2			; Start at cluster 2
-	; Get total clusters from BPB: (total_sectors - data_start) / secs_per_clust
-	; For 360K: (720 - 12) / 2 = 354 clusters
-	mov	cx, 354			; Max data clusters for 360K
-	add	cx, 2			; Clusters start at 2
+	; Max cluster number (clusters 2..max_clust)
+	mov	cx, [geo_max_clust]
+	inc	cx			; Loop needs max+1
 .dir_count_free:
 	cmp	ax, cx
 	jae	.dir_free_done
@@ -1947,9 +1950,9 @@ do_dir:
 	inc	ax
 	jmp	.dir_count_free
 .dir_free_done:
-	; Free bytes = free_clusters * SECS_PER_CLUST * 512
+	; Free bytes = free_clusters * bytes_per_cluster
 	mov	ax, bx
-	mov	cx, SECS_PER_CLUST * 512
+	mov	cx, [geo_bpc]
 	mul	cx			; DX:AX = free bytes
 	call	print_decimal_32
 	mov	si, msg_bytes_free
@@ -2069,39 +2072,23 @@ do_type:
 	; Convert cluster to sector
 	push	ax
 	sub	ax, 2
-	mov	cx, SECS_PER_CLUST
-	mul	cx
-	add	ax, DATA_START_SEC
-
-	; Convert linear sector to CHS
-	; Save sector number, compute CHS
-	xor	dx, dx
-	mov	cx, 18			; SPT * heads
-	div	cx			; AX = cylinder, DX = remainder
-	push	ax			; Save cylinder
-	mov	ax, dx
-	xor	dx, dx
-	mov	cx, 9			; SPT
-	div	cx			; AX = head, DX = sector (0-based)
-	mov	dh, al			; DH = head
-	mov	cl, dl
-	inc	cl			; CL = sector (1-based)
-	pop	ax
-	mov	ch, al			; CH = cylinder
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	call	lba_to_chs
 
 	; Read cluster into dir_buffer (reuse as temp)
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	jc	.type_disk_err_pop
 
 	; Print bytes from buffer, up to file size remaining
 	mov	si, dir_buffer
-	mov	cx, SECS_PER_CLUST * 512	; bytes in cluster
+	mov	cx, [geo_bpc]	; bytes in cluster
 
 .type_print_byte:
 	; Check if file size remaining is zero
@@ -2262,10 +2249,12 @@ do_del:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.del_w_is_sub
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.del_w_resolved
 .del_w_is_sub:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 .del_w_resolved:
 	call	read_resolved_dir
 	jc	.del_disk_err
@@ -2756,7 +2745,7 @@ do_copy:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [copy_src_drv]
 	int	0x13
 	pop	ax			; Discard saved source cluster from find_free
@@ -2769,7 +2758,7 @@ do_copy:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [copy_dst_drv]
 	int	0x13
 	jc	.copy_disk_err
@@ -2853,23 +2842,11 @@ do_copy:
 ; Output: CH = cylinder, CL = sector (1-based), DH = head
 ;
 cluster_to_chs:
+	call	ensure_geo
 	sub	ax, 2
-	mov	cx, SECS_PER_CLUST
-	mul	cx
-	add	ax, DATA_START_SEC
-	xor	dx, dx
-	mov	cx, 18
-	div	cx
-	push	ax			; Save cylinder
-	mov	ax, dx
-	xor	dx, dx
-	mov	cx, 9
-	div	cx
-	mov	dh, al			; Head
-	mov	cl, dl
-	inc	cl			; Sector (1-based)
-	pop	ax
-	mov	ch, al			; Cylinder
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	call	lba_to_chs
 	ret
 
 ; ============================================================================
@@ -3013,10 +2990,12 @@ do_cd:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.cd_is_sub
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.cd_set_dir
 .cd_is_sub:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 
 .cd_set_dir:
 	; If changing to a different drive, save current and load new
@@ -3313,7 +3292,7 @@ do_mkdir:
 	; Initialize the new directory cluster with "." and ".." entries
 	; Clear dir_buffer first (reuse as temp for the new directory data)
 	mov	di, dir_buffer
-	mov	cx, SECS_PER_CLUST * 512
+	mov	cx, [geo_bpc]
 	xor	al, al
 	rep	stosb
 
@@ -3359,7 +3338,7 @@ do_mkdir:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	jc	.mkdir_disk_err
@@ -3481,13 +3460,14 @@ do_rmdir:
 	push	word [resolved_dir_entries]
 	mov	ax, [copy_dest_cl]
 	mov	[resolved_dir_cluster], ax
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 	call	read_resolved_dir
 	jc	.rmdir_disk_err_pop
 
 	; Check entries — only "." and ".." should exist
 	mov	si, dir_buffer
-	mov	cx, SECS_PER_CLUST * 512 / 32
+	mov	cx, [geo_epc]
 .rmdir_check_empty:
 	mov	al, [si]
 	cmp	al, 0			; End of directory
@@ -4294,18 +4274,40 @@ load_drive_state:
 ; Output: carry set on error
 ;
 read_cur_dir:
+	push	cx
+	; Set geometry for current drive
+	push	word [resolved_drive]
+	mov	al, [cur_drive]
+	mov	[resolved_drive], al
+	call	ensure_geo
+	pop	word [resolved_drive]
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
 	cmp	word [cur_dir_cluster], 0
 	jne	.rcd_subdir
-	mov	ah, 0x02
-	mov	al, ROOT_DIR_SECS
-	mov	ch, 0
-	mov	cl, ROOT_DIR_SEC + 1
-	mov	dh, 0
+	; Read root dir sector by sector
+	mov	cx, [geo_root_secs]
+	mov	ax, [geo_root_sec]
+.rcd_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [cur_drive]
+	mov	ax, 0x0201
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.rcd_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.rcd_loop
+	clc
+.rcd_err:
+	pop	cx
 	ret
 .rcd_subdir:
 	mov	ax, [cur_dir_cluster]
@@ -4314,7 +4316,7 @@ read_cur_dir:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [cur_drive]
 	int	0x13
 	ret
@@ -4325,18 +4327,39 @@ read_cur_dir:
 ; Output: carry set on error
 ;
 write_cur_dir:
+	push	cx
+	push	word [resolved_drive]
+	mov	al, [cur_drive]
+	mov	[resolved_drive], al
+	call	ensure_geo
+	pop	word [resolved_drive]
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
 	cmp	word [cur_dir_cluster], 0
 	jne	.wcd_subdir
-	mov	ah, 0x03
-	mov	al, ROOT_DIR_SECS
-	mov	ch, 0
-	mov	cl, ROOT_DIR_SEC + 1
-	mov	dh, 0
+	; Write root dir sector by sector
+	mov	cx, [geo_root_secs]
+	mov	ax, [geo_root_sec]
+.wcd_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [cur_drive]
+	mov	ax, 0x0301
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.wcd_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wcd_loop
+	clc
+.wcd_err:
+	pop	cx
 	ret
 .wcd_subdir:
 	mov	ax, [cur_dir_cluster]
@@ -4345,7 +4368,7 @@ write_cur_dir:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [cur_drive]
 	int	0x13
 	ret
@@ -4353,43 +4376,288 @@ write_cur_dir:
 ; ============================================================================
 ; read_fat — Read FAT into fat_buffer
 ; ============================================================================
-read_fat:
-	mov	ax, SHELL_SEG
+; ensure_geo — Make sure active geometry matches resolved_drive
+; ============================================================================
+; Call before any disk I/O. Reads BPB from boot sector if needed.
+; Preserves all registers except flags.
+;
+ensure_geo:
+	push	ax
+	push	es
+	; Check BDA disk-change flag at 0040:003E (set by emulator on resume)
+	mov	ax, 0x0040
 	mov	es, ax
-	mov	bx, fat_buffer
-	mov	ah, 0x02
-	mov	al, 2
-	mov	ch, 0
-	mov	cl, FAT_SEC + 1
-	mov	dh, 0
-	mov	dl, [resolved_drive]
-	int	0x13
+	cmp	byte [es:0x3E], 0
+	je	.eg_no_invalidate
+	mov	byte [es:0x3E], 0	; Clear flag
+	mov	byte [geo_active_drv], 0xFF ; Force re-read
+.eg_no_invalidate:
+	pop	es
+	mov	al, [resolved_drive]
+	cmp	al, [geo_active_drv]
+	je	.eg_done
+	call	load_drive_bpb
+.eg_done:
+	pop	ax
 	ret
 
 ; ============================================================================
-; write_fat — Write fat_buffer to both FAT copies
+; load_drive_bpb — Read boot sector of resolved_drive, parse BPB
 ; ============================================================================
-write_fat:
+; Sets active geometry variables and caches per-drive data.
+; Preserves: BX, CX, DX, SI, DI
+;
+load_drive_bpb:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	push	es
+
+	; Read boot sector (LBA 0 = C=0, H=0, S=1)
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	bx, dir_buffer		; Use dir_buffer temporarily (overwritten by dir read later)
+	mov	ah, 0x02
+	mov	al, 1
+	mov	ch, 0
+	mov	cl, 1
+	mov	dh, 0
+	mov	dl, [resolved_drive]
+	int	0x13
+	jc	.ldb_defaults		; Read failed — use 360K defaults
+
+	; Parse BPB from dir_buffer
+	mov	si, dir_buffer
+	; Validate: check for BPB signature (bytes per sector should be 512)
+	cmp	word [si+11], 512
+	jne	.ldb_defaults
+
+	; Read BPB fields directly — use simple adds instead of mul/shift
+	; SPT and heads (read first so lba_to_chs works)
+	mov	ax, [si+24]
+	mov	[geo_spt], ax
+	mov	ax, [si+26]
+	mov	[geo_heads], ax
+
+	; Sectors per cluster
+	mov	al, [si+13]
+	xor	ah, ah
+	mov	[geo_spc], ax
+
+	; Sectors per FAT
+	mov	ax, [si+22]
+	mov	[geo_spf], ax
+
+	; Reserved sectors = FAT start
+	mov	ax, [si+14]
+	mov	[geo_fat_sec], ax
+
+	; root_dir_sec = reserved + nfats * spf
+	; nfats is always 2 for floppy, so root = reserved + 2*spf
+	mov	bx, [si+22]		; SPF
+	add	bx, bx			; * 2
+	add	bx, [si+14]		; + reserved
+	mov	[geo_root_sec], bx
+
+	; Root entries
+	mov	ax, [si+17]
+	mov	[geo_rootents], ax
+
+	; root_dir_secs = root_entries / 16 (since 512/32 = 16 entries per sector)
+	mov	cl, 4
+	shr	ax, cl			; / 16
+	mov	[geo_root_secs], ax
+
+	; data_start = root_dir_sec + root_dir_secs
+	add	ax, bx			; BX still has root_dir_sec
+	mov	[geo_data_start], ax
+
+	; Total sectors
+	mov	ax, [si+19]
+	mov	[geo_total], ax
+
+	; Media byte
+	mov	al, [si+21]
+	mov	[geo_media], al
+
+	; Bytes per cluster = spc * 512
+	mov	ax, [geo_spc]
+	mov	cl, 9
+	shl	ax, cl
+	mov	[geo_bpc], ax
+
+	; Entries per cluster = bpc / 32
+	mov	cl, 5
+	shr	ax, cl
+	mov	[geo_epc], ax
+
+	; Total data clusters = (total_secs - data_start) / spc
+	mov	ax, [geo_total]
+	sub	ax, [geo_data_start]
+	xor	dx, dx
+	div	word [geo_spc]
+	mov	[geo_total_clust], ax
+	inc	ax
+	mov	[geo_max_clust], ax
+
+	; Mark active drive
+	mov	al, [resolved_drive]
+	mov	[geo_active_drv], al
+
+	; Cache to per-drive storage
+	cmp	al, 0
+	je	.ldb_cache_a
+	mov	byte [geo_b_loaded], 1
+	mov	di, geo_b_spt
+	jmp	.ldb_cache
+.ldb_cache_a:
+	mov	byte [geo_a_loaded], 1
+	mov	di, geo_a_spt
+.ldb_cache:
+	mov	si, geo_spt
+	mov	cx, 11			; 11 words (spt through bpc)
+	rep	movsw
+	movsb				; 1 byte (media)
+
+	pop	es
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+.ldb_defaults:
+	; Reset to 360K defaults
+	mov	word [geo_spt], 9
+	mov	word [geo_heads], 2
+	mov	word [geo_spc], 2
+	mov	word [geo_root_sec], 5
+	mov	word [geo_root_secs], 7
+	mov	word [geo_data_start], 12
+	mov	word [geo_total], 720
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 2
+	mov	word [geo_rootents], 112
+	mov	word [geo_bpc], 1024
+	mov	byte [geo_media], 0xFD
+	mov	word [geo_epc], 32
+	mov	word [geo_total_clust], 354
+	mov	word [geo_max_clust], 355
+	mov	al, [resolved_drive]
+	mov	[geo_active_drv], al
+	pop	es
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; lba_to_chs — Convert LBA in AX to CHS using active geometry
+; ============================================================================
+; Input:  AX = LBA sector number
+; Output: CH = cylinder, CL = sector (1-based), DH = head
+; Preserves: AX, BX
+;
+lba_to_chs:
+	push	bx
+	push	ax
+	; Compute SPT * HEADS
+	push	ax
+	mov	ax, [geo_spt]
+	mul	word [geo_heads]
+	mov	bx, ax			; BX = SPT * HEADS
+	pop	ax
+	xor	dx, dx
+	div	bx			; AX = cylinder, DX = remainder
+	mov	ch, al
+	mov	ax, dx
+	xor	dx, dx
+	div	word [geo_spt]		; AX = head, DX = sector
+	mov	dh, al
+	mov	cl, dl
+	inc	cl			; 1-based
+	pop	ax
+	pop	bx
+	ret
+
+; ============================================================================
+read_fat:
+	call	ensure_geo
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, fat_buffer
-	mov	ah, 0x03
-	mov	al, 2
-	mov	ch, 0
-	mov	cl, FAT_SEC + 1
-	mov	dh, 0
+	; Read geo_spf sectors starting at geo_fat_sec
+	mov	cx, [geo_spf]
+	mov	ax, [geo_fat_sec]
+.rf_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [resolved_drive]
+	mov	ax, 0x0201
 	int	0x13
-	jc	.wf_done
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.rf_done
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.rf_loop
+	clc
+.rf_done:
+	ret
+
+; ============================================================================
+; write_fat — Write fat_buffer to both FAT copies using active geometry
+; ============================================================================
+write_fat:
+	call	ensure_geo
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	; Write FAT1
 	mov	bx, fat_buffer
-	mov	ah, 0x03
-	mov	al, 2
-	mov	ch, 0
-	mov	cl, FAT_SEC + 3
-	mov	dh, 0
-	mov	dl, [resolved_drive]
-	int	0x13
+	mov	cx, [geo_spf]
+	mov	ax, [geo_fat_sec]
+	call	.wf_copy
+	jc	.wf_done
+	; Write FAT2 (starts at fat_sec + spf)
+	mov	bx, fat_buffer
+	mov	cx, [geo_spf]
+	mov	ax, [geo_fat_sec]
+	add	ax, [geo_spf]
+	call	.wf_copy
 .wf_done:
+	ret
+.wf_copy:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
+	mov	dl, [resolved_drive]
+	mov	ax, 0x0301
+	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.wfc_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wf_copy
+	clc
+	ret
+.wfc_err:
+	stc
 	ret
 
 ; ============================================================================
@@ -4458,7 +4726,8 @@ resolve_path:
 .rp_absolute:
 	; Absolute path — start from root
 	mov	word [resolved_dir_cluster], 0
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	inc	si			; Skip leading '\'
 	jmp	.rp_parse_component
 .rp_relative:
@@ -4557,10 +4826,12 @@ resolve_path:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.rp_is_sub
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.rp_restored
 .rp_is_sub:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 .rp_restored:
 	pop	si			; Restore rest of path
 	jmp	.rp_parse_component
@@ -4584,38 +4855,26 @@ resolve_path:
 ; read_resolved_dir — Read directory at resolved_dir_cluster into dir_buffer
 ; ============================================================================
 read_resolved_dir:
+	call	ensure_geo
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
 	cmp	word [resolved_dir_cluster], 0
 	jne	.rrd_subdir
-	; Read root directory one sector at a time (avoid head boundary crossing)
+	; Read root directory one sector at a time
 	push	cx
 	push	dx
-	mov	cx, ROOT_DIR_SECS
-	mov	ax, ROOT_DIR_SEC	; LBA of first root dir sector
+	mov	cx, [geo_root_secs]
+	mov	ax, [geo_root_sec]
 .rrd_root_loop:
 	push	cx
 	push	ax
-	; Convert LBA to CHS
-	xor	dx, dx
 	push	bx
-	mov	bx, 9			; Sectors per track
-	div	bx			; AX = track*heads + head, DX = sector
-	pop	bx
-	mov	cl, dl
-	inc	cl			; CHS sector (1-based)
-	xor	dx, dx
-	push	bx
-	mov	bx, 2			; Heads
-	div	bx
-	pop	bx
-	mov	ch, al			; Cylinder
-	mov	dh, dl			; Head
+	call	lba_to_chs
 	mov	dl, [resolved_drive]
-	mov	ah, 0x02
-	mov	al, 1			; 1 sector
+	mov	ax, 0x0201
 	int	0x13
+	pop	bx
 	pop	ax
 	pop	cx
 	jc	.rrd_root_err
@@ -4639,7 +4898,7 @@ read_resolved_dir:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	ret
@@ -4656,29 +4915,17 @@ write_resolved_dir:
 	; Write root directory one sector at a time
 	push	cx
 	push	dx
-	mov	cx, ROOT_DIR_SECS
-	mov	ax, ROOT_DIR_SEC
+	mov	cx, [geo_root_secs]
+	mov	ax, [geo_root_sec]
 .wrd_root_loop:
 	push	cx
 	push	ax
-	xor	dx, dx
 	push	bx
-	mov	bx, 9
-	div	bx
-	pop	bx
-	mov	cl, dl
-	inc	cl
-	xor	dx, dx
-	push	bx
-	mov	bx, 2
-	div	bx
-	pop	bx
-	mov	ch, al
-	mov	dh, dl
+	call	lba_to_chs
 	mov	dl, [resolved_drive]
-	mov	ah, 0x03
-	mov	al, 1
+	mov	ax, 0x0301
 	int	0x13
+	pop	bx
 	pop	ax
 	pop	cx
 	jc	.wrd_root_err
@@ -4702,7 +4949,7 @@ write_resolved_dir:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	ret
@@ -4772,13 +5019,13 @@ run_batch:
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	ax
 	jc	.rb_not_found
 
-	add	bx, SECS_PER_CLUST * 512
+	add	bx, [geo_bpc]
 	call	fat12_next_cluster
 	cmp	ax, 0xFF8
 	jb	.rb_load_cluster
@@ -5739,29 +5986,15 @@ do_exec:
 	push	ax
 	; Read cluster one sector at a time to avoid track boundary issues
 	sub	ax, 2
-	mov	cx, SECS_PER_CLUST
-	push	cx
-	mul	cx
-	add	ax, DATA_START_SEC	; AX = first linear sector
+	mul	word [cs:geo_spc]
+	add	ax, [cs:geo_data_start]	; AX = first linear sector
 	mov	[cs:exec_cur_sec], ax
-	pop	cx			; CX = sectors to read
+	mov	cx, [cs:geo_spc]	; CX = sectors to read
 .load_sector:
 	push	cx
 	; Convert linear sector to CHS
 	mov	ax, [cs:exec_cur_sec]
-	xor	dx, dx
-	push	bx
-	mov	bx, 18			; SPT * heads
-	div	bx
-	mov	ch, al			; Cylinder
-	mov	ax, dx
-	xor	dx, dx
-	mov	bx, 9			; SPT
-	div	bx
-	mov	dh, al			; Head
-	mov	cl, dl
-	inc	cl			; Sector (1-based)
-	pop	bx
+	call	lba_to_chs
 	; Read 1 sector
 	push	es
 	mov	ah, 0x02
@@ -7149,7 +7382,7 @@ int21_handler:
 	mov	es, ax
 	mov	bx, io_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	si
@@ -7163,7 +7396,7 @@ int21_handler:
 .i21_3f_copy:
 	cmp	cx, 0
 	je	.i21_3f_advance_done
-	cmp	bx, SECS_PER_CLUST * 512
+	cmp	bx, [geo_bpc]
 	jae	.i21_3f_next_cluster
 
 	; Copy one byte
@@ -7364,7 +7597,7 @@ int21_handler:
 	mov	es, ax
 	mov	bx, io_buffer
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	cx			; Restore byte count
@@ -7377,7 +7610,7 @@ int21_handler:
 .i21_40_copy:
 	cmp	cx, 0
 	je	.i21_40_flush
-	cmp	bx, SECS_PER_CLUST * 512
+	cmp	bx, [geo_bpc]
 	jae	.i21_40_flush_next
 
 	; Copy one byte from caller to cluster buffer
@@ -7408,7 +7641,7 @@ int21_handler:
 	mov	es, ax
 	mov	bx, io_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	cx
@@ -7474,7 +7707,7 @@ int21_handler:
 	mov	es, ax
 	mov	bx, io_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	pop	cx
@@ -7622,7 +7855,7 @@ int21_handler:
 	; 32-bit divide: DX:AX / 1024
 	mov	dx, [cs:file_handles + si + 10]	; Position high
 	mov	ax, [cs:file_handles + si + 8]	; Position low
-	mov	bx, SECS_PER_CLUST * 512
+	mov	bx, [geo_bpc]
 	div	bx			; AX = clusters to skip, DX = position in cluster
 	mov	[cs:file_handles + si + 6], dx	; Position within cluster
 
@@ -7971,7 +8204,8 @@ int21_handler:
 	; Count free clusters (cluster 2 through max)
 	xor	bx, bx			; Free count
 	mov	ax, 2			; Start at cluster 2
-	mov	di, (TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST + 2 ; Max cluster
+	mov	di, [cs:geo_max_clust]
+	inc	di			; Loop needs max+1
 .i21_36_count:
 	cmp	ax, di
 	jae	.i21_36_counted
@@ -7990,9 +8224,9 @@ int21_handler:
 	pop	ds
 	pop	di
 	pop	si
-	mov	ax, SECS_PER_CLUST
+	mov	ax, [cs:geo_spc]
 	mov	cx, 512
-	mov	dx, (TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST
+	mov	dx, [cs:geo_total_clust]
 	iret
 .i21_36_err:
 	pop	ds
@@ -8560,7 +8794,7 @@ int21_handler:
 	call	get_fat_timestamp
 	; Init new dir with . and ..
 	mov	di, dir_buffer
-	mov	cx, SECS_PER_CLUST * 512
+	mov	cx, [geo_bpc]
 	xor	al, al
 	rep	stosb
 	mov	di, dir_buffer
@@ -8601,7 +8835,7 @@ int21_handler:
 	mov	es, ax
 	mov	bx, dir_buffer
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	dl, [resolved_drive]
 	int	0x13
 	jc	.i21_39_err
@@ -8740,11 +8974,12 @@ int21_handler:
 	push	word [resolved_dir_entries]
 	mov	ax, [copy_dest_cl]
 	mov	[resolved_dir_cluster], ax
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 	call	read_resolved_dir
 	jc	.i21_3a_err_pop
 	mov	si, dir_buffer
-	mov	cx, SECS_PER_CLUST * 512 / 32
+	mov	cx, [geo_epc]
 .i21_3a_check:
 	mov	al, [si]
 	cmp	al, 0
@@ -8888,10 +9123,12 @@ int21_handler:
 	mov	[resolved_dir_cluster], ax
 	cmp	ax, 0
 	jne	.i21_3b_sub
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	jmp	.i21_3b_set
 .i21_3b_sub:
-	mov	word [resolved_dir_entries], SECS_PER_CLUST * 512 / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 .i21_3b_set:
 	mov	ax, [resolved_dir_cluster]
 	mov	[cur_dir_cluster], ax
@@ -10065,7 +10302,7 @@ int21_handler:
 	; Walk cluster chain to find the cluster containing our offset
 	mov	ax, [.i21_14_offset]
 	mov	dx, [.i21_14_offset+2]
-	; Bytes per cluster = SECS_PER_CLUST * 512 = 1024
+	; Bytes per cluster = geo_bpc
 	; Divide DX:AX by 1024 to get cluster index
 	mov	cx, 10
 .i21_14_div_loop:
@@ -10100,7 +10337,7 @@ int21_handler:
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	int	0x13
 	jc	.i21_14_eof_restore
 
@@ -10398,7 +10635,7 @@ int21_handler:
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x02
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	int	0x13
 	jc	.i21_15_err
 
@@ -10427,7 +10664,7 @@ int21_handler:
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	ah, 0x03
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	int	0x13
 	jc	.i21_15_err
 
@@ -10834,11 +11071,11 @@ int21_handler:
 	push	cs
 	pop	ds
 	mov	bx, .i21_1b_media
-	mov	al, SECS_PER_CLUST
+	mov	al, [geo_spc]
 	mov	cx, 512
-	mov	dx, (TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST
+	mov	dx, [geo_total_clust]
 	iret
-.i21_1b_media:	db	MEDIA_BYTE
+.i21_1b_media:	db	0xFD		; Updated by ensure_geo
 
 ; --- AH=1C: Get allocation info for specific drive ---
 ; Input: DL = drive (0=default, 1=A, 2=B)
@@ -11304,12 +11541,12 @@ int21_handler:
 	dw	1			; +06: first FAT sector
 	db	2			; +08: number of FATs
 	dw	112			; +09: root dir entries
-	dw	DATA_START_SEC		; +0B: first data sector
-	dw	(TOTAL_SECS - DATA_START_SEC) / SECS_PER_CLUST + 1  ; +0D: max cluster + 1
+	dw	12			; +0B: first data sector
+	dw	355			; +0D: max cluster + 1
 	db	2			; +0F: sectors per FAT
-	dw	ROOT_DIR_SEC		; +10: first root dir sector
+	dw	5			; +10: first root dir sector
 	dd	0			; +12: device driver header (N/A)
-	db	MEDIA_BYTE		; +16: media descriptor
+	db	0xFD			; +16: media descriptor
 	db	0			; +17: access flag (0=disk accessed)
 	dd	0			; +18: next DPB pointer (0=last)
 	dw	0			; +1C: last cluster allocated
@@ -11846,28 +12083,14 @@ int21_handler:
 .i21_4b_load:
 	push	ax
 	sub	ax, 2
-	mov	cx, SECS_PER_CLUST
-	push	cx
-	mul	cx
-	add	ax, DATA_START_SEC
+	mul	word [cs:geo_spc]
+	add	ax, [cs:geo_data_start]
 	mov	[cs:exec_cur_sec], ax
-	pop	cx
+	mov	cx, [cs:geo_spc]
 .i21_4b_load_sec:
 	push	cx
 	mov	ax, [cs:exec_cur_sec]
-	xor	dx, dx
-	push	bx
-	mov	bx, 18
-	div	bx
-	mov	ch, al
-	mov	ax, dx
-	xor	dx, dx
-	mov	bx, 9
-	div	bx
-	mov	dh, al
-	mov	cl, dl
-	inc	cl
-	pop	bx
+	call	lba_to_chs
 	push	es
 	mov	ah, 0x02
 	mov	al, 1
@@ -13097,7 +13320,8 @@ search_path:
 	cmp	byte [si], '\'
 	jne	.sp_rel_dir
 	mov	word [resolved_dir_cluster], 0
-	mov	word [resolved_dir_entries], MAX_DIR_ENTRIES
+	mov	ax, [geo_rootents]
+	mov	[resolved_dir_entries], ax
 	inc	si
 	jmp	.sp_walk_path
 .sp_rel_dir:
@@ -13198,7 +13422,8 @@ search_path:
 	; Descend
 	mov	ax, [si+26]
 	mov	[resolved_dir_cluster], ax
-	mov	word [resolved_dir_entries], (SECS_PER_CLUST * 512) / 32
+	mov	ax, [geo_epc]
+	mov	[resolved_dir_entries], ax
 	mov	si, [sp_path_si]
 	jmp	.sp_walk_path
 
@@ -13807,6 +14032,55 @@ file_count:	dw	0
 dir_wide:	db	0
 dir_col:	db	0			; Column counter for wide mode
 dir_hdr_path:	times 65 db 0			; Path string for DIR header display
+
+; ============================================================================
+; Per-drive disk geometry (read from BPB at first access)
+; ============================================================================
+; Drive A geometry (defaults = 360K)
+geo_a_loaded:	db	0
+geo_a_spt:	dw	9
+geo_a_heads:	dw	2
+geo_a_spc:	dw	2		; Stored as word for easy mul/div
+geo_a_root_sec:	dw	5
+geo_a_root_secs: dw	7
+geo_a_data_start: dw	12
+geo_a_total:	dw	720
+geo_a_fat_sec:	dw	1
+geo_a_spf:	dw	2
+geo_a_rootents:	dw	112
+geo_a_bpc:	dw	1024		; Bytes per cluster
+geo_a_media:	db	0xFD
+; Drive B geometry (defaults = 360K)
+geo_b_loaded:	db	0
+geo_b_spt:	dw	9
+geo_b_heads:	dw	2
+geo_b_spc:	dw	2
+geo_b_root_sec:	dw	5
+geo_b_root_secs: dw	7
+geo_b_data_start: dw	12
+geo_b_total:	dw	720
+geo_b_fat_sec:	dw	1
+geo_b_spf:	dw	2
+geo_b_rootents:	dw	112
+geo_b_bpc:	dw	1024
+geo_b_media:	db	0xFD
+; Active geometry (copied from drive A or B based on resolved_drive)
+geo_spt:	dw	9
+geo_heads:	dw	2
+geo_spc:	dw	2
+geo_root_sec:	dw	5
+geo_root_secs:	dw	7
+geo_data_start:	dw	12
+geo_total:	dw	720
+geo_fat_sec:	dw	1
+geo_spf:	dw	2
+geo_rootents:	dw	112
+geo_bpc:	dw	1024
+geo_media:	db	0xFD
+geo_epc:	dw	32		; Entries per cluster (bpc / 32)
+geo_total_clust: dw	354		; Total data clusters
+geo_max_clust:	dw	355		; Max cluster number (total_clust + 1)
+geo_active_drv:	db	0xFF		; Which drive is active (0xFF = none)
 
 ; ============================================================================
 ; Buffers (must be after all code/data)
