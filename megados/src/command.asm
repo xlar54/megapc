@@ -1075,6 +1075,10 @@ cmd_dispatch:
 	call	str_compare_cmd
 	je	do_echo
 
+	mov	di, cmd_pause
+	call	str_compare_cmd
+	je	do_pause
+
 	mov	di, cmd_cls
 	call	str_compare_cmd
 	je	do_cls
@@ -2007,6 +2011,17 @@ do_echo:
 	call	skip_spaces
 	call	print_string
 	; Print newline
+	call	shell_crlf
+	jmp	cmd_loop
+
+; ============================================================================
+; PAUSE — wait for a keypress
+; ============================================================================
+do_pause:
+	mov	si, msg_pause
+	call	print_string
+	mov	ah, 0x00
+	int	0x16
 	call	shell_crlf
 	jmp	cmd_loop
 

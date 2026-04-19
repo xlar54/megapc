@@ -452,46 +452,95 @@ img[data_offset:data_offset + len(shell_data)] = shell_data
 next_dir_entry = 1
 next_cluster = 2 + shell_clusters
 
-extra_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
-               'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
-               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'EDLIN.COM', 'BEEP.COM',
-               'MORE.COM', 'ARGS.COM', 'DOSKEY.COM', 'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM', 'ATTRIB.COM', 'FIND.COM', 'TESTDRV.SYS',
-               'CONFIG.SYS', 'HELLO.EXE',
-               'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
+# --- Files in root directory ---
+root_files = ['EDLIN.COM', 'BEEP.COM', 'MORE.COM', 'DOSKEY.COM',
+              'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
+              'ATTRIB.COM', 'FIND.COM',
+              'TESTDRV.SYS', 'CONFIG.SYS',
+              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
-for fname in extra_files:
+# --- Files in TEST subdirectory ---
+test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
+              'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
+              'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'ARGS.COM',
+              'HELLO.EXE']
+
+def add_file_to_image(fname, dir_offset, dir_entry_idx):
+    """Add a file to the image. Returns (new_dir_entry_idx, True) or (dir_entry_idx, False)."""
+    global next_cluster
     fpath = os.path.join(TARGET_DIR, fname)
     if not os.path.exists(fpath):
-        continue
+        return dir_entry_idx, False
     fdata = open(fpath, 'rb').read()
     if len(fdata) == 0:
-        continue
+        return dir_entry_idx, False
     f_clusters = ((len(fdata) + BYTES_PER_SEC - 1) // BYTES_PER_SEC
                   + SECS_PER_CLUST - 1) // SECS_PER_CLUST
-
-    # Check disk space
     end_sector = DATA_START_SEC + (next_cluster - 2 + f_clusters) * SECS_PER_CLUST
     if end_sector > TOTAL_SECS:
         print(f"  WARNING: {fname} won't fit, skipping")
-        continue
-
+        return dir_entry_idx, False
     # Directory entry
     e = make_dir_entry(fname, next_cluster, len(fdata))
-    eoff = root_offset + next_dir_entry * 32
+    eoff = dir_offset + dir_entry_idx * 32
     img[eoff:eoff + 32] = e
-
     # FAT chain
     for c in range(f_clusters):
         cl = next_cluster + c
         fat12_set(cl, cl + 1 if c < f_clusters - 1 else 0xFFF)
-
     # File data
     foff = (DATA_START_SEC + (next_cluster - 2) * SECS_PER_CLUST) * BYTES_PER_SEC
     img[foff:foff + len(fdata)] = fdata
-
     print(f"  {fname}: {len(fdata)} bytes, cluster {next_cluster} ({f_clusters} clusters)")
-    next_dir_entry += 1
     next_cluster += f_clusters
+    return dir_entry_idx + 1, True
+
+# Add root-level files
+for fname in root_files:
+    next_dir_entry, _ = add_file_to_image(fname, root_offset, next_dir_entry)
+
+# --- Create TEST subdirectory ---
+test_dir_cluster = next_cluster
+fat12_set(test_dir_cluster, 0xFFF)  # Single cluster for TEST dir
+next_cluster += 1
+
+# Add TEST dir entry to root directory
+test_dir_entry = bytearray(32)
+test_dir_entry[0:8] = b'TEST    '
+test_dir_entry[8:11] = b'   '
+test_dir_entry[11] = 0x10  # Directory attribute
+ftime, fdate = fat_timestamp()
+struct.pack_into('<H', test_dir_entry, 22, ftime)
+struct.pack_into('<H', test_dir_entry, 24, fdate)
+struct.pack_into('<H', test_dir_entry, 26, test_dir_cluster)
+eoff = root_offset + next_dir_entry * 32
+img[eoff:eoff + 32] = test_dir_entry
+next_dir_entry += 1
+print(f"  TEST\\ (directory, cluster {test_dir_cluster})")
+
+# Initialize TEST directory cluster with . and .. entries
+test_dir_offset = (DATA_START_SEC + (test_dir_cluster - 2) * SECS_PER_CLUST) * BYTES_PER_SEC
+# "." entry points to self
+dot_entry = bytearray(32)
+dot_entry[0:11] = b'.          '
+dot_entry[11] = 0x10
+struct.pack_into('<H', dot_entry, 22, ftime)
+struct.pack_into('<H', dot_entry, 24, fdate)
+struct.pack_into('<H', dot_entry, 26, test_dir_cluster)
+img[test_dir_offset:test_dir_offset + 32] = dot_entry
+# ".." entry points to root (cluster 0)
+dotdot_entry = bytearray(32)
+dotdot_entry[0:11] = b'..         '
+dotdot_entry[11] = 0x10
+struct.pack_into('<H', dotdot_entry, 22, ftime)
+struct.pack_into('<H', dotdot_entry, 24, fdate)
+struct.pack_into('<H', dotdot_entry, 26, 0)  # Root = cluster 0
+img[test_dir_offset + 32:test_dir_offset + 64] = dotdot_entry
+
+# Add test files to TEST subdirectory
+test_dir_entry_idx = 2  # Skip . and ..
+for fname in test_files:
+    test_dir_entry_idx, _ = add_file_to_image(fname, test_dir_offset, test_dir_entry_idx)
 
 # Re-write FAT with all chains
 img[fat_off1:fat_off1 + len(fat)] = fat
