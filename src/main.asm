@@ -297,6 +297,7 @@ _beep_wait:
         lda #0
         sta $8F17
         sta $8F1B               ; Clear interrupt inhibit flag
+        sta $8F1E               ; Clear Ctrl-C pending flag
 
         ; Clear screen and vidbuf before emulation
         lda #147

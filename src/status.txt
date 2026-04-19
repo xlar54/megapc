@@ -486,6 +486,18 @@ KNOWN BUGS
   key events may arrive after the drain loop completes. Affects any
   running program, not just the shell.
 
+- Ctrl-C during nested EXEC: if program A launches program B via
+  AH=4Bh, Ctrl-C in B jumps straight to cmd_loop, skipping A's
+  cleanup and return. Should return to A instead.
+
+- Ctrl-C during file I/O: when BREAK=ON, MS-DOS checks for Ctrl-C
+  on all INT 21h calls including AH=3Fh/40h (file read/write).
+  We only check during console I/O (AH=01h/02h/0Ah).
+
+- BREAK=ON adds con_check_input overhead to every AH=02h output
+  call. May slow console output noticeably. Could throttle to
+  check every Nth character if performance is an issue.
+
 TODO
 =====
 

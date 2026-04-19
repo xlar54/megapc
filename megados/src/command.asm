@@ -513,7 +513,7 @@ con_read_al:
 ; ============================================================================
 con_check_input:
 	; Check if key available via active CON driver
-	; Returns: ZF=1 no char, ZF=0 char ready
+	; Returns: ZF=1 no char, ZF=0 char ready (AL = peeked char)
 	push	bx
 	push	cx
 	push	es
@@ -525,13 +525,22 @@ con_check_input:
 	call	drv_call
 	; Check busy flag (bit 9 of status word)
 	test	word [cs:drv_request+3], 0x0200
+	jnz	.cci_busy
+	; Char available — get it from request packet byte 13
+	mov	al, [cs:drv_request+13]
 	pop	es
 	pop	cx
 	pop	bx
-	jnz	.cci_busy
-	; Char available (ZF=0 from the test failing)
+	or	al, al		; Set flags (ZF=0 unless char is 0x00)
+	jnz	.cci_ret
+	; Special case: AL=0 (extended key) — still report as available
+	inc	al		; AL=1, ZF=0
+.cci_ret:
 	ret
 .cci_busy:
+	pop	es
+	pop	cx
+	pop	bx
 	; No char — set ZF
 	xor	al, al		; ZF=1
 	ret
@@ -1078,6 +1087,10 @@ cmd_dispatch:
 	mov	di, cmd_pause
 	call	str_compare_cmd
 	je	do_pause
+
+	mov	di, cmd_break
+	call	str_compare_cmd
+	je	do_break
 
 	mov	di, cmd_cls
 	call	str_compare_cmd
@@ -2011,6 +2024,49 @@ do_echo:
 	call	skip_spaces
 	call	print_string
 	; Print newline
+	call	shell_crlf
+	jmp	cmd_loop
+
+; ============================================================================
+; BREAK — show or set Ctrl-C check flag
+; ============================================================================
+do_break:
+	call	skip_spaces
+	cmp	byte [si], 0
+	je	.break_show
+	; Check for ON/OFF
+	push	si
+	mov	di, str_on
+	call	str_compare_cmd
+	je	.break_on
+	pop	si
+	push	si
+	mov	di, str_off
+	call	str_compare_cmd
+	je	.break_off
+	pop	si
+	mov	si, msg_break_usage
+	call	print_string
+	jmp	cmd_loop
+.break_on:
+	pop	si
+	mov	byte [break_flag], 1
+	jmp	cmd_loop
+.break_off:
+	pop	si
+	mov	byte [break_flag], 0
+	jmp	cmd_loop
+.break_show:
+	mov	si, msg_break_is
+	call	print_string
+	cmp	byte [break_flag], 0
+	je	.break_show_off
+	mov	si, msg_on
+	jmp	.break_print
+.break_show_off:
+	mov	si, msg_off
+.break_print:
+	call	print_string
 	call	shell_crlf
 	jmp	cmd_loop
 
@@ -5466,6 +5522,7 @@ print_rpad_dec:
 
 cmd_rem		db	'REM', 0
 cmd_pause	db	'PAUSE', 0
+cmd_break	db	'BREAK', 0
 str_off		db	'OFF', 0
 str_on		db	'ON', 0
 
@@ -6621,6 +6678,8 @@ int21_handler:
 	push	ax
 	call	con_write_al	; Echo through CON driver
 	pop	ax
+	cmp	al, 0x03	; Ctrl-C?
+	je	.i21_ctrlc
 	iret
 
 ; --- AH=02: Display character (DL) ---
@@ -6667,6 +6726,21 @@ int21_handler:
 	pop	si
 	mov	al, dl
 	call	con_write_al
+	; Check for pending Ctrl-C (only when BREAK=ON)
+	cmp	byte [cs:break_flag], 0
+	je	.i21_02_no_ctrlc	; BREAK=OFF, skip check
+	call	con_check_input
+	jz	.i21_02_no_ctrlc	; No key available
+	cmp	al, 0x03		; Ctrl-C?
+	jne	.i21_02_no_ctrlc
+	; Consume the Ctrl-C
+	call	con_read_al
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	jmp	.i21_ctrlc
+.i21_02_no_ctrlc:
 	pop	dx
 	pop	cx
 	pop	bx
@@ -6708,7 +6782,7 @@ int21_handler:
 	call	con_read_al
 	iret
 
-; --- AH=08: Read char without echo (checks Ctrl-C) ---
+; --- AH=08: Read char without echo (no Ctrl-C check) ---
 .i21_08:
 	call	con_read_al
 	iret
@@ -6748,6 +6822,8 @@ int21_handler:
 	xor	bx, bx		; Character count
 .i21_0a_loop:
 	call	con_read_al	; Read key from CON driver
+	cmp	al, 0x03	; Ctrl-C?
+	je	.i21_0a_ctrlc
 	cmp	al, 0x0D	; Enter?
 	je	.i21_0a_done
 	cmp	al, 0x08	; Backspace?
@@ -6783,6 +6859,44 @@ int21_handler:
 	pop	cx
 	pop	bx
 	pop	ax
+	iret
+
+.i21_0a_ctrlc:
+	; Echo ^C, set length=0, return like Enter
+	; Then trigger INT 23h (caller can handle or abort)
+	mov	al, '^'
+	call	con_write_al
+	mov	al, 'C'
+	call	con_write_al
+	mov	al, 0x0D
+	call	con_write_al
+	mov	al, 0x0A
+	call	con_write_al
+	; Set length to 0 and CR at start
+	mov	di, dx
+	mov	byte [di+1], 0		; Actual length = 0
+	mov	byte [di+2], 0x0D	; CR at start
+	pop	di
+	pop	cx
+	pop	bx
+	pop	ax
+	; Call INT 23h — if handler returns, we continue
+	int	0x23
+	iret
+
+; --- Ctrl-C handler for AH=01/08 ---
+.i21_ctrlc:
+	push	ax
+	mov	al, '^'
+	call	con_write_al
+	mov	al, 'C'
+	call	con_write_al
+	mov	al, 0x0D
+	call	con_write_al
+	mov	al, 0x0A
+	call	con_write_al
+	pop	ax
+	int	0x23
 	iret
 
 ; --- AH=0B: Check input status ---
@@ -12805,7 +12919,7 @@ cur_fat_date:	dw	0
 ; ============================================================================
 ; Default handler: return to shell command loop
 int23_handler:
-	; Restore shell state and return to command loop
+	; Ctrl-C handler — clean up running program and return to shell
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	mov	es, ax
@@ -12813,6 +12927,95 @@ int23_handler:
 	mov	ss, ax
 	mov	sp, 0xFFFE
 	sti
+
+	mov	dx, [exec_seg]
+	cmp	dx, [shell_psp_seg]
+	je	.int23_no_free		; Shell itself — nothing to free
+
+	; Close file handles opened by the program (handles 5+)
+	push	es
+	mov	es, [exec_seg]
+	mov	bx, 5
+.int23_close:
+	cmp	bx, MAX_HANDLES
+	jae	.int23_closed
+	cmp	byte [es:0x18 + bx], 0xFF
+	je	.int23_close_next
+	push	bx
+	mov	ah, 0x3E
+	int	0x21
+	pop	bx
+.int23_close_next:
+	inc	bx
+	jmp	.int23_close
+.int23_closed:
+	pop	es
+
+	; Restore IVT vectors (undoes TSR hooks from the killed program)
+	call	int20_handler_restore_vectors
+
+	; Free program memory
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	dx, [exec_seg]
+	mov	ax, [mcb_first]
+.int23_free_loop:
+	mov	es, ax
+	cmp	byte [es:0x00], 'M'
+	je	.int23_check
+	cmp	byte [es:0x00], 'Z'
+	je	.int23_check
+	jmp	.int23_done_free
+.int23_check:
+	cmp	[es:0x01], dx
+	jne	.int23_next
+	mov	word [es:0x01], 0	; Free it
+.int23_next:
+	cmp	byte [es:0x00], 'Z'
+	je	.int23_done_merge
+	mov	bx, [es:0x03]
+	add	ax, bx
+	inc	ax
+	jmp	.int23_free_loop
+.int23_done_merge:
+	call	do_mcb_merge_free
+.int23_done_free:
+	; Restore exec_seg to shell's PSP
+	mov	ax, [shell_psp_seg]
+	mov	[exec_seg], ax
+	; Restore DTA to shell default
+	mov	word [dta_seg], SHELL_SEG
+	mov	word [dta_off], 0x0080
+.int23_no_free:
+	; Restore segments
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	es, ax
+	; If in batch mode, ask to terminate
+	cmp	byte [batch_active], 0
+	je	.int23_to_prompt
+	mov	si, msg_batch_abort
+	call	print_string
+.int23_batch_wait:
+	mov	ah, 0x00
+	int	0x16
+	cmp	al, 'Y'
+	je	.int23_batch_yes
+	cmp	al, 'y'
+	je	.int23_batch_yes
+	cmp	al, 'N'
+	je	.int23_batch_no
+	cmp	al, 'n'
+	je	.int23_batch_no
+	jmp	.int23_batch_wait
+.int23_batch_yes:
+	call	shell_crlf
+	mov	byte [batch_active], 0
+	jmp	cmd_loop
+.int23_batch_no:
+	call	shell_crlf
+	jmp	cmd_loop		; Continue with next batch line
+.int23_to_prompt:
 	jmp	cmd_loop
 
 ; ============================================================================
@@ -12822,6 +13025,10 @@ int23_handler:
 int24_handler:
 	mov	al, 3		; Fail
 	iret
+
+; Global wrapper for mcb_merge_free (callable from outside int21_handler)
+do_mcb_merge_free:
+	jmp	int21_handler.mcb_merge_free
 
 ; ============================================================================
 ; handle_to_sft — Convert handle number to SFT table offset
@@ -13126,6 +13333,11 @@ msg_mkdir_ok	db	'Directory created', 0x0D, 0x0A, 0
 msg_rmdir_ok	db	'Directory removed', 0x0D, 0x0A, 0
 msg_rmdir_not_empty db	'Directory not empty', 0x0D, 0x0A, 0
 msg_pause	db	'Press any key to continue...', 0
+msg_batch_abort	db	'Terminate batch job (Y/N)? ', 0
+msg_break_is	db	'BREAK is ', 0
+msg_break_usage	db	'Must specify ON or OFF', 0x0D, 0x0A, 0
+msg_on		db	'ON', 0
+msg_off		db	'OFF', 0
 
 autoexec_name	db	'AUTOEXEC.BAT', 0
 msg_ver		db	0x0D, 0x0A, 'MegaDOS Version 1.0', 0x0D, 0x0A, 0

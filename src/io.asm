@@ -852,6 +852,19 @@ _i16_got_key:
         sta $D610               ; Dequeue the TAB
         jmp menu_tab_handler    ; Go to menu
 +       sta $D610               ; Dequeue the event (write any value)
+        ; Check for Ctrl-C (ASCII $03)
+        cmp #$03
+        bne _i16_not_ctrlc
+        ; Set Ctrl-C flag for DOS to check
+        lda #1
+        sta $8F1E
+        ; Return Ctrl-C as the key (AL=0x03, AH=0x2E scancode)
+        lda #$03
+        sta reg_al
+        lda #$2E
+        sta reg_ah
+        rts
+_i16_not_ctrlc:
         ; Map MEGA65 key codes to IBM PC codes
         cmp #$14                ; MEGA65 DELETE/backspace (PETSCII DEL)
         beq _i16_bs
@@ -919,6 +932,17 @@ _i16_check_key:
         beq _i16_no_key         ; $00 = no key
         cmp #$09                ; TAB key? (reserved for menu)
         beq _i16_no_key         ; Hide TAB from guest
+        ; Check Ctrl-C on peek too
+        cmp #$03
+        bne _i16ck_not_ctrlc
+        lda #$03
+        sta reg_al
+        lda #$2E
+        sta reg_ah
+        lda #0
+        sta flag_zf             ; ZF=0 = key available
+        rts
+_i16ck_not_ctrlc:
         ; Map MEGA65 key codes for peek
         cmp #$14
         beq _i16ck_bs
