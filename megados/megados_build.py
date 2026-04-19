@@ -466,7 +466,7 @@ root_files = ['EDLIN.COM', 'BEEP.COM', 'MORE.COM', 'DOSKEY.COM',
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
               'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'ARGS.COM',
-              'HELLO.EXE']
+              'HELLO.EXE', 'README.TXT']
 
 def add_file_to_image(fname, dir_offset, dir_entry_idx):
     """Add a file to the image. Returns (new_dir_entry_idx, True) or (dir_entry_idx, False)."""

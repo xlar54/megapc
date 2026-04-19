@@ -2187,21 +2187,12 @@ do_type:
 	mov	ax, [exec_cluster]
 
 .type_read_cluster:
-	; Convert cluster to sector
+	; Read cluster into dir_buffer
 	push	ax
-	sub	ax, 2
-	mul	word [geo_spc]
-	add	ax, [geo_data_start]
-	call	lba_to_chs
-
-	; Read cluster into dir_buffer (reuse as temp)
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, dir_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	read_cluster_data
 	jc	.type_disk_err_pop
 
 	; Print bytes from buffer, up to file size remaining
@@ -2857,28 +2848,24 @@ do_copy:
 	mov	[copy_prev_cl], ax
 
 	; Read source cluster into dir_buffer
+	mov	al, [copy_src_drv]
+	mov	[resolved_drive], al
 	mov	ax, [copy_src_cl]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, dir_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	mov	dl, [copy_src_drv]
-	int	0x13
+	call	read_cluster_data
 	pop	ax			; Discard saved source cluster from find_free
 	jc	.copy_disk_err
 
 	; Write data to dest cluster
+	mov	al, [copy_dst_drv]
+	mov	[resolved_drive], al
 	mov	ax, [copy_dest_cl]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, dir_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	mov	dl, [copy_dst_drv]
-	int	0x13
+	call	write_cluster_data
 	jc	.copy_disk_err
 
 	; Get next source cluster
@@ -2964,6 +2951,94 @@ cluster_to_chs:
 	mul	word [geo_spc]
 	add	ax, [geo_data_start]
 	call	lba_to_chs
+	ret
+
+; ============================================================================
+; read_cluster_data — Read one cluster to ES:BX, sector by sector
+; ============================================================================
+; Input:  AX = cluster number
+;         ES:BX = buffer
+;         [resolved_drive] = drive
+; Output: CF on error, ES:BX preserved
+;
+read_cluster_data:
+	push	ax
+	push	bx
+	push	cx
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	mov	cx, [geo_spc]
+.rcd_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
+	mov	dl, [resolved_drive]
+	mov	ax, 0x0201
+	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.rcd_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.rcd_loop
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.rcd_err:
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
+	ret
+
+; ============================================================================
+; write_cluster_data — Write one cluster from ES:BX, sector by sector
+; ============================================================================
+; Input:  AX = cluster number
+;         ES:BX = buffer
+;         [resolved_drive] = drive
+; Output: CF on error, ES:BX preserved
+;
+write_cluster_data:
+	push	ax
+	push	bx
+	push	cx
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	mov	cx, [geo_spc]
+.wcd_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
+	mov	dl, [resolved_drive]
+	mov	ax, 0x0301
+	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.wcd_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wcd_loop
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.wcd_err:
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
 	ret
 
 ; ============================================================================
@@ -3450,14 +3525,10 @@ do_mkdir:
 
 	; Write the new directory data to disk
 	mov	ax, [copy_dest_cl]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, dir_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	write_cluster_data
 	jc	.mkdir_disk_err
 
 	; Now re-read the resolved directory to add the entry
@@ -5210,13 +5281,11 @@ run_batch:
 
 .rb_load_cluster:
 	push	ax
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	push	bx			; Save buffer pointer
+	mov	cx, SHELL_SEG
+	mov	es, cx
+	pop	bx			; Restore buffer pointer into BX for read
+	call	read_cluster_data
 	pop	ax
 	jc	.rb_not_found
 
@@ -7629,16 +7698,12 @@ int21_handler:
 	mov	al, [cs:file_handles + si + 1]	; Drive
 	mov	[resolved_drive], al
 	mov	ax, [cs:file_handles + si + 4]
-	push	cx			; Save byte count — cluster_to_chs/INT 13h clobber CX
-	push	si			; Save handle offset — INT 13h may clobber SI
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	push	cx
+	push	si
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, io_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	read_cluster_data
 	pop	si
 	pop	cx
 	jc	.i21_3f_done
@@ -7845,16 +7910,12 @@ int21_handler:
 	mov	al, [cs:file_handles + si + 1]
 	mov	[resolved_drive], al
 	mov	ax, [cs:file_handles + si + 4]
-	push	cx			; Save byte count BEFORE cluster_to_chs trashes CX
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	push	cx
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, io_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
-	pop	cx			; Restore byte count
+	call	read_cluster_data
+	pop	cx
 	jc	.i21_40_write_done
 
 	; Copy bytes from caller's buffer into io_buffer
@@ -7889,15 +7950,11 @@ int21_handler:
 
 	; Write cluster from io_buffer
 	mov	ax, [cs:file_handles + si + 4]
-	push	cx			; Save byte count
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	push	cx
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, io_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	write_cluster_data
 	pop	cx
 	jc	.i21_40_write_done
 
@@ -7955,15 +8012,11 @@ int21_handler:
 	mov	ax, [cs:file_handles + si + 4]
 	cmp	ax, 0xFF8
 	jae	.i21_40_write_done
-	push	cx			; Save byte count
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	push	cx
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, io_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	write_cluster_data
 	pop	cx
 
 .i21_40_write_done:
@@ -9168,14 +9221,10 @@ int21_handler:
 	mov	[di+26], ax
 	; Write new dir data
 	mov	ax, [copy_dest_cl]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, dir_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	mov	dl, [resolved_drive]
-	int	0x13
+	call	write_cluster_data
 	jc	.i21_39_err
 	; Re-read parent and add entry
 	call	read_resolved_dir
@@ -10772,14 +10821,10 @@ int21_handler:
 	pop	ax
 
 	; Read this cluster into batch_buffer (preserve dir_buffer)
-	call	cluster_to_chs
-	mov	dl, [cs:resolved_drive]
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, batch_buffer
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	int	0x13
+	call	read_cluster_data
 	jc	.i21_14_eof_restore
 
 	; Copy record_size bytes from batch_buffer+clust_off to DTA
@@ -11070,14 +11115,10 @@ int21_handler:
 	pop	ax
 
 	; Read existing cluster data into batch_buffer (preserve dir_buffer)
-	call	cluster_to_chs
-	mov	dl, [cs:resolved_drive]
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, batch_buffer
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	ah, 0x02
-	mov	al, [geo_spc]
-	int	0x13
+	call	read_cluster_data
 	jc	.i21_15_err
 
 	; Copy record_size bytes from DTA to batch_buffer+clust_off
@@ -11099,14 +11140,10 @@ int21_handler:
 
 	; Write cluster back to disk
 	mov	ax, [cs:.i21_15_cur_cl]
-	call	cluster_to_chs
-	mov	dl, [cs:resolved_drive]
+	mov	bx, SHELL_SEG
+	mov	es, bx
 	mov	bx, batch_buffer
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	ah, 0x03
-	mov	al, [geo_spc]
-	int	0x13
+	call	write_cluster_data
 	jc	.i21_15_err
 
 	; Advance record pointer in FCB
