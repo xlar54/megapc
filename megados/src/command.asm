@@ -1084,6 +1084,10 @@ cmd_dispatch:
 	call	str_compare_cmd
 	je	do_echo
 
+	mov	di, cmd_rem
+	call	str_compare_cmd
+	je	cmd_loop		; REM — silently ignore
+
 	mov	di, cmd_pause
 	call	str_compare_cmd
 	je	do_pause
