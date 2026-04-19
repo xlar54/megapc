@@ -1199,14 +1199,8 @@ fat_save_floppy:
         sta $D680
         jsr sd_wait_ready
 
-        lda fw_drive_num
-        cmp #1
-        beq _fsf_drive_b
-        lda #$10
-        sta fat_attic_bank
-        bra _fsf_copy_geom
-_fsf_drive_b:
-        lda #$20
+        ; Bank passed from caller via $8F26
+        lda $8F26
         sta fat_attic_bank
 _fsf_copy_geom:
         lda fw_cylinders

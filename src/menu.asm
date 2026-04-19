@@ -78,18 +78,10 @@ show_menu:
         lda #$80
         tsb VIC_HOTREGS
 
-        ; Clear screen
-        lda #147
-        jsr CHROUT
+        ; colors
         lda #$00
         sta $D020
         sta $D021
-        lda #5                  ; White text
-        jsr CHROUT
-
-        ; Switch to lowercase character set
-        lda #$0E
-        jsr CHROUT
 
         ; CINT + CHROUT $0E above restore the default PETSCII charset
 
@@ -266,6 +258,15 @@ _menu_optb_skip_name:
         jsr CHROUT
 _menu_optb_done:
 
+        ; [S] - Swap Drives
+        ldx #0
+-       lda menu_swap_txt,x
+        beq +
+        jsr CHROUT
+        inx
+        bne -
++
+
         ; --- Special Keys ---
         ldx #0
 -       lda menu_keys_hdr,x
@@ -304,6 +305,10 @@ _menu_wait_key:
         beq menu_do_toggle_fc
         cmp #$54                ; 'T' uppercase
         beq menu_do_toggle_fc
+        cmp #$73                ; 's' lowercase
+        beq menu_do_swap
+        cmp #$53                ; 'S' uppercase
+        beq menu_do_swap
         bra _menu_wait_key
 
 menu_do_start:
@@ -319,6 +324,42 @@ _menu_first_start:
         lda #1
         sta menu_emu_started
         jmp start_emulation
+
+menu_do_swap:
+        ; Swap drives A and B
+        ; Swap geometry bytes (6 bytes each: spt, heads, cyls, type, loaded, dirty)
+        ldx #0
+-       lda floppy_a_spt,x
+        pha
+        lda floppy_b_spt,x
+        sta floppy_a_spt,x
+        pla
+        sta floppy_b_spt,x
+        inx
+        cpx #6                  ; spt, heads, cyls, type, loaded, dirty
+        bne -
+
+        ; Swap bank assignments
+        lda floppy_a_bank
+        pha
+        lda floppy_b_bank
+        sta floppy_a_bank
+        pla
+        sta floppy_b_bank
+
+        ; Swap filenames (17 bytes each)
+        ldx #0
+-       lda drive_a_fname,x
+        pha
+        lda drive_b_fname,x
+        sta drive_a_fname,x
+        pla
+        sta drive_b_fname,x
+        inx
+        cpx #17
+        bne -
+
+        jmp show_menu           ; Redraw to show swapped state
 
 menu_do_toggle_fc:
         ; Toggle fast console flag
@@ -900,8 +941,7 @@ menu_restore_screen:
 ; Menu strings
 ; ============================================================================
 menu_header:
-        .text 13
-        .text $9a, "MegaPC - 8086 PC XT Emulator - 640KB", 13
+        .text $93, $05, $0e, $9a, "MegaPC - 8086 PC XT Emulator - 640KB", 13
         .text $9F, "By Scott Hutter - xlar54", 13, 0
 
 hex_tbl:
@@ -950,6 +990,9 @@ menu_mount_b_txt:
 
 menu_unmount_b_txt:
         .text $9f, "[B] - Unmount Drive B ", 0
+
+menu_swap_txt:
+        .text $9f, "[S] - Swap Drives A and B", 13, 0
 
 menu_keys_hdr:
         .text 13

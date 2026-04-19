@@ -460,6 +460,8 @@ call_fat_save_floppy:
         lda floppy_a_spt
         ldz #3
         sta [temp_ptr],z        ; fw_spt
+        lda floppy_a_bank
+        sta $8F26               ; Pass bank to fat_writer
         bra _cfsf_copy_fname
 _cfsf_drive_b:
         lda floppy_b_cyls
@@ -471,6 +473,8 @@ _cfsf_drive_b:
         lda floppy_b_spt
         ldz #3
         sta [temp_ptr],z
+        lda floppy_b_bank
+        sta $8F26               ; Pass bank to fat_writer
 
 _cfsf_copy_fname:
         ; Copy filename to fw_filename (offset 4 from param block start)

@@ -752,8 +752,8 @@ _i13w_do_write:
         jsr do_dma_to_attic
 
         ; Mark drive as dirty (image modified)
-        lda i13_cur_bank
-        cmp #$20
+        lda reg_dl
+        cmp #1
         beq _i13w_dirty_b
         lda #1
         sta floppy_a_dirty
@@ -829,7 +829,7 @@ _i13sd_a:
         sta i13_cur_cyls
         lda floppy_a_type
         sta i13_cur_type
-        lda #$10
+        lda floppy_a_bank
         sta i13_cur_bank
         sec
         rts
@@ -844,7 +844,7 @@ _i13sd_b:
         sta i13_cur_cyls
         lda floppy_b_type
         sta i13_cur_type
-        lda #$20
+        lda floppy_b_bank
         sta i13_cur_bank
         sec
         rts
@@ -1068,10 +1068,10 @@ _dfg_do_detect:
         sta dma_src_hi
         lda dfg_drive
         bne _dfg_bank_b
-        lda #$10                ; Drive A
+        lda floppy_a_bank       ; Drive A
         bra _dfg_bank_set
 _dfg_bank_b:
-        lda #$20                ; Drive B
+        lda floppy_b_bank       ; Drive B
 _dfg_bank_set:
         sta dma_src_bank
         lda #<SECTOR_BUF
@@ -1110,10 +1110,10 @@ _dfg_try_media:
         sta dma_src_hi          ; Sector 1 = offset $200
         lda dfg_drive
         bne _dfg_media_b
-        lda #$10
+        lda floppy_a_bank
         bra _dfg_media_set
 _dfg_media_b:
-        lda #$20
+        lda floppy_b_bank
 _dfg_media_set:
         sta dma_src_bank
         lda #<SECTOR_BUF
@@ -1497,6 +1497,10 @@ floppy_b_loaded:
         .byte 0
 floppy_b_dirty:
         .byte 0                 ; Set to 1 when INT 13h AH=03 writes to drive B
+floppy_a_bank:
+        .byte $10               ; Attic bank for drive A (default $10)
+floppy_b_bank:
+        .byte $20               ; Attic bank for drive B (default $20)
 
 ; Page-aligned filename for Hyppo setname
 ; Must be at a $xx00 address, null-terminated
