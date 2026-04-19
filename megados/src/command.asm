@@ -2820,8 +2820,7 @@ do_copy:
 	mov	si, ren_new_fname
 	mov	cx, 11
 	rep	movsb			; Copy filename
-	mov	al, [copy_src_attr]
-	mov	[di], al		; Attribute (DI now at offset 11)
+	mov	byte [di], 0x20		; Archive attribute (MS-DOS behavior)
 	; Fill timestamps
 	inc	di			; DI at offset 12
 	call	get_fat_timestamp
