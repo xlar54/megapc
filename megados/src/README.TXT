@@ -24,6 +24,7 @@ External Commands:
   ATTRIB [+/-RHSA] file              - Change file attributes
   FIND [/I] [/C] [/N] [/V] "str" file - Search text in files
   EDLIN file                         - Line editor
+  MEM                                - Display memory usage
   DOSKEY                             - Command history (TSR)
   MORE < file                        - Page output
 
