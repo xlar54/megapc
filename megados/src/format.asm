@@ -605,13 +605,13 @@ do_sys:
 	mov	byte [sector_buf+11], 0x08
 	add	di, 32 - 11		; DI already advanced 11 by movsb
 .sys_no_vol:
-	mov	byte [di+0], 'S'
-	mov	byte [di+1], 'H'
-	mov	byte [di+2], 'E'
-	mov	byte [di+3], 'L'
-	mov	byte [di+4], 'L'
-	mov	byte [di+5], ' '
-	mov	byte [di+6], ' '
+	mov	byte [di+0], 'C'
+	mov	byte [di+1], 'O'
+	mov	byte [di+2], 'M'
+	mov	byte [di+3], 'M'
+	mov	byte [di+4], 'A'
+	mov	byte [di+5], 'N'
+	mov	byte [di+6], 'D'
 	mov	byte [di+7], ' '
 	mov	byte [di+8], 'C'
 	mov	byte [di+9], 'O'
@@ -870,7 +870,7 @@ msg_disk_err	db	'Disk error during format.', 0x0D, 0x0A, 0
 msg_no_disk	db	'Drive not ready', 0x0D, 0x0A, 0
 
 oem_name	db	'MEGADOS '
-shell_fname	db	'SHELL.COM', 0
+shell_fname	db	'COMMAND.COM', 0
 
 ; ============================================================================
 ; Data

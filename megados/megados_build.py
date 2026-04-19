@@ -70,7 +70,7 @@ def nasm_assemble(src_name, out_name):
 
 # --- Assemble all sources ---
 print("Assembling...")
-shell_data = nasm_assemble('shell.asm', 'SHELL.COM')
+shell_data = nasm_assemble('command.asm', 'COMMAND.COM')
 if shell_data is None:
     print("ERROR: src/shell.asm not found")
     sys.exit(1)
@@ -90,6 +90,7 @@ nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
 nasm_assemble('edlin.asm', 'EDLIN.COM')
 nasm_assemble('format.asm', 'FORMAT.COM')
 nasm_assemble('chkdsk.asm', 'CHKDSK.COM')
+nasm_assemble('sys.asm', 'SYS.COM')
 nasm_assemble('doskey.asm', 'DOSKEY.COM')
 nasm_assemble('testdrv.asm', 'TESTDRV.SYS')
 nasm_assemble('beep.asm', 'BEEP.COM')
@@ -160,13 +161,13 @@ struct.pack_into('<H', boot, 24, SPT)
 struct.pack_into('<H', boot, 26, HEADS)
 
 # --- Boot code at 0x3E ---
-# Searches root directory for SHELL.COM, loads it via FAT chain.
+# Searches root directory for COMMAND.COM, loads it via FAT chain.
 # Uses a separate NASM source file for clarity and reliability.
 #
 # The boot code is written as raw bytes here to avoid needing
 # a second assembler pass. It:
 #   1. Reads root directory (1 sector at a time) to 0800:0000
-#   2. Searches for "SHELL   COM" (11-byte 8.3 name)
+#   2. Searches for "COMMAND COM" (11-byte 8.3 name)
 #   3. Gets start cluster from dir entry
 #   4. Reads FAT to 0800:0200
 #   5. Follows cluster chain, loading each cluster to 0800:0100+
@@ -212,7 +213,7 @@ b_read_root:
     dec     di
     jnz     b_read_root
 
-    ; Search for SHELL.COM
+    ; Search for COMMAND.COM
     mov     si, 0
     mov     cx, {ROOT_ENTRIES}
 b_search:
@@ -347,9 +348,9 @@ b_halt:
     jmp     b_halt
 
 b_cluster:   dw  0
-b_shell_name: db  'SHELL   COM'
+b_shell_name: db  'COMMAND COM'
 b_msg_err:   db  'Disk error', 0
-b_msg_nf:    db  'No SHELL.COM', 0
+b_msg_nf:    db  'No COMMAND.COM', 0
 """
 
 # Assemble the boot code
@@ -398,7 +399,7 @@ def fat12_set(cluster, value):
     struct.pack_into('<H', fat, offset, val)
 
 
-# SHELL.COM cluster chain
+# COMMAND.COM cluster chain
 for c in range(shell_clusters):
     cluster = c + 2
     fat12_set(cluster, cluster + 1 if c < shell_clusters - 1 else 0xFFF)
@@ -437,10 +438,10 @@ def make_dir_entry(name_83, start_cluster, file_size):
     return e
 
 
-# SHELL.COM
-img[root_offset:root_offset + 32] = make_dir_entry('SHELL.COM', 2, len(shell_data))
+# COMMAND.COM
+img[root_offset:root_offset + 32] = make_dir_entry('COMMAND.COM', 2, len(shell_data))
 
-# SHELL.COM data
+# COMMAND.COM data
 data_offset = DATA_START_SEC * BYTES_PER_SEC
 img[data_offset:data_offset + len(shell_data)] = shell_data
 
@@ -451,7 +452,7 @@ next_cluster = 2 + shell_clusters
 extra_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
                'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
                'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'EDLIN.COM', 'BEEP.COM',
-               'MORE.COM', 'ARGS.COM', 'DOSKEY.COM', 'FORMAT.COM', 'CHKDSK.COM', 'TESTDRV.SYS',
+               'MORE.COM', 'ARGS.COM', 'DOSKEY.COM', 'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'TESTDRV.SYS',
                'CONFIG.SYS', 'HELLO.EXE',
                'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 

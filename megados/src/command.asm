@@ -1243,13 +1243,28 @@ do_dir:
 	cmp	byte [si], 0
 	je	.dir_cur		; No argument — use current directory
 
-	; Build header path by resolving the argument against cur_dir_path
-	; Start with a copy of cur_dir_path, then apply each component
+	; Build header path by resolving the argument against current path
 	push	si
 
-	; Copy cur_dir_path to dir_hdr_path as starting point
+	; Determine which drive's path to use for the header
 	push	si
+	cmp	byte [si+1], ':'
+	jne	.dir_hdr_use_cur
+	; Drive letter present — use that drive's saved path
+	mov	al, [si]
+	or	al, 0x20		; Lowercase
+	cmp	al, 'a'
+	jne	.dir_hdr_check_b
+	mov	si, drv_a_path
+	jmp	.dir_hdr_copy
+.dir_hdr_check_b:
+	cmp	al, 'b'
+	jne	.dir_hdr_use_cur
+	mov	si, drv_b_path
+	jmp	.dir_hdr_copy
+.dir_hdr_use_cur:
 	mov	si, cur_dir_path
+.dir_hdr_copy:
 	mov	di, dir_hdr_path
 .dir_hdr_init:
 	lodsb
@@ -4275,12 +4290,11 @@ load_drive_state:
 ;
 read_cur_dir:
 	push	cx
-	; Set geometry for current drive
+	; Set geometry for current drive (save/restore resolved_drive AFTER all disk I/O)
 	push	word [resolved_drive]
 	mov	al, [cur_drive]
 	mov	[resolved_drive], al
 	call	ensure_geo
-	pop	word [resolved_drive]
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
@@ -4307,18 +4321,36 @@ read_cur_dir:
 	jnz	.rcd_loop
 	clc
 .rcd_err:
+	pop	word [resolved_drive]
 	pop	cx
 	ret
 .rcd_subdir:
+	; Read subdirectory one sector at a time (avoids track crossing)
 	mov	ax, [cur_dir_cluster]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	bx, dir_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]	; AX = first LBA of cluster
+	mov	cx, [geo_spc]		; CX = sectors to read
+.rcd_sub_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [cur_drive]
+	mov	ax, 0x0201		; Read 1 sector
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.rcd_sub_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.rcd_sub_loop
+	clc
+.rcd_sub_err:
+	pop	word [resolved_drive]
+	pop	cx
 	ret
 
 ; ============================================================================
@@ -4332,7 +4364,6 @@ write_cur_dir:
 	mov	al, [cur_drive]
 	mov	[resolved_drive], al
 	call	ensure_geo
-	pop	word [resolved_drive]
 	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer
@@ -4359,18 +4390,35 @@ write_cur_dir:
 	jnz	.wcd_loop
 	clc
 .wcd_err:
+	pop	word [resolved_drive]
 	pop	cx
 	ret
 .wcd_subdir:
 	mov	ax, [cur_dir_cluster]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	bx, dir_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	mov	cx, [geo_spc]
+.wcd_sub_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [cur_drive]
+	mov	ax, 0x0301
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.wcd_sub_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wcd_sub_loop
+	clc
+.wcd_sub_err:
+	pop	word [resolved_drive]
+	pop	cx
 	ret
 
 ; ============================================================================
@@ -4892,15 +4940,38 @@ read_resolved_dir:
 	stc
 	ret
 .rrd_subdir:
+	; Read subdirectory one sector at a time
+	push	cx
+	push	dx
 	mov	ax, [resolved_dir_cluster]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	bx, dir_buffer
-	mov	ah, 0x02
-	mov	al, [geo_spc]
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	mov	cx, [geo_spc]
+.rrd_sub_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [resolved_drive]
+	mov	ax, 0x0201
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.rrd_sub_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.rrd_sub_loop
+	pop	dx
+	pop	cx
+	clc
+	ret
+.rrd_sub_err:
+	pop	dx
+	pop	cx
+	stc
 	ret
 
 ; ============================================================================
@@ -4943,15 +5014,37 @@ write_resolved_dir:
 	stc
 	ret
 .wrd_subdir:
+	push	cx
+	push	dx
 	mov	ax, [resolved_dir_cluster]
-	call	cluster_to_chs
-	mov	ax, SHELL_SEG
-	mov	es, ax
-	mov	bx, dir_buffer
-	mov	ah, 0x03
-	mov	al, [geo_spc]
+	sub	ax, 2
+	mul	word [geo_spc]
+	add	ax, [geo_data_start]
+	mov	cx, [geo_spc]
+.wrd_sub_loop:
+	push	cx
+	push	ax
+	push	bx
+	call	lba_to_chs
 	mov	dl, [resolved_drive]
+	mov	ax, 0x0301
 	int	0x13
+	pop	bx
+	pop	ax
+	pop	cx
+	jc	.wrd_sub_err
+	add	bx, 512
+	inc	ax
+	dec	cx
+	jnz	.wrd_sub_loop
+	pop	dx
+	pop	cx
+	clc
+	ret
+.wrd_sub_err:
+	pop	dx
+	pop	cx
+	stc
 	ret
 
 ; ============================================================================
@@ -13977,10 +14070,10 @@ verify_flag:	db	0		; Disk verify flag
 last_error:	dw	0		; Last extended error code
 
 ; Environment string data
-env_comspec:	db	'COMSPEC=A:\SHELL.COM', 0
+env_comspec:	db	'COMSPEC=A:\COMMAND.COM', 0
 env_path:	db	'PATH=A:\', 0
 env_prompt:	db	'PROMPT=$P$G', 0
-env_progname:	db	'A:\SHELL.COM', 0
+env_progname:	db	'A:\COMMAND.COM', 0
 last_return_code: dw	0		; Return code from last AH=4C
 dta_seg:	dw	0		; DTA segment (default: PSP:0080)
 dta_off:	dw	0x0080		; DTA offset
