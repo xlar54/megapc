@@ -2967,15 +2967,15 @@ read_cluster_data:
 	push	bx
 	push	cx
 	sub	ax, 2
-	mul	word [geo_spc]
-	add	ax, [geo_data_start]
-	mov	cx, [geo_spc]
+	mul	word [cs:geo_spc]
+	add	ax, [cs:geo_data_start]
+	mov	cx, [cs:geo_spc]
 .rcd_loop:
 	push	cx
 	push	ax
 	push	bx
 	call	lba_to_chs
-	mov	dl, [resolved_drive]
+	mov	dl, [cs:resolved_drive]
 	mov	ax, 0x0201
 	int	0x13
 	pop	bx
@@ -3012,15 +3012,15 @@ write_cluster_data:
 	push	bx
 	push	cx
 	sub	ax, 2
-	mul	word [geo_spc]
-	add	ax, [geo_data_start]
-	mov	cx, [geo_spc]
+	mul	word [cs:geo_spc]
+	add	ax, [cs:geo_data_start]
+	mov	cx, [cs:geo_spc]
 .wcd_loop:
 	push	cx
 	push	ax
 	push	bx
 	call	lba_to_chs
-	mov	dl, [resolved_drive]
+	mov	dl, [cs:resolved_drive]
 	mov	ax, 0x0301
 	int	0x13
 	pop	bx
@@ -4613,11 +4613,11 @@ ensure_geo:
 	cmp	byte [es:0x3E], 0
 	je	.eg_no_invalidate
 	mov	byte [es:0x3E], 0	; Clear flag
-	mov	byte [geo_active_drv], 0xFF ; Force re-read
+	mov	byte [cs:geo_active_drv], 0xFF ; Force re-read
 .eg_no_invalidate:
 	pop	es
-	mov	al, [resolved_drive]
-	cmp	al, [geo_active_drv]
+	mov	al, [cs:resolved_drive]
+	cmp	al, [cs:geo_active_drv]
 	je	.eg_done
 	call	load_drive_bpb
 .eg_done:
@@ -4638,9 +4638,11 @@ load_drive_bpb:
 	push	si
 	push	di
 	push	es
+	push	ds
+	mov	ax, SHELL_SEG
+	mov	ds, ax			; DS = SHELL_SEG for all variable access
 
 	; Read boot sector (LBA 0 = C=0, H=0, S=1)
-	mov	ax, SHELL_SEG
 	mov	es, ax
 	mov	bx, dir_buffer		; Use dir_buffer temporarily (overwritten by dir read later)
 	mov	ah, 0x02
@@ -4745,6 +4747,7 @@ load_drive_bpb:
 	rep	movsw
 	movsb				; 1 byte (media)
 
+	pop	ds
 	pop	es
 	pop	di
 	pop	si
@@ -4773,6 +4776,7 @@ load_drive_bpb:
 	mov	word [geo_max_clust], 355
 	mov	al, [resolved_drive]
 	mov	[geo_active_drv], al
+	pop	ds
 	pop	es
 	pop	di
 	pop	si
@@ -4794,8 +4798,8 @@ lba_to_chs:
 	push	ax
 	; Compute SPT * HEADS
 	push	ax
-	mov	ax, [geo_spt]
-	mul	word [geo_heads]
+	mov	ax, [cs:geo_spt]
+	mul	word [cs:geo_heads]
 	mov	bx, ax			; BX = SPT * HEADS
 	pop	ax
 	xor	dx, dx
@@ -4803,7 +4807,7 @@ lba_to_chs:
 	mov	ch, al
 	mov	ax, dx
 	xor	dx, dx
-	div	word [geo_spt]		; AX = head, DX = sector
+	div	word [cs:geo_spt]	; AX = head, DX = sector
 	mov	dh, al
 	mov	cl, dl
 	inc	cl			; 1-based
