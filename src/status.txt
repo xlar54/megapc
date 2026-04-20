@@ -2,8 +2,90 @@ MEGA8086 Emulator — Status
 ===========================
 Last updated: 2026-04-20
 
-RECENT CHANGES (2026-04-20)
-============================
+RECENT CHANGES (2026-04-20, part 2)
+=====================================
+
+GW-BASIC now runs on MegaDOS. Root cause: the startup probes INT 2Ah
+(network / critical-section check) with AH=0 to detect a network
+install. MegaDOS only installed INT 20h through INT 24h in the IVT,
+so INT 2Ah pointed into the IVT table itself and GW-BASIC jumped to
+garbage. Added a shared int_iret_stub and wired INT 28h (DOS idle)
+and INT 2Ah to it. IRET preserves AH=0 so GW-BASIC sees "not
+installed" and continues. (4e82889)
+
+MS-DOS 3.3 batch vocabulary added to COMMAND.COM. Previously only
+@/ECHO/REM/PAUSE worked in .BAT files. Now supported:
+
+  - Labels:      ":name" lines are skipped (not echoed, not dispatched)
+  - GOTO label:  scans batch_buffer for the label forward/backward,
+                 prints "Label not found" and terminates on miss
+  - IF [NOT] EXIST file cmd:        existence check via resolve_path
+  - IF [NOT] ERRORLEVEL n cmd:      compares last_return_code >= n
+  - IF [NOT] str1==str2 cmd:        literal compare, optional quotes
+  - CALL cmd:    strips CALL prefix and re-dispatches (works for .COM;
+                 nested .BAT would clobber batch state — known limit)
+  - SHIFT:       rotates batch_args[1..9] → [0..8]
+
+Per-line expansion runs after the @-strip, before dispatch:
+  %0..%9   — args captured by batch_parse_args at run_batch entry
+             (before resolve_path consumes the tail)
+  %VAR%    — env_find_value, case-insensitive, unknown → empty
+  %%       — literal %
+
+Two plumbing bugs were caught while testing:
+  1. env_find_value left ES=env_seg on return; batch_expand_line then
+     stosb'd into the env block instead of expand_buf. Restore ES=CS
+     after the call, re-fetch env_seg via [env_seg] for the copy.
+  2. do_exec's .BAT fallback rewrote cmd_buffer in place with just
+     "NAME.BAT\0", clobbering the args that lived in the same buffer.
+     Now saves the tail to expand_buf first, then rebuilds name+tail
+     before calling run_batch.
+
+TESTBAT.BAT (uppercase name/content) and TESTBAT2.BAT (uppercase name,
+lowercase content) are on the image and exercise every new feature
+plus the case-insensitive command parser. (19e179f)
+
+DEBUG.COM added — first-pass MS-DOS DEBUG clone. Command set:
+C/D/E/F/H/I/M/O/S/R/A/U/G/T/P/?/Q. Hex-only, accepts OFFSET or
+SEG:OFFSET, default segment tracks target program. Dump format is
+16 bytes of hex per line (no ASCII column) to keep output narrow
+enough for the MEGA65 terminal. (efb6724)
+
+DEBUG P (proceed / step-over) partially implemented. For the
+recognized step-over opcodes — CALL rel16, CALL ptr16:16, CALL
+near/far via FF /2 /3, INT imm8, LOOPNZ/LOOPZ/LOOP, REP/REPNE
+prefixes — setup_proceed_break plants INT 3 (0xCC) at IP+length,
+clears TF, and runs free. When the break fires, the original byte
+is restored and IP rolled back by one so it lands on the instruction
+after the stepped-over call. Non-step-over opcodes fall through to
+the TF path, which also works now (see next entry). (78610bd)
+
+Emulator TF (trap flag) timing fixed. The TF check at opcode_done
+previously read the *current* flag_tf, so an IRET/POPF that loaded
+TF=1 self-triggered INT 1 before the next instruction ran — DEBUG's
+T always stopped with IP unchanged. Now flag_tf is snapshotted at
+the start of each instruction (into trap_flag_var) and the check at
+opcode_done uses that snapshot. IRET that loads TF=1 doesn't self-
+trigger; the first instruction of the traced code runs, and only
+then does INT 1 fire. DEBUG T now single-steps correctly; non-step-
+over P also works via the same mechanism.
+
+DEBUG restore_debug_vectors DS corruption bug fixed. The loop set
+DS to each old_int*_seg for AH=25h, then read the *next* vector's
+offset from that same DS — fetching from whichever segment DOS was
+last asked to install into. Subsequent AH=25h calls wrote garbage
+to IVT[3]/[20]/[21]; the first INT 21h after restore (e.g. the
+"Execution stopped" print) jumped through the trashed vector and
+rebooted the emulator. Reading with cs: overrides keeps DS free to
+carry the vector segment. (78610bd)
+
+FORMAT.COM gained 160K/180K/320K support and floppy-label display
+now disambiguates 5.25" DD formats by SPT+heads (1H/8SPT=160K,
+1H/9SPT=180K, 2H/8SPT=320K, 2H/9SPT=360K). BIOS type byte stays
+$01 for INT 13h AH=08 compatibility. (d6680ba)
+
+RECENT CHANGES (2026-04-20, part 1)
+=====================================
 
 B: drive program execution now works reliably end-to-end.
 Root cause turned out to be multiple bugs compounding each other:
@@ -82,8 +164,9 @@ WORKING DOS VERSIONS
 - FreeDOS: Boots (slow startup due to kernel UPX decompression)
   - SETUP.EXE runs partially (hits R6003 divide-by-zero, expected —
     insufficient memory for SETUP's requirements)
-- GWBASIC: Runs, function keys display with reverse video,
-  cursor keys work, BEEP works (SID speaker emulation)
+- GWBASIC: Runs on MS-DOS images and now on MegaDOS (INT 2Ah stub
+  installed). Function keys display with reverse video, cursor keys
+  work, BEEP works (SID speaker emulation).
 - WordStar 3.x: Partially working — see WORDSTAR section below
 
 KNOWN ISSUES (FreeDOS)
@@ -474,6 +557,18 @@ Built-in commands:
   PAUSE       Wait for key             PATH      Set executable search path
   A:/B:       Switch drive
 
+Batch-file commands (MS-DOS 3.3 semantics):
+  :label      Define a label (not dispatched)
+  GOTO label  Jump to label (batch only)
+  IF [NOT] EXIST file cmd
+  IF [NOT] ERRORLEVEL n cmd
+  IF [NOT] str1==str2 cmd
+  CALL cmd    Dispatch another command/BAT
+  SHIFT       Rotate %1..%9 → %0..%8
+  %0..%9      Positional arguments
+  %VAR%       Env var expansion (case-insensitive)
+  %%          Literal percent
+
 Prompt $-codes: $P $G $L $N $D $T $V $B $Q $E $H $$ $_
 
 Command line: 127 characters max (beeps via PC speaker at limit)
@@ -509,6 +604,10 @@ MEGADOS EXTERNAL PROGRAMS
 ==========================
 
   EDLIN.COM   Line editor (see EDLIN section below)
+  DEBUG.COM   Memory/register debugger (C/D/E/F/H/I/M/O/S/R/A/U/G/T/P/?/Q).
+              T traces one instruction at a time via TF/INT 1.
+              P steps over CALL/INT/LOOP/REP/FF /2 /3 via an INT 3
+              temp-breakpoint; other opcodes fall back to T.
   MORE.COM    Display file one screen at a time (Q to quit)
   BEEP.COM    PC speaker test (PIT Timer 2 tones)
   ARGS.COM    Display command line arguments (test utility)
@@ -539,12 +638,6 @@ KNOWN BUGS
   resolve_path or cmd_buffer interaction with child segment context.
   Workaround: use AH=13h (FCB delete) from programs.
 
-- GWBASIC.EXE won't run on MegaDOS. Gets past re-entry check (050F
-  cleared), video init works (screen clears), crashes before startup
-  banner. Does not exit through AH=4Ch or INT 20h. Not a full reboot
-  (start_init not re-entered). PSP parent field and DTA fixes applied.
-  Root cause still unknown. Works on real MS-DOS images.
-
 - Emulator data cache can corrupt tail end of loaded program memory.
   Workaround: place critical strings earlier in program data section.
 
@@ -573,6 +666,11 @@ KNOWN BUGS
 
 TODO
 =====
+
+- DEBUG: broader U disassembler coverage (currently narrow subset),
+  broader A assembler coverage, interactive E/A ("keep prompting at
+  next address"), breakpoint command (user-facing BP/BC), better
+  R flag-name editing.
 
 - WordStar native mode: debug why row 24 function key bar is garbled
   (see WORDSTAR section for detailed analysis)

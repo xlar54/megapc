@@ -421,6 +421,14 @@ _ml_ptr_done:
         lda reg_ip+1
         sta decode_ip_start+1
 
+        ; --- Snapshot TF at instruction start ---
+        ; The trap must fire AFTER the next instruction completes, not
+        ; immediately after the instruction that set TF. Latching here lets
+        ; an IRET/POPF that loads TF=1 run without self-triggering; the
+        ; first instruction of the traced code runs and THEN fires INT 1.
+        lda flag_tf
+        sta trap_flag_var
+
         ; --- Fetch opcode byte ---
         jsr fetch_byte
         sta raw_opcode
@@ -640,8 +648,9 @@ _od_no_rep:
         lda #0
         sta seg_override_en
 
-        ; Check for trap flag
-        lda flag_tf
+        ; Check trap flag — use the snapshot taken at instruction start
+        ; so that an instruction which set TF (POPF/IRET) doesn't self-trigger.
+        lda trap_flag_var
         beq +
         lda #1
         jsr do_sw_interrupt     ; INT 1 (single step)
