@@ -7091,9 +7091,9 @@ int21_handler:
 	iret
 
 ; --- AH=30: Get DOS version ---
-; Returns AL=major, AH=minor
+; Returns AL=major, AH=minor (minor in decimal — 30 → .30)
 .i21_30:
-	mov	ax, 0x0003	; DOS 3.0
+	mov	ax, 0x1E03	; DOS 3.30 (AL=3, AH=30 decimal = $1E)
 	xor	bx, bx
 	xor	cx, cx
 	iret
