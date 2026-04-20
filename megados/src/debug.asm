@@ -319,6 +319,20 @@ cmd_run_common:
 .run_ready:
 	call	prepare_run
 	jc	cmd_error
+	mov	byte [bp_skip_pending], 0
+	; If G (free run) and target_ip sits on an active BP, the BP won't be
+	; installed this pass (bp_install skips current IP). Turn on TF so we
+	; single-step one instruction, and set bp_skip_pending so int1_handler
+	; re-installs the skipped BP and lets the target keep running.
+	cmp	byte [run_mode], MODE_GO
+	jne	.run_not_go
+	call	bp_at_current_ip
+	jc	.run_not_go
+	mov	byte [bp_skip_pending], 1
+	mov	ax, [target_flags]
+	or	ax, 0x0100
+	mov	[target_flags], ax
+.run_not_go:
 	call	bp_install
 	cmp	byte [run_mode], MODE_PROCEED
 	jne	.run_do
@@ -663,13 +677,14 @@ cmd_enter:
 	mov	[work_seg], dx
 	mov	[work_start], ax
 	call	skip_delims
-	cmp	byte [si], 0
-	je	cmd_error
 
 	push	es
 	mov	ax, [work_seg]
 	mov	es, ax
 	mov	di, [work_start]
+
+	cmp	byte [si], 0
+	je	.enter_interactive	; no bytes on line → interactive mode
 
 .enter_loop:
 	call	parse_hex_byte
@@ -689,6 +704,52 @@ cmd_enter:
 .enter_fail:
 	pop	es
 	jmp	cmd_error
+
+; --- Interactive enter mode ---
+; At each prompt, print "SEG:OFF OLD." and read one line.
+;   empty line         → exit
+;   '-'                → back up one byte (not below the starting address)
+;   hex byte (1-2 chr) → store and advance
+;   anything else      → skip (advance without writing)
+.enter_interactive:
+.ei_prompt:
+	mov	ax, [work_seg]
+	call	print_hex16
+	mov	al, ':'
+	call	putc
+	mov	ax, di
+	call	print_hex16
+	mov	al, ' '
+	call	putc
+	mov	al, [es:di]
+	call	print_hex8
+	mov	al, '.'
+	call	putc
+
+	call	read_command
+	mov	si, cmd_text
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.ei_done
+	cmp	byte [si], '-'
+	je	.ei_back
+	call	parse_hex_byte
+	jc	.ei_advance		; not a byte → skip forward
+	mov	[es:di], al
+.ei_advance:
+	inc	di
+	jmp	.ei_prompt
+.ei_back:
+	cmp	di, [work_start]
+	jbe	.ei_prompt
+	dec	di
+	jmp	.ei_prompt
+.ei_done:
+	pop	es
+	mov	ax, [work_seg]
+	mov	[last_dump_seg], ax
+	mov	[last_dump_off], di
+	jmp	main_loop
 
 cmd_fill:
 	inc	si
@@ -1399,6 +1460,18 @@ restore_temp_break:
 ; slots to undo.
 ;
 bp_install:
+	; Initial install (called from cmd_run_common): skip BP at current IP.
+	mov	byte [bp_install_force], 0
+	jmp	bp_install_impl
+
+; bp_install_all — force-install every active BP, even at target_cs:target_ip.
+; Used by int1_handler after the one-instruction single-step so a BP the
+; target jumps BACK to fires on the next execution.
+bp_install_all:
+	mov	byte [bp_install_force], 1
+	; fall through
+
+bp_install_impl:
 	push	ax
 	push	bx
 	push	cx
@@ -1410,7 +1483,10 @@ bp_install:
 	mov	al, [si + 5]
 	test	al, BP_F_ACTIVE
 	jz	.bpi_next
-	; Skip BP at target_cs:target_ip (would re-fire immediately)
+	test	al, BP_F_PATCHED
+	jnz	.bpi_next
+	cmp	byte [bp_install_force], 0
+	jne	.bpi_do			; forced install: no skip
 	mov	ax, [target_cs]
 	cmp	ax, [si]
 	jne	.bpi_do
@@ -1466,6 +1542,43 @@ bp_restore:
 	pop	cx
 	pop	bx
 	pop	ax
+	ret
+
+; ============================================================================
+; bp_at_current_ip — Is there an active BP at target_cs:target_ip?
+; ============================================================================
+; Output: CF=0 if yes, CF=1 if no. Clobbers nothing.
+;
+bp_at_current_ip:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+	mov	ax, [target_cs]
+	mov	bx, [target_ip]
+.bac_loop:
+	test	byte [si + 5], BP_F_ACTIVE
+	jz	.bac_next
+	cmp	ax, [si]
+	jne	.bac_next
+	cmp	bx, [si + 2]
+	jne	.bac_next
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.bac_next:
+	add	si, BP_SIZE
+	loop	.bac_loop
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
 	ret
 
 ; ============================================================================
@@ -1663,6 +1776,38 @@ do_bc:
 	jmp	main_loop
 
 int1_handler:
+	; If this trap came from a G-mode "single-step past current BP" setup,
+	; re-install all BPs (target_ip has now advanced past the one that was
+	; skipped), clear TF in the pushed flags, and IRET back to the target.
+	; Do NOT stop — the user asked for G, not T.
+	cmp	byte [cs:bp_skip_pending], 0
+	je	.i1_normal
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	ds
+	push	es
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	byte [bp_skip_pending], 0
+	call	bp_install_all
+	push	bp
+	mov	bp, sp
+	; Stack from bp: +0 bp, +2 es, +4 ds, +6 si, +8 cx, +10 bx, +12 ax
+	;                +14 IP, +16 CS, +18 FLAGS  (pushed by INT)
+	and	word [ss:bp + 18], 0xFEFF	; clear TF in target FLAGS
+	pop	bp
+	pop	es
+	pop	ds
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	iret
+.i1_normal:
 	mov	byte [cs:stop_reason], STOP_TRACE
 	jmp	debug_stop_common
 
@@ -3376,5 +3521,7 @@ temp_break_orig		db	0
 ; User breakpoint table
 bp_table:	times BP_COUNT * BP_SIZE db 0
 bp_list_any	db	0
+bp_skip_pending	db	0		; 1 = int1_handler should re-install BPs and continue
+bp_install_force db	0		; 1 = install every active BP even at current IP
 
 end_of_prog:
