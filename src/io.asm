@@ -142,12 +142,12 @@ _iow_done:
 _iow_crtc_index:
         ; Save the selected CRTC register index
         lda reg_al
-        sta $8FD9               ; CRTC selected register
+        sta io_crtc_reg               ; CRTC selected register
         rts
 
 _iow_crtc_data:
         ; Write to the selected CRTC register
-        lda $8FD9               ; Which register?
+        lda io_crtc_reg               ; Which register?
         cmp #$0E
         beq _iow_cursor_hi
         cmp #$0F
@@ -157,20 +157,20 @@ _iow_crtc_data:
 _iow_cursor_hi:
         ; Cursor address high byte
         lda reg_al
-        sta $8FDA               ; Save cursor high byte
+        sta io_save_a               ; Save cursor high byte
         rts
 
 _iow_cursor_lo:
         ; Cursor address low byte — compute row/col and update sprite
         ; Cursor address = row * 80 + col (16-bit)
         lda reg_al
-        sta $8FDB               ; Save cursor low byte
+        sta io_save_b               ; Save cursor low byte
         ; Divide cursor address by 80 to get row and col
-        ; address = $8FDA:$8FDB (high:low)
+        ; address = io_save_a:io_save_b (high:low)
         ; Use repeated subtraction: row = address / 80, col = address % 80
-        lda $8FDB
+        lda io_save_b
         sta scratch_a           ; Working low byte
-        lda $8FDA
+        lda io_save_a
         sta scratch_b           ; Working high byte
         lda #0
         sta scratch_c           ; Row counter
@@ -203,10 +203,8 @@ _iow_div_done:
 ; Maps PC speaker frequency to MEGA65 SID voice 1.
 ;
 ; State variables:
-spk_pit_lobyte  = $8FE8        ; PIT divider low byte
-spk_pit_hibyte  = $8FE9        ; PIT divider high byte
-spk_pit_latch   = $8FEA        ; 0=expecting low byte, 1=expecting high byte
-spk_port61      = $8FEB        ; Current port $61 value
+; Speaker / PIT state — defined in globals.asm
+; (spk_pit_lobyte, spk_pit_hibyte, spk_pit_latch, spk_port61)
 
 _iow_pit_cmd:
         ; Port $43: PIT command register
@@ -284,11 +282,11 @@ _iow_pit_hi:
         sta scratch_b           ; Result high
         ; Dividend = $131700 (24-bit). Result shifted left 4 after divide.
         lda #$00
-        sta $8FEC               ; Dividend byte 0 (low)
+        sta ldiv_dividend0               ; Dividend byte 0 (low)
         lda #$17
-        sta $8FED               ; Dividend byte 1
+        sta ldiv_dividend1               ; Dividend byte 1
         lda #$13
-        sta $8FEE               ; Dividend byte 2 (high)
+        sta ldiv_dividend2               ; Dividend byte 2 (high)
         ; Divisor in spk_pit_lobyte:spk_pit_hibyte
         ; Check for zero divisor
         lda spk_pit_lobyte
@@ -301,19 +299,19 @@ _iow_pit_hi:
         lda #0
         sta scratch_a           ; Remainder low
         sta scratch_b           ; Remainder high
-        sta $8FEF               ; Result low (MUST init to 0)
-        sta $8FF0               ; Result high
+        sta ldiv_result_lo               ; Result low (MUST init to 0)
+        sta ldiv_result_hi               ; Result high
         ldx #24                 ; 24 iterations for 24-bit dividend
 _iow_div_loop:
         ; Shift dividend left (MSB into remainder)
-        asl $8FEC
-        rol $8FED
-        rol $8FEE
+        asl ldiv_dividend0
+        rol ldiv_dividend1
+        rol ldiv_dividend2
         rol scratch_a
         rol scratch_b
         ; Shift result left
-        asl $8FEF
-        rol $8FF0
+        asl ldiv_result_lo
+        rol ldiv_result_hi
         ; Try subtract divisor from remainder
         sec
         lda scratch_a
@@ -325,23 +323,23 @@ _iow_div_loop:
         ; Remainder >= divisor: commit subtraction, set result bit
         sta scratch_b
         sty scratch_a
-        inc $8FEF               ; Set low bit of result
+        inc ldiv_result_lo               ; Set low bit of result
 _iow_div_no_sub:
         dex
         bne _iow_div_loop
-        ; Result in $8FEF:$8FF0 — shift left 4 for correct SID frequency
-        asl $8FEF
-        rol $8FF0
-        asl $8FEF
-        rol $8FF0
-        asl $8FEF
-        rol $8FF0
-        asl $8FEF
-        rol $8FF0
+        ; Result in ldiv_result_lo:ldiv_result_hi — shift left 4 for correct SID frequency
+        asl ldiv_result_lo
+        rol ldiv_result_hi
+        asl ldiv_result_lo
+        rol ldiv_result_hi
+        asl ldiv_result_lo
+        rol ldiv_result_hi
+        asl ldiv_result_lo
+        rol ldiv_result_hi
         ; Write to SID voice 1 frequency
-        lda $8FEF
+        lda ldiv_result_lo
         sta $D400               ; SID freq low
-        lda $8FF0
+        lda ldiv_result_hi
         sta $D401               ; SID freq high
 _iow_pit_hi_done:
         rts
@@ -371,9 +369,9 @@ _iow_spk_on:
         sta $D405               ; Attack=0, Decay=0
         lda #$F0
         sta $D406               ; Sustain=15, Release=0
-        lda $8FEF
+        lda ldiv_result_lo
         sta $D400               ; Freq low
-        lda $8FF0
+        lda ldiv_result_hi
         sta $D401               ; Freq high
         lda #$41                ; Gate ON + pulse
         sta $D404
@@ -515,7 +513,7 @@ _i10_scroll_up:
         rts
 _i10su_scroll:
         ; AL>0: scroll up AL lines (preserve cursor position)
-        sta $8FD8               ; Save line count (do_scr_scroll clobbers X)
+        sta io_line_count               ; Save line count (do_scr_scroll clobbers X)
         lda scr_row
         pha
         lda scr_col
@@ -524,7 +522,7 @@ _i10su_loop:
         lda #SCR_ROWS
         sta scr_row
         jsr do_scr_scroll
-        dec $8FD8
+        dec io_line_count
         bne _i10su_loop
         pla
         sta scr_col
@@ -542,14 +540,14 @@ _i10_scroll_down:
         rts
 _i10sd_scroll:
         ; AL>0: scroll down AL lines (preserve cursor position)
-        sta $8FD8               ; Save count (do_scr_scroll_down clobbers X)
+        sta io_line_count               ; Save count (do_scr_scroll_down clobbers X)
         lda scr_row
         pha
         lda scr_col
         pha
 _i10sd_loop:
         jsr do_scr_scroll_down
-        dec $8FD8
+        dec io_line_count
         bne _i10sd_loop
         pla
         sta scr_col
@@ -572,7 +570,7 @@ _i10_read_char_attr:
 _i10_write_char_attr:
         ; AH=09: Write char+attr at cursor, CX times, no cursor advance
         lda reg_al
-        sta $8FD9               ; Save screen code
+        sta io_crtc_reg               ; Save screen code
         lda scr_row
         pha
         lda scr_col
@@ -598,7 +596,7 @@ _i10wa_loop:
         sta [temp_ptr2],z
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda $8FD9
+        lda io_crtc_reg
         ldz #0
         sta [temp_ptr],z
         inc scr_col
@@ -620,7 +618,7 @@ _i10wa_restore:
 _i10_write_char_only:
         ; AH=0A: Write char only at cursor, CX times, preserve existing attr
         lda reg_al
-        sta $8FD9               ; Save screen code
+        sta io_crtc_reg               ; Save screen code
         lda scr_row
         pha
         lda scr_col
@@ -644,7 +642,7 @@ _i10wo_loop:
         ; Do NOT write attribute — preserve existing byte at z=1
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda $8FD9
+        lda io_crtc_reg
         ldz #0
         sta [temp_ptr],z
         inc scr_col
@@ -669,7 +667,7 @@ _i10_write_string:
         ; BL=attribute (modes 0/1)
         ; Save mode and original cursor
         lda reg_al
-        sta $8FDA               ; Save mode
+        sta io_save_a               ; Save mode
         lda scr_row
         pha
         lda scr_col
@@ -686,23 +684,23 @@ _i10_write_string:
         sta temp32+1
         ; Read string length
         lda reg_cx
-        sta $8FDB               ; Count low
+        sta io_save_b               ; Count low
         lda reg_cx+1
-        sta $8FDC               ; Count high
+        sta io_save_c               ; Count high
 _i10ws_loop:
-        lda $8FDB
-        ora $8FDC
+        lda io_save_b
+        ora io_save_c
         beq _i10ws_done
         ; Read char from ES:BP
         ldx #SEG_ES_OFS
         jsr mem_read8
-        sta $8FDD               ; Save char
+        sta io_save_d               ; Save char
         inc temp32
         bne +
         inc temp32+1
 +
         ; Check mode bit 1: char+attr pairs?
-        lda $8FDA
+        lda io_save_a
         and #$02
         beq _i10ws_use_bl
         ; Mode 2/3: read attr from next byte
@@ -715,17 +713,17 @@ _i10ws_loop:
 +
 _i10ws_use_bl:
         ; Write char via con_write_char (handles screen + vidbuf + cursor advance)
-        lda $8FDD
+        lda io_save_d
         jsr con_write_char
         ; Decrement count
-        lda $8FDB
+        lda io_save_b
         bne +
-        dec $8FDC
-+       dec $8FDB
+        dec io_save_c
++       dec io_save_b
         bra _i10ws_loop
 _i10ws_done:
         ; Check if we should restore cursor (mode bit 0 = 0)
-        lda $8FDA
+        lda io_save_a
         and #$01
         bne _i10ws_exit         ; Bit 0 set: leave cursor at final position
         ; Restore original cursor
@@ -809,15 +807,15 @@ _i16_poll:
         bne _i16_poll           ; Fast mode, just poll again
         ; Check if a new frame has elapsed
         lda $D7FA
-        cmp $8F15
+        cmp last_frame_ctr
         beq _i16_poll           ; Same frame, poll again
-        sta $8F15               ; Update frame counter
-        inc $8F16
-        lda $8F16
+        sta last_frame_ctr               ; Update frame counter
+        inc sub_frame_ctr
+        lda sub_frame_ctr
         cmp #3
         bcc _i16_poll           ; Not time for tick yet
         lda #0
-        sta $8F16
+        sta sub_frame_ctr
         ; Clear screen RAM before refresh
         lda #$00
         sta $D707
@@ -857,7 +855,7 @@ _i16_got_key:
         bne _i16_not_ctrlc
         ; Set Ctrl-C flag for DOS to check
         lda #1
-        sta $8F1E
+        sta ctrlc_pending
         ; Return Ctrl-C as the key (AL=0x03, AH=0x2E scancode)
         lda #$03
         sta reg_al
@@ -1219,10 +1217,10 @@ calc_scr_ptr:
 ;
 do_clear_window:
         lda reg_ch
-        sta $8F26               ; Current row
+        sta scr_clear_row               ; Current row
 
 _dcw_row_loop:
-        lda $8F26
+        lda scr_clear_row
         sta $D770
         lda #0
         sta $D771
@@ -1268,10 +1266,10 @@ _dcw_col_loop:
         dex
         bne _dcw_col_loop
 
-        lda $8F26
+        lda scr_clear_row
         cmp reg_dh
         bcs _dcw_done
-        inc $8F26
+        inc scr_clear_row
         bra _dcw_row_loop
 _dcw_done:
         rts
@@ -1284,11 +1282,11 @@ _dcw_done:
 ;
 do_clear_window_scr:
         lda reg_ch
-        sta $8F27               ; Current row
+        sta scr_clear_row_s               ; Current row
 
 _dcws_row_loop:
         ; Compute screen offset = row * 80 + col
-        lda $8F27
+        lda scr_clear_row_s
         sta $D770
         lda #0
         sta $D771
@@ -1330,10 +1328,10 @@ _dcws_col_loop:
         dex
         bne _dcws_col_loop
 
-        lda $8F27
+        lda scr_clear_row_s
         cmp reg_dh
         bcs _dcws_done
-        inc $8F27
+        inc scr_clear_row_s
         bra _dcws_row_loop
 _dcws_done:
         rts
@@ -1646,20 +1644,20 @@ con_write_char:
         bcc _cwc_done           ; Other control chars — ignore
 
         ; --- Printable character ---
-        ; DEBUG: save row/col/char to $8F9A (if $8F9A == $FF)
+        ; DEBUG: save row/col/char to scr_disarm (if scr_disarm == $FF)
         pha
-        lda $8F9A
+        lda scr_disarm
         cmp #$FF
         bne _cwc_no_dbg
         pla
         pha
-        sta $8F9D               ; Character
+        sta scr_save_char               ; Character
         lda scr_row
-        sta $8F9B               ; Row
+        sta scr_save_row               ; Row
         lda scr_col
-        sta $8F9C               ; Col
+        sta scr_save_col               ; Col
         lda #$00
-        sta $8F9A               ; Disarm
+        sta scr_disarm               ; Disarm
 _cwc_no_dbg:
 
         ; Write to guest text page

@@ -242,10 +242,10 @@ _mw8_rom:
 mem_read16:
         ; Save original offset for segment wrap detection
         lda temp32
-        sta $8F60
+        sta mem_scratch_a
         lda temp32+1
-        sta $8F61
-        stx $8F62               ; Save segment register offset
+        sta mem_scratch_b
+        stx mem_scratch_seg               ; Save segment register offset
 
         jsr seg_ofs_to_linear
         jsr linear_to_chip
@@ -254,8 +254,8 @@ mem_read16:
         sta op_source
 
         ; Check for segment wrap (offset was $FFFF)
-        lda $8F60
-        and $8F61
+        lda mem_scratch_a
+        and mem_scratch_b
         cmp #$FF
         beq _mr16_seg_wrap
 
@@ -283,7 +283,7 @@ _mr16_seg_wrap:
         lda #0
         sta temp32
         sta temp32+1
-        ldx $8F62               ; Restore segment
+        ldx mem_scratch_seg               ; Restore segment
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         ldz #0
@@ -301,10 +301,10 @@ _mr16_seg_wrap:
 mem_write16:
         ; Save original offset for segment wrap detection
         lda temp32
-        sta $8F60
+        sta mem_scratch_a
         lda temp32+1
-        sta $8F61
-        stx $8F62               ; Save segment register offset
+        sta mem_scratch_b
+        stx mem_scratch_seg               ; Save segment register offset
 
         jsr seg_ofs_to_linear
         ; Write-protect F-segment (BIOS ROM)
@@ -321,8 +321,8 @@ mem_write16:
         jsr mark_cache_dirty
 +
         ; Check for segment wrap (offset was $FFFF)
-        lda $8F60
-        and $8F61
+        lda mem_scratch_a
+        and mem_scratch_b
         cmp #$FF
         beq _mw16_seg_wrap
 
@@ -354,7 +354,7 @@ _mw16_seg_wrap:
         lda #0
         sta temp32
         sta temp32+1
-        ldx $8F62               ; Restore segment
+        ldx mem_scratch_seg               ; Restore segment
         jsr seg_ofs_to_linear
         jsr linear_to_chip
         lda op_result+1

@@ -19,12 +19,8 @@
 ; Floppy geometry is now auto-detected — see floppy_a_spt/heads/cyls in disk.asm
 FLOPPY_SECTOR_SZ = 512
 
-; Active drive geometry (set by _i13_select_drive for current INT 13h call)
-i13_cur_spt     = $8FE0
-i13_cur_heads   = $8FE1
-i13_cur_cyls    = $8FE2
-i13_cur_type    = $8FE3
-i13_cur_bank    = $8FE4           ; Attic bank offset ($10=A, $20=B)
+; Active drive geometry — defined in globals.asm
+; (i13_cur_spt, i13_cur_heads, i13_cur_cyls, i13_cur_type, i13_cur_bank)
 
 ; ============================================================================
 ; int13_handler — BIOS INT 13h dispatch
@@ -52,8 +48,8 @@ int13_handler:
         beq _i13_get_type
 
         ; Unsupported function: log and return error
-        sta $8FD2               ; Save the unsupported AH value
-        inc $8FD3               ; Count unsupported calls
+        sta str_ptr_bank               ; Save the unsupported AH value
+        inc i13_unsup_count               ; Count unsupported calls
         lda #$01                ; Invalid function
         sta reg_ah
         lda #1
@@ -326,13 +322,13 @@ _i13_read:
         ; Save sector count
         lda reg_al
         sta disk_sect_left      ; sector count (safe from seg_ofs_to_linear)
-        sta $8F18               ; save original count for return (safe location)
+        sta i13_count_save               ; save original count for return (safe location)
 
         ; Save BX — real BIOS preserves BX, caller advances it
         lda reg_bx
-        sta $8F19
+        sta i13_bx_save_lo
         lda reg_bx+1
-        sta $8F1A
+        sta i13_bx_save_hi
 
         ; Compute LBA from CHS
         ; LBA = (C × heads + H) × SPT + (S - 1)
@@ -550,15 +546,15 @@ _i13_read_bail:
 
 _i13_read_done:
         ; Restore BX — real BIOS preserves BX
-        lda $8F19
+        lda i13_bx_save_lo
         sta reg_bx
-        lda $8F1A
+        lda i13_bx_save_hi
         sta reg_bx+1
         ; Return success
         lda #$00
         sta reg_ah
         jsr _i13_set_status
-        lda $8F18               ; restore original sector count
+        lda i13_count_save               ; restore original sector count
         sta reg_al              ; AL = sectors actually read
         lda #0
         sta flag_cf
@@ -579,11 +575,11 @@ _i13_write:
         ; Save sector count and BX
         lda reg_al
         sta disk_sect_left
-        sta $8F18
+        sta i13_count_save
         lda reg_bx
-        sta $8F19
+        sta i13_bx_save_lo
         lda reg_bx+1
-        sta $8F1A
+        sta i13_bx_save_hi
 
         ; Compute LBA from CHS (same as read)
         lda reg_ch
@@ -792,14 +788,34 @@ _i13_write_bail:
 
 _i13_write_done:
         ; Restore BX
-        lda $8F19
+        lda i13_bx_save_lo
         sta reg_bx
-        lda $8F1A
+        lda i13_bx_save_hi
         sta reg_bx+1
+
+        ; If boot sector was written (CHS 0,0,1), re-detect geometry
+        ; so emulator stays in sync with any BPB changes (e.g., FORMAT)
+        lda reg_ch
+        ora reg_dh
+        bne _i13w_no_redetect   ; Cylinder or head != 0
+        lda reg_cl
+        and #$3F
+        cmp #1
+        bne _i13w_no_redetect   ; Sector != 1
+        ; Boot sector was written — re-detect geometry silently
+        ; (no CHROUT — we're inside the emulator, not the menu)
+        lda #1
+        sta dfg_silent
+        lda reg_dl
+        jsr detect_floppy_geom_drive
+        lda #0
+        sta dfg_silent
+_i13w_no_redetect:
+
         lda #$00
         sta reg_ah
         jsr _i13_set_status
-        lda $8F18
+        lda i13_count_save
         sta reg_al
         lda #0
         sta flag_cf
@@ -846,6 +862,7 @@ _i13sd_b:
         sta i13_cur_type
         lda floppy_b_bank
         sta i13_cur_bank
+
         sec
         rts
 _i13sd_fail:
@@ -921,6 +938,14 @@ _i13_write_dpt:
 load_floppy_drive:
         pha                     ; Save drive number
 
+        ; Pre-fill attic slot with sentinel ($5A) so we can detect actual
+        ; file size after loadfile_attic — unmapped bytes stay $5A.
+        ; $5A is rare in real floppy data; we check 4 bytes at each
+        ; boundary to make false positives vanishingly unlikely.
+        pla
+        pha
+        jsr _lfd_fill_sentinel
+
         ; Set Hyppo filename from floppy_fname_page
         ldy #>floppy_fname_page
         lda #$2E                ; hyppo_setname
@@ -945,13 +970,19 @@ _lfd_load:
 
         bcc _lfd_fail
 
-        ; Success — set loaded flag and detect geometry
+        ; Success — set loaded flag, bank, and detect geometry
         pla                     ; Drive number
         beq _lfd_ok_a
         lda #1
         sta floppy_b_loaded
         lda #0
         sta floppy_b_dirty      ; Fresh image, not dirty
+        lda #$20
+        sta floppy_b_bank       ; Attic bank for drive B
+        ; First, pick size-based default from sentinel scan
+        lda #1
+        jsr _lfd_detect_size
+        ; Then run BPB-based detect — overrides size-based if BPB is valid
         lda #1
         jsr detect_floppy_geom_drive
         sec
@@ -961,14 +992,248 @@ _lfd_ok_a:
         sta floppy_a_loaded
         lda #0
         sta floppy_a_dirty      ; Fresh image, not dirty
+        lda #$10
+        sta floppy_a_bank       ; Attic bank for drive A
+        ; Size-based default first
+        lda #0
+        jsr _lfd_detect_size
+        ; BPB-based detect (overrides if valid)
+        lda #0                  ; Drive A = 0
         jsr detect_floppy_geom_drive
         sec
         rts
 
 _lfd_fail:
-        pla                     ; Discard drive number
+        ; Hyppo load failed — but the attic slot already has sentinel garbage
+        ; from _lfd_fill_sentinel. Clear the loaded flag for this drive so
+        ; INT 13h returns "not ready" instead of trying to read the garbage.
+        pla                     ; Recover drive number
+        bne _lfd_fail_b
+        lda #0
+        sta floppy_a_loaded
         clc
         rts
+_lfd_fail_b:
+        lda #0
+        sta floppy_b_loaded
+        clc
+        rts
+
+; ============================================================================
+; _lfd_fill_sentinel — Fill floppy's attic slot with $5A sentinel byte
+; ============================================================================
+; Input: A = drive (0=A, 1=B)
+; Fills 12 banks (768K) — enough to detect up to 720K images reliably.
+; Images > 720K keep using the 360K default (safe) since they're rare
+; as blank files and usually come pre-formatted.
+;
+_lfd_fill_sentinel:
+        ; Save drive and pick dma_dst_bank base ($10=A, $20=B)
+        beq _lfs_a
+        lda #$20
+        bra _lfs_set_base
+_lfs_a:
+        lda #$10
+_lfs_set_base:
+        sta _lfs_bank_base
+        ; Fill 12 banks of 64K each = 768K
+        lda #0
+        sta _lfs_chunk
+_lfs_loop:
+        lda _lfs_chunk
+        cmp #12
+        bcs _lfs_done
+        ; Set dma target for this chunk
+        clc
+        adc _lfs_bank_base
+        sta dma_dst_bank
+        lda #$00
+        sta dma_dst_lo
+        sta dma_dst_hi
+        sta dma_count_lo
+        sta dma_count_hi        ; count=$0000 → 64K
+        lda #$5A                ; sentinel
+        jsr do_dma_fill_attic
+        inc _lfs_chunk
+        bra _lfs_loop
+_lfs_done:
+        rts
+_lfs_chunk      .byte 0
+_lfs_bank_base  .byte 0
+
+; ============================================================================
+; _lfd_detect_size — Pick geometry based on file size (sentinel check).
+; ============================================================================
+; Input: A = drive (0=A, 1=B)
+; Call AFTER loadfile_attic (sentinel $5A was pre-filled, unloaded bytes
+; remain $5A, loaded bytes are overwritten).
+; Sets floppy_a/b_spt/heads/cyls/type accordingly.
+;
+; Boundary offsets (first byte past each standard image size):
+;   160K = $028000, 180K = $02D000, 320K = $050000,
+;   360K = $05A000, 720K = $0B4000
+; Check 4 bytes at each boundary — if all $5A, image is ≤ that size.
+; Falls back to 1.44MB if no sentinel match in checked range.
+;
+_lfd_detect_size:
+        sta _lfd_det_drive
+        ; _lds_mb_nibble holds the drive's MB offset shifted to high nibble:
+        ;   drive A (attic MB 1) → $10
+        ;   drive B (attic MB 2) → $20
+        beq _lds_a
+        lda #$20
+        bra _lds_mb_done
+_lds_a:
+        lda #$10
+_lds_mb_done:
+        sta _lds_mb_nibble
+
+        ; Check boundaries: A=addr_lo, X=addr_hi, Y=bank_within_drive
+        ; 160K boundary: bank $02, addr $8000
+        lda #$00
+        ldx #$80
+        ldy #$02
+        jsr _lds_check4
+        bcs _lds_160
+        ; 180K boundary: bank $02, addr $D000
+        lda #$00
+        ldx #$D0
+        ldy #$02
+        jsr _lds_check4
+        bcs _lds_180
+        ; 320K boundary: bank $05, addr $0000
+        lda #$00
+        ldx #$00
+        ldy #$05
+        jsr _lds_check4
+        bcs _lds_320
+        ; 360K boundary: bank $05, addr $A000
+        lda #$00
+        ldx #$A0
+        ldy #$05
+        jsr _lds_check4
+        bcs _lds_360
+        ; 720K boundary: bank $0B, addr $4000
+        lda #$00
+        ldx #$40
+        ldy #$0B
+        jsr _lds_check4
+        bcs _lds_720
+        ; Default: treat as 1.44MB
+        bra _lds_144
+
+; Store SPT, heads, cyls, type to floppy_a_* or floppy_b_* based on drive.
+; Input: X=SPT, Y=heads, A=cyls, stashed type via _lds_geom_type.
+; Uses _lfd_det_drive to pick A or B.
+_lds_store:
+        pha                     ; save cyls
+        lda _lfd_det_drive
+        bne _lds_storeb
+        ; Drive A
+        stx floppy_a_spt
+        sty floppy_a_heads
+        pla
+        sta floppy_a_cyls
+        lda _lds_geom_type
+        sta floppy_a_type
+        rts
+_lds_storeb:
+        stx floppy_b_spt
+        sty floppy_b_heads
+        pla
+        sta floppy_b_cyls
+        lda _lds_geom_type
+        sta floppy_b_type
+        rts
+
+_lds_160:
+        ldx #8
+        ldy #1
+        lda #$01
+        sta _lds_geom_type
+        lda #40
+        jmp _lds_store
+_lds_180:
+        ldx #9
+        ldy #1
+        lda #$01
+        sta _lds_geom_type
+        lda #40
+        jmp _lds_store
+_lds_320:
+        ldx #8
+        ldy #2
+        lda #$01
+        sta _lds_geom_type
+        lda #40
+        jmp _lds_store
+_lds_360:
+        ldx #9
+        ldy #2
+        lda #$01
+        sta _lds_geom_type
+        lda #40
+        jmp _lds_store
+_lds_720:
+        ldx #9
+        ldy #2
+        lda #$03
+        sta _lds_geom_type
+        lda #80
+        jmp _lds_store
+_lds_144:
+        ldx #18
+        ldy #2
+        lda #$04
+        sta _lds_geom_type
+        lda #80
+        jmp _lds_store
+
+_lds_geom_type  .byte 0
+
+; _lds_check4 — Read 4 bytes at attic (drive_base + bank:addr) and check $5A
+; Input: A = addr_lo, X = addr_hi, Y = bank_within_drive
+; Output: CS if all 4 bytes == $5A (sentinel intact), CC otherwise
+;
+; Builds a 32-bit flat pointer for 45GS02 [ptr],z addressing:
+;   byte 0 = addr_lo (A)
+;   byte 1 = addr_hi (X)
+;   byte 2 = (drive_MB_nibble << 4) | bank_within_drive
+;           where drive_MB_nibble = 1 for A ($81), 2 for B ($82)
+;   byte 3 = $08 (attic region)
+_lds_check4:
+        sta temp_ptr
+        stx temp_ptr+1
+        ; byte 2: combine drive MB nibble (high) with bank (low)
+        tya
+        ora _lds_mb_nibble      ; $10 or $20 or'd with bank
+        sta temp_ptr+2
+        lda #$08                ; attic marker in byte 3
+        sta temp_ptr+3
+        ldz #0
+        lda [temp_ptr],z
+        cmp #$5A
+        bne _lds_not
+        ldz #1
+        lda [temp_ptr],z
+        cmp #$5A
+        bne _lds_not
+        ldz #2
+        lda [temp_ptr],z
+        cmp #$5A
+        bne _lds_not
+        ldz #3
+        lda [temp_ptr],z
+        cmp #$5A
+        bne _lds_not
+        sec
+        rts
+_lds_not:
+        clc
+        rts
+
+_lfd_det_drive  .byte 0
+_lds_mb_nibble  .byte 0
 
 ; ============================================================================
 ; save_floppy_drive — Save floppy image from attic back to SD card
@@ -1005,7 +1270,7 @@ _sfd_not_found:
         ; Step 4: Create new file and write data via FAT32 writer (bank 1)
         pla                     ; Recover drive number
         pha
-        sta $8F25               ; Pass drive number via scratch
+        sta fat_save_drive      ; Pass drive number via scratch
         jsr call_fat_save_floppy
         bcc _sfd_fail
 
@@ -1036,19 +1301,14 @@ _sfd_end:
 ; Must be called after load_floppy_drive and before init_guest_mem.
 ;
 dfg_drive       .byte 0         ; 0=A, 1=B
+dfg_silent      .byte 0         ; Non-zero = skip CHROUT prints (called from INT 13h)
 
 detect_floppy_geom_drive:
         sta dfg_drive
-
-        ; Set defaults (1.44MB) in case detection fails
-        lda #18
-        jsr _dfg_store_spt
-        lda #2
-        jsr _dfg_store_heads
-        lda #80
-        jsr _dfg_store_cyls
-        lda #$04
-        jsr _dfg_store_type
+        ; NOTE: Defaults are now set by _lfd_detect_size (called by
+        ; load_floppy_drive) based on file size. This function only
+        ; overrides when a valid BPB is found on disk. If BPB is
+        ; invalid, the size-based defaults are preserved.
 
         ; Skip if no floppy loaded
         lda dfg_drive
@@ -1279,6 +1539,10 @@ _dfg_print:
         ldz #4                  ; Byte 4 = sectors per track
         sta [temp_ptr],z
 
+        ; Skip CHROUT output if called silently (from INT 13h context)
+        lda dfg_silent
+        bne _dfg_done
+
         ; Print detected format
         ldx #0
 -       lda _dfg_msg,x
@@ -1471,36 +1735,8 @@ _dfg_12m:
 _dfg_144:
         .text "1.44MB", 0
 
-; Floppy geometry (detected from BPB at boot) — in non-ZP RAM
-; to avoid KERNAL IRQ corruption during init CHROUT calls
-floppy_a_spt:
-        .byte 0
-floppy_a_heads:
-        .byte 0
-floppy_a_cyls:
-        .byte 0
-floppy_a_type:
-        .byte 0
-floppy_a_loaded:
-        .byte 0
-floppy_a_dirty:
-        .byte 0                 ; Set to 1 when INT 13h AH=03 writes to drive A
-floppy_b_spt:
-        .byte 0
-floppy_b_heads:
-        .byte 0
-floppy_b_cyls:
-        .byte 0
-floppy_b_type:
-        .byte 0
-floppy_b_loaded:
-        .byte 0
-floppy_b_dirty:
-        .byte 0                 ; Set to 1 when INT 13h AH=03 writes to drive B
-floppy_a_bank:
-        .byte $10               ; Attic bank for drive A (default $10)
-floppy_b_bank:
-        .byte $20               ; Attic bank for drive B (default $20)
+; Floppy geometry — defined in globals.asm at $8F30-$8F3D
+; (floppy_a_spt..floppy_b_bank)
 
 ; Page-aligned filename for Hyppo setname
 ; Must be at a $xx00 address, null-terminated

@@ -1,6 +1,77 @@
 MEGA8086 Emulator — Status
 ===========================
-Last updated: 2026-04-18
+Last updated: 2026-04-20
+
+RECENT CHANGES (2026-04-20)
+============================
+
+B: drive program execution now works reliably end-to-end.
+Root cause turned out to be multiple bugs compounding each other:
+
+1. load_drive_bpb was using dir_buffer as its scratch buffer for the
+   boot-sector read. Cross-drive COPY stages file data in dir_buffer
+   between read_cluster_data and write_cluster_data, so ensure_geo
+   (triggered by the drive switch) silently overwrote the file data
+   with the destination BPB, and we then wrote that BPB as the
+   "file content." Fixed by giving load_drive_bpb its own bpb_buffer
+   (512 bytes, separate from dir_buffer).
+
+2. Floppy geometry state (floppy_a/b_spt/heads/cyls/bank/loaded) had
+   been placed in a gap region of the PRG binary, so the .byte
+   initializers were never emitted. floppy_a/b_bank stayed 0 at
+   runtime, so every INT 13h DMA read from drive B went to attic
+   $8000000 (guest RAM) instead of $8200000 (drive B image).
+   Fixed by moving floppy state to $8F30-$8F3D and setting bank
+   explicitly in load_floppy_drive.
+
+3. Emulator floppy geometry at $8F26/$8F27 collided with the screen-
+   clear row counters in do_clear_window/_scr. Any screen scroll
+   silently clobbered floppy_b_spt/heads. Fixed by moving floppy
+   state to $8F30-$8F3D.
+
+4. Cross-drive COPY walked the source FAT chain using fat_buffer,
+   but fat_buffer held the destination drive's FAT at that point.
+   Fixed by swapping FAT buffers around fat12_next_cluster calls
+   in the COPY loop.
+
+5. detect_floppy_geom_drive defaulted to 1.44MB when the BPB was
+   invalid (blank image). If the user mounted a 360K blank.img and
+   ran FORMAT, FORMAT asked INT 13h AH=08 for geometry, got 1.44MB
+   defaults, and formatted as 1.44MB — overflowing the 360K file.
+   Fixed by pre-filling the attic slot with a $5A sentinel byte
+   before loadfile_attic, then checking boundary bytes at each
+   standard-size offset (160K/180K/320K/360K/720K) to determine
+   the actual file size. Blank images of any size now format
+   correctly, and mounted pre-formatted disks work as before.
+
+6. Hardcoded cluster-allocation cap of 720 in six free-cluster
+   search loops meant 720K/1.2MB/1.44MB media hit premature "disk
+   full" during COPY/CREATE. Replaced with dynamic geo_max_clust
+   so all supported disk sizes allocate their full capacity.
+
+Additional fixes from the same session:
+- INT 20h and INT 21h AH=4Ch now share common termination cleanup
+  (term_common), so plain INT 20h / RET-to-PSP:0 exits also free
+  memory and close handles.
+- Vector save/restore re-enabled in int20_handler for shell-launched
+  programs; previously skipped as a workaround.
+- exec_drive saved separately from resolved_drive so PSP-setup
+  INT 21h re-entry can't break the load path.
+- Byte-safe pop of resolved_drive in read_cur_dir/write_cur_dir
+  (was pushing/popping as word, overwriting batch_active).
+- Drive-switch commands (A:/B:, CD cross-drive, AH=0Eh) now
+  invalidate geo_active_drv so the next disk access re-reads
+  the BPB of the new drive.
+- _lfd_fail now clears the drive's loaded flag, so a failed
+  remount doesn't leave sentinel garbage visible as "a disk."
+
+Large refactor: consolidated every shared emulator address into
+src/globals.asm (was src/zeropage.asm). Every $8Exx/$8Fxx scratch
+variable now has a named constant in globals.asm, and every
+source file references the name instead of a raw hex literal.
+fat_writer.asm (built separately) also .includes globals.asm so
+addresses never drift. This is what made the $8F26 collision
+visible in the first place.
 
 WORKING DOS VERSIONS
 =====================
@@ -468,9 +539,11 @@ KNOWN BUGS
   resolve_path or cmd_buffer interaction with child segment context.
   Workaround: use AH=13h (FCB delete) from programs.
 
-- GWBASIC.EXE won't run on MegaDOS. Clears screen then exits.
-  Suspected emulator-side issue with video mode change or
-  cache/execution state corruption. Works on real MS-DOS images.
+- GWBASIC.EXE won't run on MegaDOS. Gets past re-entry check (050F
+  cleared), video init works (screen clears), crashes before startup
+  banner. Does not exit through AH=4Ch or INT 20h. Not a full reboot
+  (start_init not re-entered). PSP parent field and DTA fixes applied.
+  Root cause still unknown. Works on real MS-DOS images.
 
 - Emulator data cache can corrupt tail end of loaded program memory.
   Workaround: place critical strings earlier in program data section.

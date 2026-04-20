@@ -53,47 +53,11 @@ fw_filename     .fill 64, 0    ; Null-terminated filename (8.3 or long)
 ; Uses SECTOR_BUF ($9800) as temp workspace.
 ; ============================================================================
 
-; --- External constants (must match main emulator binary) ---
-SECTOR_BUF      = $9800
-temp_ptr        = $74
-
-; ============================================================================
-; FAT32 state variables (stored in $8Exx area — unused by emulator)
-; ============================================================================
-fat_partition_start = $8E00     ; 4 bytes: SD sector of FAT32 partition
-fat_sectors_per_cluster = $8E04 ; 1 byte
-fat_reserved_sectors = $8E05    ; 2 bytes
-fat_sectors_per_fat = $8E07     ; 4 bytes
-fat_first_cluster = $8E0B       ; 4 bytes: root dir cluster number
-fat_fat1_sector = $8E0F         ; 4 bytes: absolute SD sector of FAT1
-fat_fat2_sector = $8E13         ; 4 bytes: absolute SD sector of FAT2
-fat_data_sector = $8E17         ; 4 bytes: absolute SD sector of first data cluster
-fat_dir_sector = $8E1B          ; 4 bytes: SD sector containing our dir entry
-fat_dir_offset = $8E1F          ; 2 bytes: offset within dir sector (0-511)
-fat_file_cluster = $8E21        ; 4 bytes: first cluster of file being written
-fat_cur_cluster = $8E25         ; 4 bytes: current cluster being written
-fat_sector_in_cluster = $8E29   ; 1 byte: sector index within current cluster
-fat_file_size = $8E2A           ; 4 bytes: total file size in bytes
-fat_remaining = $8E2E           ; 4 bytes: remaining bytes to write
-fat_attic_bank = $8E32          ; 1 byte: attic source bank ($10=A, $20=B)
-fat_attic_lo = $8E33            ; 2 bytes: current attic source offset
-fat_attic_hi = $8E34
-
-; Temp for 32-bit math
-fat_tmp0 = $8E40                ; 4 bytes
-fat_tmp1 = $8E44                ; 4 bytes
-
-; Scratch for FAT sector manipulation
-fat_fat_offset = $8E50          ; 2 bytes: offset within FAT sector (0-508)
-fat_fat_sec_idx = $8E52         ; 4 bytes: FAT sector index (32-bit for large volumes)
-fat_fat1_abs = $8E56            ; 4 bytes: absolute FAT1 sector for write-back
-fat_cluster_base = $8E5A        ; 4 bytes: base sector of current dir cluster
-fat_name_count = $8E60          ; 1 byte: name char count
-fat_ext_flag = $8E61            ; 1 byte: extension parsing flag
-fat_ext_count = $8E62           ; 1 byte: extension char count
-fat_direntry_created = $8E63    ; 1 byte: set to 1 after dir entry written
-fat_max_cluster = $8E64         ; 4 bytes: highest valid cluster number
-fat_chain_allocated = $8E68     ; 1 byte: set to 1 after first cluster allocated
+; --- All shared addresses defined in globals.asm ---
+; fat_writer.asm is assembled SEPARATELY (see build.bat) but pulls in the
+; same global definitions to guarantee addresses never drift from the
+; main emulator binary.
+        .include "globals.asm"
 
 ; ============================================================================
 ; sd_wait_ready — Wait for SD card to be ready
@@ -843,27 +807,27 @@ _ffed_next_cluster:
         sta fat_tmp0+3
         jsr fat_cluster_to_sector
         lda fat_tmp0
-        sta $8E58
+        sta fat_dir_save_a
         lda fat_tmp0+1
-        sta $8E59
+        sta fat_dir_save_a+1
         lda fat_tmp0+2
-        sta $8E5A
+        sta fat_cluster_base
         lda fat_tmp0+3
-        sta $8E5B
+        sta fat_cluster_base+1
         lda #0
         sta fat_sector_in_cluster
 _ffed_next_sector:
         clc
-        lda $8E58
+        lda fat_dir_save_a
         adc fat_sector_in_cluster
         sta fat_tmp0
-        lda $8E59
+        lda fat_dir_save_a+1
         adc #0
         sta fat_tmp0+1
-        lda $8E5A
+        lda fat_cluster_base
         adc #0
         sta fat_tmp0+2
-        lda $8E5B
+        lda fat_cluster_base+1
         adc #0
         sta fat_tmp0+3
         lda fat_tmp0
@@ -1199,26 +1163,26 @@ fat_save_floppy:
         sta $D680
         jsr sd_wait_ready
 
-        ; Bank passed from caller via $8F26
-        lda $8F26
+        ; Bank passed from caller via fat_save_bank ($8F28)
+        lda fat_save_bank
         sta fat_attic_bank
 _fsf_copy_geom:
         lda fw_cylinders
-        sta $8E60
+        sta fat_name_count
         lda fw_heads
-        sta $8E61
+        sta fat_ext_flag
         lda fw_spt
-        sta $8E62
+        sta fat_ext_count
 
 _fsf_setup:
         lda #0
         sta fat_attic_lo
         sta fat_attic_hi
-        lda $8E60
+        lda fat_name_count
         sta $D770
         lda #0
         sta $D771
-        lda $8E61
+        lda fat_ext_flag
         sta $D774
         lda #0
         sta $D775
@@ -1226,7 +1190,7 @@ _fsf_setup:
         sta $D770
         lda $D779
         sta $D771
-        lda $8E62
+        lda fat_ext_count
         sta $D774
         lda #0
         sta $D775
@@ -1401,7 +1365,7 @@ _fsf_write_done:
         jsr fat_update_direntry_size
         bcc _fsf_fail
         lda #1
-        sta $8F25               ; Signal success via scratch (JSRFAR loses carry)
+        sta fat_save_drive      ; Signal success via scratch (JSRFAR loses carry)
         rts
 
 _fsf_fail_pop4:
@@ -1419,7 +1383,7 @@ _fsf_no_chain:
         jsr fat_delete_direntry
 _fsf_fail_done:
         lda #0
-        sta $8F25               ; Signal failure via scratch (JSRFAR loses carry)
+        sta fat_save_drive      ; Signal failure via scratch (JSRFAR loses carry)
         rts
 
 ; ============================================================================

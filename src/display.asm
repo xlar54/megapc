@@ -49,16 +49,16 @@ refresh_cga:
 
         ; Color RAM dest: $1F800
         lda #$00
-        sta $8FD6               ; color_ptr low
+        sta disp_color_lo               ; color_ptr low
         lda #$F8
-        sta $8FD7               ; color_ptr high
+        sta disp_color_hi               ; color_ptr high
         ; (bank 1 $1F800 = temp_ptr2+2 will be set per-write)
 
         ; 80×25 = 2000 characters
         lda #<2000
-        sta $8FD4               ; Counter low
+        sta disp_count_lo               ; Counter low
         lda #>2000
-        sta $8FD5               ; Counter high
+        sta disp_count_hi               ; Counter high
 
 _rc_loop:
         ; Read ASCII char from CGA buffer
@@ -127,9 +127,9 @@ _rc_write_color:
         sta scratch_a           ; Save screen low
         lda temp_ptr2+1
         sta scratch_b           ; Save screen high
-        lda $8FD6
+        lda disp_color_lo
         sta temp_ptr2
-        lda $8FD7
+        lda disp_color_hi
         sta temp_ptr2+1
         lda #$01
         sta temp_ptr2+2
@@ -148,9 +148,9 @@ _rc_write_color:
         sta temp_ptr2+3
 
         ; Advance color RAM pointer by 1
-        inc $8FD6
+        inc disp_color_lo
         bne +
-        inc $8FD7
+        inc disp_color_hi
 +
 
         ; Advance CGA pointer by 2 (char + attr pair)
@@ -167,12 +167,12 @@ _rc_write_color:
         inc temp_ptr2+1
 +
         ; Decrement counter
-        lda $8FD4
+        lda disp_count_lo
         bne +
-        dec $8FD5
-+       dec $8FD4
-        lda $8FD4
-        ora $8FD5
+        dec disp_count_hi
++       dec disp_count_lo
+        lda disp_count_lo
+        ora disp_count_hi
         bne _rc_loop
         rts
 

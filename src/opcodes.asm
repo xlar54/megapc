@@ -977,7 +977,7 @@ _cse_cli:
 _cse_sti:
         lda #1
         sta flag_if
-        sta $8F1B               ; Inhibit IRQ for one instruction (STI shadow)
+        sta irq_inhibit               ; Inhibit IRQ for one instruction (STI shadow)
         jmp opcode_done
 _cse_cld:
         lda #0
@@ -1409,7 +1409,7 @@ _msreg_to_sreg:
         bne +
         lda #1
         sta ss_dirty
-        sta $8F1B               ; Inhibit IRQ for one instruction (MOV SS shadow)
+        sta irq_inhibit               ; Inhibit IRQ for one instruction (MOV SS shadow)
         jmp opcode_done
 +       cpx #SEG_DS_OFS
         bne +
@@ -1504,7 +1504,7 @@ _sr_cl_count:
 _sr_go:
         lda scratch_c
         beq _sr_done_jmp       ; Count=0: no operation
-        sta $8F1D               ; Save original count for OF computation
+        sta shift_orig_count               ; Save original count for OF computation
 
         ; Read operand
         lda i_w
@@ -1514,12 +1514,12 @@ _sr_go:
         sta op_dest
         lda op_source+1
         sta op_dest+1
-        sta $8F1C               ; Save original MSB (for SHR OF)
+        sta shift_orig_msb               ; Save original MSB (for SHR OF)
         bra _sr_loop
 _sr_byte:
         jsr read_rm8
         sta op_dest
-        sta $8F1C               ; Save original value (for SHR OF)
+        sta shift_orig_msb               ; Save original value (for SHR OF)
         lda #0
         sta op_dest+1
 
@@ -1749,7 +1749,7 @@ _sr_shift_flags:
 
 _sr_compute_of:
         ; OF is only defined for count=1 (undefined for count>1)
-        lda $8F1D               ; Original count
+        lda shift_orig_count               ; Original count
         cmp #1
         bne _sr_of_done         ; Count != 1: leave OF unchanged
         lda i_reg
@@ -1786,7 +1786,7 @@ _sr_of_mxc_go:
 
 _sr_of_shr:
         ; SHR: OF = MSB of original operand
-        lda $8F1C               ; Saved original MSB
+        lda shift_orig_msb               ; Saved original MSB
         and #$80
         beq +
         lda #1
@@ -2527,7 +2527,7 @@ op_pop_seg:
         bne +
         lda #1
         sta ss_dirty
-        sta $8F1B               ; Inhibit IRQ for one instruction (POP SS shadow)
+        sta irq_inhibit               ; Inhibit IRQ for one instruction (POP SS shadow)
         jmp opcode_done
 +       cpx #SEG_DS_OFS
         bne +
@@ -2791,7 +2791,7 @@ op_int_imm:
         ; Count INT 0 (divide overflow)
         cmp #$00
         bne _ii_not0_count
-        inc $8F14
+        inc div_by_zero_count
 _ii_not0_count:
         ; Check for emulator hooks
         cmp #$13
@@ -2870,17 +2870,17 @@ _ii_int21_ah09:
         ldx #SEG_DS_OFS
         jsr seg_ofs_to_linear
         lda temp32
-        sta $8FD0
+        sta str_ptr_lo
         lda temp32+1
-        sta $8FD1
+        sta str_ptr_hi
         lda temp32+2
-        sta $8FD2
+        sta str_ptr_bank
 _i21_09_loop:
-        lda $8FD0
+        lda str_ptr_lo
         sta temp32
-        lda $8FD1
+        lda str_ptr_hi
         sta temp32+1
-        lda $8FD2
+        lda str_ptr_bank
         sta temp32+2
         lda #0
         sta temp32+3
@@ -2890,11 +2890,11 @@ _i21_09_loop:
         cmp #'$'
         beq _i21_09_done
         jsr con_write_char
-        inc $8FD0
+        inc str_ptr_lo
         bne _i21_09_loop
-        inc $8FD1
+        inc str_ptr_hi
         bne _i21_09_loop
-        inc $8FD2
+        inc str_ptr_bank
         bra _i21_09_loop
 _i21_09_done:
         jmp opcode_done
@@ -3012,22 +3012,22 @@ _i1a_get_ticks:
         ldz #0
         lda [temp_ptr],z        ; BCD seconds
         jsr i1a_bcd2bin
-        sta $8FA0
+        sta rtc_seconds
 
         ldz #1
         lda [temp_ptr],z        ; BCD minutes
         jsr i1a_bcd2bin
-        sta $8FA1
+        sta rtc_minutes
 
         ldz #2
         lda [temp_ptr],z        ; BCD hours
         and #$3F
         jsr i1a_bcd2bin
-        sta $8FA2
+        sta rtc_hours
 
         ; Compute ticks = hours*65520 + minutes*1092 + seconds*18
         ; Hours * 65520 ($FFF0)
-        lda $8FA2
+        lda rtc_hours
         sta $D770
         lda #0
         sta $D771
@@ -3036,16 +3036,16 @@ _i1a_get_ticks:
         lda #$FF
         sta $D775
         lda $D778
-        sta $8FA8
+        sta rtc_scratch
         lda $D779
-        sta $8FA9
+        sta rtc_scratch+1
         lda $D77A
-        sta $8FAA
+        sta rtc_scratch+2
         lda #0
-        sta $8FAB
+        sta rtc_scratch+3
 
         ; Minutes * 1092 ($0444)
-        lda $8FA1
+        lda rtc_minutes
         sta $D770
         lda #0
         sta $D771
@@ -3054,21 +3054,21 @@ _i1a_get_ticks:
         lda #$04
         sta $D775
         clc
-        lda $8FA8
+        lda rtc_scratch
         adc $D778
-        sta $8FA8
-        lda $8FA9
+        sta rtc_scratch
+        lda rtc_scratch+1
         adc $D779
-        sta $8FA9
-        lda $8FAA
+        sta rtc_scratch+1
+        lda rtc_scratch+2
         adc $D77A
-        sta $8FAA
-        lda $8FAB
+        sta rtc_scratch+2
+        lda rtc_scratch+3
         adc #0
-        sta $8FAB
+        sta rtc_scratch+3
 
         ; Seconds * 18 ($12)
-        lda $8FA0
+        lda rtc_seconds
         sta $D770
         lda #0
         sta $D771
@@ -3077,24 +3077,24 @@ _i1a_get_ticks:
         lda #$00
         sta $D775
         clc
-        lda $8FA8
+        lda rtc_scratch
         adc $D778
-        sta $8FA8
-        lda $8FA9
+        sta rtc_scratch
+        lda rtc_scratch+1
         adc $D779
-        sta $8FA9
-        lda $8FAA
+        sta rtc_scratch+1
+        lda rtc_scratch+2
         adc $D77A
-        sta $8FAA
+        sta rtc_scratch+2
 
         ; Return CX:DX = tick count (CX=high, DX=low)
-        lda $8FA8
+        lda rtc_scratch
         sta reg_dx
-        lda $8FA9
+        lda rtc_scratch+1
         sta reg_dx+1
-        lda $8FAA
+        lda rtc_scratch+2
         sta reg_cx
-        lda $8FAB
+        lda rtc_scratch+3
         sta reg_cx+1
 
         ; AL = midnight flag (0 = no midnight rollover)
@@ -3110,16 +3110,16 @@ _i1a_get_ticks:
         sta temp_ptr+2
         lda #$00
         sta temp_ptr+3
-        lda $8FA8
+        lda rtc_scratch
         ldz #0
         sta [temp_ptr],z
-        lda $8FA9
+        lda rtc_scratch+1
         ldz #1
         sta [temp_ptr],z
-        lda $8FAA
+        lda rtc_scratch+2
         ldz #2
         sta [temp_ptr],z
-        lda $8FAB
+        lda rtc_scratch+3
         ldz #3
         sta [temp_ptr],z
 
@@ -3335,38 +3335,38 @@ _emu_sp_rtc:
         ldz #0
         lda [temp_ptr],z
         jsr _bcd_to_bin
-        sta $8FA0               ; seconds
+        sta rtc_seconds               ; seconds
 
         ldz #1
         lda [temp_ptr],z
         jsr _bcd_to_bin
-        sta $8FA1               ; minutes
+        sta rtc_minutes               ; minutes
 
         ldz #2
         lda [temp_ptr],z
         and #$3F                ; Mask to BCD hour (24-hour mode)
         jsr _bcd_to_bin
-        sta $8FA2               ; hours
+        sta rtc_hours               ; hours
 
         ldz #3
         lda [temp_ptr],z
         jsr _bcd_to_bin
-        sta $8FA3               ; day
+        sta rtc_day               ; day
 
         ldz #4
         lda [temp_ptr],z
         jsr _bcd_to_bin
-        sta $8FA4               ; month
+        sta rtc_month               ; month
 
         ldz #5
         lda [temp_ptr],z
         jsr _bcd_to_bin
-        sta $8FA5               ; year
+        sta rtc_year               ; year
 
         ldz #6
         lda [temp_ptr],z
         and #$07
-        sta $8FA6               ; weekday
+        sta rtc_weekday               ; weekday
 
         ; Write to guest memory using mem_write8 (handles all addressing)
         ; Each field is a 16-bit word at 4-byte intervals
@@ -3374,41 +3374,41 @@ _emu_sp_rtc:
         ; Base address = ES:BX, stored fresh each time
 
         ; Seconds at +0
-        lda $8FA0
+        lda rtc_seconds
         ldx #0
         jsr _rtc_write_field
 
         ; Minutes at +4
-        lda $8FA1
+        lda rtc_minutes
         ldx #4
         jsr _rtc_write_field
 
         ; Hours at +8
-        lda $8FA2
+        lda rtc_hours
         ldx #8
         jsr _rtc_write_field
 
         ; Day at +12
-        lda $8FA3
+        lda rtc_day
         ldx #12
         jsr _rtc_write_field
 
         ; Month at +16 (BIOS expects 0-based: 0=Jan)
-        lda $8FA4
+        lda rtc_month
         sec
         sbc #1                  ; Convert 1-based RTC to 0-based
         ldx #16
         jsr _rtc_write_field
 
         ; Year at +20 (RTC gives 2-digit year, add 100 for 2000+)
-        lda $8FA5
+        lda rtc_year
         clc
         adc #100                ; 26 → 126 (offset from 1900)
         ldx #20
         jsr _rtc_write_field
 
         ; Weekday at +24
-        lda $8FA6
+        lda rtc_weekday
         ldx #24
         jsr _rtc_write_field
 
@@ -3433,7 +3433,7 @@ _emu_sp_rtc_done:
 ; Helper: write 16-bit word (A=low byte, high=0) at ES:(BX+X)
 ; Bypasses ROM write protection (needed for BIOS timetable in F000 seg)
 _rtc_write_field:
-        sta $8FA8               ; Save value
+        sta rtc_scratch               ; Save value
         ; Compute linear address: ES*16 + BX + X
         txa
         clc
@@ -3450,7 +3450,7 @@ _rtc_write_field:
         jsr seg_ofs_to_linear
         ; Write 4 bytes: value, 0, 0, 0 (BIOS uses dword-aligned fields)
         jsr linear_to_chip
-        lda $8FA8
+        lda rtc_scratch
         ldz #0
         sta [temp_ptr],z
         lda #0
@@ -3580,12 +3580,12 @@ _emu_sp_scrollup:
 _emu_sp_scrollup_fast:
         lda reg_al
         beq _emu_sp_scrollup_clear
-        sta $8FD8
+        sta io_line_count
 _emu_sp_scrollup_loop:
         lda #SCR_ROWS
         sta scr_row
         jsr do_scr_scroll
-        dec $8FD8
+        dec io_line_count
         bne _emu_sp_scrollup_loop
         jmp opcode_done
 _emu_sp_scrollup_clear:
@@ -4091,13 +4091,13 @@ _gf_imul:
         jsr read_rm16
         ; Detect signs
         lda #0
-        sta $8F72               ; Sign flag: 0=positive, 1=negative result
+        sta imul_idiv_sign1               ; Sign flag: 0=positive, 1=negative result
         lda reg_ax+1
         bpl _gfim_w_src
         ; Negate AX
         lda #1
-        eor $8F72
-        sta $8F72
+        eor imul_idiv_sign1
+        sta imul_idiv_sign1
         sec
         lda #0
         sbc reg_ax
@@ -4110,8 +4110,8 @@ _gfim_w_src:
         bpl _gfim_w_do
         ; Negate source
         lda #1
-        eor $8F72
-        sta $8F72
+        eor imul_idiv_sign1
+        sta imul_idiv_sign1
         sec
         lda #0
         sbc op_source
@@ -4138,7 +4138,7 @@ _gfim_w_do:
         lda $D77B
         sta reg_dx+1
         ; Apply sign to DX:AX if needed
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfim_w_flags
         ; Negate DX:AX
         sec
@@ -4185,11 +4185,11 @@ _gfim_byte:
         jsr read_rm8
         sta op_source
         lda #0
-        sta $8F72
+        sta imul_idiv_sign1
         lda reg_al
         bpl _gfim_b_src
         lda #1
-        sta $8F72
+        sta imul_idiv_sign1
         ; Negate AL
         sec
         lda #0
@@ -4199,8 +4199,8 @@ _gfim_b_src:
         lda op_source
         bpl _gfim_b_do
         lda #1
-        eor $8F72
-        sta $8F72
+        eor imul_idiv_sign1
+        sta imul_idiv_sign1
         sec
         lda #0
         sbc op_source
@@ -4220,7 +4220,7 @@ _gfim_b_do:
         lda $D779
         sta reg_ah
         ; Apply sign
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfim_b_flags
         sec
         lda #0
@@ -4310,7 +4310,7 @@ _gfd_byte:
         sta reg_ah              ; Remainder
         jmp opcode_done
 _gfd_div0:
-        inc $8F14               ; Count divide-by-zero errors
+        inc div_by_zero_count               ; Count divide-by-zero errors
         lda #0
         jsr do_sw_interrupt     ; INT 0
         jsr compute_cs_base
@@ -4331,16 +4331,16 @@ _gf_idiv:
         beq _gfd_div0           ; Divide by zero
 
         lda #0
-        sta $8F72               ; Quotient sign
-        sta $8F73               ; Remainder sign (= dividend sign)
+        sta imul_idiv_sign1               ; Quotient sign
+        sta imul_idiv_sign2               ; Remainder sign (= dividend sign)
 
         ; Check dividend sign (DX:AX)
         lda reg_dx+1
         bpl _gfid_w_divsrc
         ; Negate DX:AX
         lda #1
-        sta $8F72
-        sta $8F73
+        sta imul_idiv_sign1
+        sta imul_idiv_sign2
         sec
         lda #0
         sbc reg_ax
@@ -4361,8 +4361,8 @@ _gfid_w_divsrc:
         bpl _gfid_w_do
         ; Negate divisor
         lda #1
-        eor $8F72
-        sta $8F72               ; Flip quotient sign
+        eor imul_idiv_sign1
+        sta imul_idiv_sign1               ; Flip quotient sign
         sec
         lda #0
         sbc op_source
@@ -4391,7 +4391,7 @@ _gfid_w_do:
         lda div_quotient+2
         ora div_quotient+3
         bne _gfd_div0           ; Absolute quotient > 16 bits
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfid_w_posq
         ; Negative quotient: max absolute value is 32768 ($8000)
         lda div_quotient+1
@@ -4414,7 +4414,7 @@ _gfid_w_apply:
         sta reg_ax
         lda div_quotient+1
         sta reg_ax+1
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfid_w_rem
         ; Negate quotient
         sec
@@ -4431,7 +4431,7 @@ _gfid_w_rem:
         sta reg_dx
         lda div_remainder+1
         sta reg_dx+1
-        lda $8F73
+        lda imul_idiv_sign2
         beq _gfid_w_done
         sec
         lda #0
@@ -4450,15 +4450,15 @@ _gfid_byte:
         sta op_source
 
         lda #0
-        sta $8F72               ; Quotient sign
-        sta $8F73               ; Remainder sign
+        sta imul_idiv_sign1               ; Quotient sign
+        sta imul_idiv_sign2               ; Remainder sign
 
         ; Check dividend sign (AX)
         lda reg_ah
         bpl _gfid_b_divsrc
         lda #1
-        sta $8F72
-        sta $8F73
+        sta imul_idiv_sign1
+        sta imul_idiv_sign2
         ; Negate AX
         sec
         lda #0
@@ -4472,8 +4472,8 @@ _gfid_b_divsrc:
         lda op_source
         bpl _gfid_b_do
         lda #1
-        eor $8F72
-        sta $8F72
+        eor imul_idiv_sign1
+        sta imul_idiv_sign1
         sec
         lda #0
         sbc op_source
@@ -4496,7 +4496,7 @@ _gfid_b_do:
         ; Signed overflow: quotient must fit -128..127
         lda div_quotient+1
         bne _gfd_div0           ; > 8 bits
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfid_b_posq
         ; Negative: max absolute is 128 ($80)
         lda div_quotient
@@ -4511,7 +4511,7 @@ _gfid_b_posq:
 _gfid_b_apply:
         lda div_quotient
         sta reg_al
-        lda $8F72
+        lda imul_idiv_sign1
         beq _gfid_b_rem
         sec
         lda #0
@@ -4520,7 +4520,7 @@ _gfid_b_apply:
 _gfid_b_rem:
         lda div_remainder
         sta reg_ah
-        lda $8F73
+        lda imul_idiv_sign2
         beq _gfid_b_done
         sec
         lda #0
@@ -4587,7 +4587,7 @@ div_32by16:
         sta div_quotient+3
         sta div_remainder
         sta div_remainder+1
-        sta $8F0E               ; 17th bit of remainder (overflow byte)
+        sta ovrflw_byte_17               ; 17th bit of remainder (overflow byte)
 
         ldx #32
 _d16_loop:
@@ -4598,7 +4598,7 @@ _d16_loop:
         rol div_dividend+3
         rol div_remainder
         rol div_remainder+1
-        rol $8F0E               ; Shift 17th bit
+        rol ovrflw_byte_17               ; Shift 17th bit
 
         ; Shift quotient left
         asl div_quotient
@@ -4614,7 +4614,7 @@ _d16_loop:
         lda div_remainder+1
         sbc div_divisor+1
         sta scratch_b           ; Tentative high byte
-        lda $8F0E
+        lda ovrflw_byte_17
         sbc #0
         bcc _d16_no_sub         ; Doesn't fit (17th bit borrow)
 
@@ -4624,7 +4624,7 @@ _d16_loop:
         lda scratch_b
         sta div_remainder+1
         lda #0
-        sta $8F0E               ; Clear 17th bit
+        sta ovrflw_byte_17               ; Clear 17th bit
         lda div_quotient
         ora #$01
         sta div_quotient

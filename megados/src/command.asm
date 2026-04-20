@@ -24,6 +24,7 @@ dir_buffer:	times	(14 * 512) db 0		; 7168 bytes for root directory (up to 1.44MB
 fat_buffer:	times	(9 * 512) db 0		; 4608 bytes for FAT (up to 1.44MB)
 batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
 io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
+bpb_buffer:	times	512 db 0		; 512 bytes for BPB reads (separate from dir_buffer)
 
 ; ============================================================================
 ; Device Driver Chain — built-in character device drivers
@@ -1192,12 +1193,14 @@ cmd_dispatch:
 	mov	byte [cur_drive], 0
 	mov	al, 0
 	call	load_drive_state	; Load drive A's state
+	mov	byte [geo_active_drv], 0xFF ; Force geometry refresh
 	jmp	cmd_loop
 .switch_b:
 	call	save_drive_state	; Save current drive's state
 	mov	byte [cur_drive], 1
 	mov	al, 1
 	call	load_drive_state	; Load drive B's state
+	mov	byte [geo_active_drv], 0xFF ; Force geometry refresh
 	jmp	cmd_loop
 .not_drive_switch:
 
@@ -2813,8 +2816,8 @@ do_copy:
 	push	ax
 	mov	ax, 2
 .copy_find_free_cl:
-	cmp	ax, 720			; Max clusters for 360K
-	jae	.copy_disk_full_pop
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.copy_disk_full_pop
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -2868,15 +2871,40 @@ do_copy:
 	call	write_cluster_data
 	jc	.copy_disk_err
 
-	; Get next source cluster
+	; Get next source cluster.
+	; fat_buffer currently holds DEST drive's FAT (with our allocations).
+	; We need SOURCE drive's FAT to walk the source chain.
+	; Persist dest FAT, swap to source FAT for the lookup, then swap back.
+	mov	al, [copy_dst_drv]
+	mov	[resolved_drive], al
+	call	write_fat		; Persist dest FAT before swapping buffer
+	jc	.copy_disk_err
+
+	mov	al, [copy_src_drv]
+	mov	[resolved_drive], al
+	call	read_fat		; Load source FAT to walk source chain
+	jc	.copy_disk_err
+
 	mov	ax, [copy_src_cl]
 	call	fat12_next_cluster
+	push	ax			; Save next-cluster result
+
+	; Restore dest FAT for next iteration (or for subsequent dir code)
+	mov	al, [copy_dst_drv]
+	mov	[resolved_drive], al
+	call	read_fat
+	jc	.copy_disk_err_pop
+
+	pop	ax			; Recover next-cluster result
 	cmp	ax, 0xFF8
 	jb	.copy_next_cluster
+	jmp	.copy_chain_end
 
-	; Write updated FAT (both copies)
-	call	write_fat
-	jc	.copy_disk_err
+.copy_disk_err_pop:
+	pop	ax
+	jmp	.copy_disk_err
+
+.copy_chain_end:
 
 	; Switch to dest directory and re-read
 	mov	ax, [copy_dst_dir_cl]
@@ -3199,6 +3227,7 @@ do_cd:
 	call	save_drive_state	; Save old drive state
 	mov	al, [resolved_drive]
 	mov	[cur_drive], al
+	mov	byte [geo_active_drv], 0xFF ; Force geometry refresh
 .cd_same_drive:
 	; Set current directory to resolved
 	mov	ax, [resolved_dir_cluster]
@@ -3460,8 +3489,8 @@ do_mkdir:
 	; Find a free cluster
 	mov	ax, 2
 .mkdir_find_cl:
-	cmp	ax, 720
-	jae	.mkdir_full
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.mkdir_full
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -4496,7 +4525,8 @@ read_cur_dir:
 	jnz	.rcd_loop
 	clc
 .rcd_err:
-	pop	word [resolved_drive]
+	pop	ax			; AL = saved resolved_drive
+	mov	[resolved_drive], al	; Byte-only write (don't clobber batch_active)
 	pop	cx
 	ret
 .rcd_subdir:
@@ -4524,7 +4554,8 @@ read_cur_dir:
 	jnz	.rcd_sub_loop
 	clc
 .rcd_sub_err:
-	pop	word [resolved_drive]
+	pop	ax			; AL = saved resolved_drive
+	mov	[resolved_drive], al	; Byte-only write (don't clobber batch_active)
 	pop	cx
 	ret
 
@@ -4565,7 +4596,8 @@ write_cur_dir:
 	jnz	.wcd_loop
 	clc
 .wcd_err:
-	pop	word [resolved_drive]
+	pop	ax			; AL = saved resolved_drive
+	mov	[resolved_drive], al	; Byte-only write (don't clobber batch_active)
 	pop	cx
 	ret
 .wcd_subdir:
@@ -4592,7 +4624,8 @@ write_cur_dir:
 	jnz	.wcd_sub_loop
 	clc
 .wcd_sub_err:
-	pop	word [resolved_drive]
+	pop	ax			; AL = saved resolved_drive
+	mov	[resolved_drive], al	; Byte-only write (don't clobber batch_active)
 	pop	cx
 	ret
 
@@ -4642,9 +4675,11 @@ load_drive_bpb:
 	mov	ax, SHELL_SEG
 	mov	ds, ax			; DS = SHELL_SEG for all variable access
 
-	; Read boot sector (LBA 0 = C=0, H=0, S=1)
+	; Read boot sector (LBA 0 = C=0, H=0, S=1) into dedicated bpb_buffer
+	; — must NOT use dir_buffer because callers (e.g., COPY) stage cluster
+	; data there between read_cluster_data and write_cluster_data.
 	mov	es, ax
-	mov	bx, dir_buffer		; Use dir_buffer temporarily (overwritten by dir read later)
+	mov	bx, bpb_buffer
 	mov	ah, 0x02
 	mov	al, 1
 	mov	ch, 0
@@ -4654,8 +4689,8 @@ load_drive_bpb:
 	int	0x13
 	jc	.ldb_defaults		; Read failed — use 360K defaults
 
-	; Parse BPB from dir_buffer
-	mov	si, dir_buffer
+	; Parse BPB from bpb_buffer
+	mov	si, bpb_buffer
 	; Validate: check for BPB signature (bytes per sector should be 512)
 	cmp	word [si+11], 512
 	jne	.ldb_defaults
@@ -6065,6 +6100,9 @@ do_exec:
 
 .exec_not_bat:
 	; SI points to the matching directory entry
+	; Save the target drive — resolved_drive may change during PSP setup
+	mov	al, [resolved_drive]
+	mov	[exec_drive], al
 	; Get starting cluster (offset 26)
 	mov	ax, [si+26]
 	mov	[exec_cluster], ax
@@ -6249,6 +6287,11 @@ do_exec:
 	mov	[dta_seg], ax
 	mov	word [dta_off], 0x0080
 
+	; Restore resolved_drive from exec_drive before loading
+	; (PSP creation may have changed it via INT 21h re-entry)
+	mov	al, [exec_drive]
+	mov	[resolved_drive], al
+
 	; Load file to allocated_seg:0100
 	; Advance ES by cluster size each iteration to avoid 64K crossing
 	mov	bx, 0x0100
@@ -6267,13 +6310,15 @@ do_exec:
 	; Convert linear sector to CHS
 	mov	ax, [cs:exec_cur_sec]
 	call	lba_to_chs
+
 	; Read 1 sector
 	push	es
 	mov	ah, 0x02
 	mov	al, 1
-	mov	dl, [resolved_drive]
+	mov	dl, [cs:exec_drive]
 	int	0x13
 	pop	es
+
 	jc	.exec_disk_err_free_pop
 	; Advance buffer by 512 bytes (32 paragraphs)
 	mov	ax, es
@@ -6362,6 +6407,9 @@ do_exec:
 	cli
 	mov	ss, ax
 	mov	sp, 0xFFFE
+	; Push 0 so RET returns to PSP:0000 (INT 20h) per DOS convention
+	xor	ax, ax
+	push	ax
 	sti
 
 	; Jump to program
@@ -7175,8 +7223,8 @@ int21_handler:
 	jc	.i21_3c_err_pop
 	mov	ax, 2
 .i21_3c_find_cl:
-	cmp	ax, 720
-	jae	.i21_3c_disk_full
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.i21_3c_disk_full
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -7970,8 +8018,8 @@ int21_handler:
 	push	cx
 	mov	ax, 2
 .i21_40_find_cl:
-	cmp	ax, 720
-	jae	.i21_40_full
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.i21_40_full
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -8973,6 +9021,8 @@ int21_handler:
 	mov	[cur_drive], dl
 	mov	al, dl
 	call	load_drive_state
+	; Force geometry refresh for the new drive
+	mov	byte [geo_active_drv], 0xFF
 	pop	ax
 	pop	ds
 .i21_0e_done:
@@ -9173,8 +9223,8 @@ int21_handler:
 	jc	.i21_39_err
 	mov	ax, 2
 .i21_39_find_cl:
-	cmp	ax, 720
-	jae	.i21_39_err
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.i21_39_err
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -11256,8 +11306,8 @@ int21_handler:
 	push	cx
 	mov	ax, 2
 .i21_15_find_free:
-	cmp	ax, 720
-	jae	.i21_15_no_free
+	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
+	ja	.i21_15_no_free
 	push	ax
 	call	fat12_read_cluster
 	cmp	ax, 0
@@ -12589,6 +12639,9 @@ int21_handler:
 	mov	[cs:saved_int1c+2], ax
 	pop	ds
 
+	; Save target drive before loading
+	mov	al, [resolved_drive]
+	mov	[exec_drive], al
 	; Load file
 	mov	bx, 0x0100
 	mov	ax, [exec_cluster]
@@ -12608,7 +12661,7 @@ int21_handler:
 	push	es
 	mov	ah, 0x02
 	mov	al, 1
-	mov	dl, [resolved_drive]
+	mov	dl, [cs:exec_drive]
 	int	0x13
 	pop	es
 	jc	.i21_4b_load_err
@@ -12641,6 +12694,9 @@ int21_handler:
 	cli
 	mov	ss, ax
 	mov	sp, 0xFFFE
+	; Push 0 so RET returns to PSP:0000 (INT 20h) per DOS convention
+	xor	ax, ax
+	push	ax
 	sti
 	jmp	far [cs:exec_jmp_ip]
 
@@ -12777,111 +12833,119 @@ int21_handler:
 
 ; --- AH=4C: Terminate with return code ---
 .i21_4c:
-	; Save return code
+	; Save return code from AL
 	xor	ah, ah
 	mov	[cs:last_return_code], ax
+	jmp	term_common
+
+; Entry point for INT 20h / INT 22h / RET-to-PSP:0 program termination
+; INT 20h has no return code — set to 0 before running common cleanup.
+int20_handler:
+	xor	ax, ax
+	mov	[cs:last_return_code], ax
+	; Fall through to common termination cleanup
+
+; ============================================================================
+; term_common — shared termination cleanup for AH=4Ch and INT 20h
+; ============================================================================
+; Performs: stack switch → handle close → MCB free → exec_depth branch.
+; Expects [cs:last_return_code] already populated.
+;
+term_common:
+	; Switch to shell stack IMMEDIATELY — child memory will be freed
+	mov	ax, SHELL_SEG
+	cli
+	mov	ss, ax
+	mov	sp, 0xFFFE
+	sti
+	mov	ds, ax
+
 	; Close file handles opened by the child (walk child's JFT)
 	; Only close handles 5+ that the child has open
 	push	bx
 	push	es
 	mov	es, [cs:exec_seg]
 	mov	bx, 5
-.i21_4c_close:
+.term_close:
 	cmp	bx, MAX_HANDLES
-	jae	.i21_4c_closed
+	jae	.term_closed
 	cmp	byte [es:0x18 + bx], 0xFF
-	je	.i21_4c_close_next
-	; This handle is open — close it properly via AH=3E
+	je	.term_close_next
 	push	bx
 	mov	ah, 0x3E
 	int	0x21
 	pop	bx
-.i21_4c_close_next:
+.term_close_next:
 	inc	bx
-	jmp	.i21_4c_close
-.i21_4c_closed:
+	jmp	.term_close
+.term_closed:
 	pop	es
 	pop	bx
+
 	; Free program's memory before returning to shell
 	; Free all blocks owned by exec_seg (the program's PSP segment)
 	push	es
 	push	dx
-	mov	dx, [cs:exec_seg]	; DX = program's PSP segment
+	mov	dx, [cs:exec_seg]
 	mov	ax, [cs:mcb_first]
-.i21_4c_free_loop:
+.term_free_loop:
 	mov	es, ax
 	cmp	byte [es:0x00], 'M'
-	je	.i21_4c_check
+	je	.term_check
 	cmp	byte [es:0x00], 'Z'
-	je	.i21_4c_check
-	jmp	.i21_4c_go		; Corrupt MCB — just exit
-.i21_4c_check:
-	cmp	[es:0x01], dx		; Owner == program's PSP?
-	jne	.i21_4c_next
-	mov	word [es:0x01], 0	; Free it
-.i21_4c_next:
+	je	.term_check
+	jmp	.term_free_done		; Corrupt MCB — just exit
+.term_check:
+	cmp	[es:0x01], dx
+	jne	.term_free_next
+	mov	word [es:0x01], 0	; Mark free
+.term_free_next:
 	cmp	byte [es:0x00], 'Z'
-	je	.i21_4c_merge
+	je	.term_merge
 	mov	bx, [es:0x03]
 	add	ax, bx
 	inc	ax
-	jmp	.i21_4c_free_loop
-.i21_4c_merge:
-	call	.mcb_merge_free
-.i21_4c_go:
+	jmp	.term_free_loop
+.term_merge:
+	call	do_mcb_merge_free
+.term_free_done:
 	pop	dx
 	pop	es
 
 	; Check if this was an EXEC-launched child
 	cmp	byte [cs:exec_depth], 0
-	je	.i21_4c_to_shell
+	je	.term_to_shell
 
-	; Return to parent program
+	; --- EXEC-launched (AH=4Bh child) — return to parent ---
 	dec	byte [cs:exec_depth]
-	; Restore parent's exec_seg
-	mov	ax, [cs:.i21_4b_parent_seg]
+	mov	ax, [cs:int21_handler.i21_4b_parent_seg]
 	mov	[cs:exec_seg], ax
-	; Restore BIOS vectors
 	call	int20_handler_restore_vectors
-	; Restore parent SS:SP and return
 	cli
 	mov	ss, [cs:exec_parent_ss]
 	mov	sp, [cs:exec_parent_sp]
 	sti
-	; Restore DTA to parent PSP:80
 	mov	ax, [cs:exec_seg]
 	mov	[cs:dta_seg], ax
 	mov	word [cs:dta_off], 0x0080
-	; Return to parent with CF=0
-	; The parent's stack has FLAGS, CS, IP from INT 21h
-	; We need to clear carry in the saved flags
+	; Clear carry in caller's saved FLAGS (on parent stack)
 	push	bp
 	mov	bp, sp
-	and	word [bp+6], 0xFFFE	; Clear CF
+	and	word [bp+6], 0xFFFE
 	pop	bp
 	mov	ax, [cs:last_return_code]
 	iret
 
-.i21_4c_to_shell:
-	; Fall through to int20_handler (shell-launched program)
-
-; Entry point for INT 20h / INT 22h program termination
-int20_handler:
+.term_to_shell:
+	; --- Shell-launched program — return to command prompt ---
 	call	int20_handler_restore_vectors
-	; Restore exec_seg to the shell's own PSP
-	mov	ax, [cs:shell_psp_seg]
-	mov	[cs:exec_seg], ax
-	; Restore DTA to shell PSP default
-	mov	[cs:dta_seg], ax
-	mov	word [cs:dta_off], 0x0080
-	; Restore shell state and return
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	mov	es, ax
-	cli
-	mov	ss, ax
-	mov	sp, 0xFFFE
-	sti
+	mov	ax, [cs:shell_psp_seg]
+	mov	[cs:exec_seg], ax
+	mov	[cs:dta_seg], ax
+	mov	word [cs:dta_off], 0x0080
 	jmp	cmd_loop
 
 ; Subroutine: restore BIOS + DOS vectors
@@ -14579,6 +14643,7 @@ exec_jmp_ip:	dw	0x0100		; For far jump to program
 exec_jmp_cs:	dw	0
 exec_try_ext:	db	0		; 0=done, 1=try EXE, 2=try BAT
 exec_cur_sec:	dw	0		; Current linear sector during exec load
+exec_drive:	db	0		; Saved drive for exec file loading
 exec_parent_ss:	dw	0		; Parent SS for AH=4Bh EXEC return
 exec_parent_sp:	dw	0		; Parent SP for AH=4Bh EXEC return
 exec_depth:	db	0		; Nesting depth (0=shell launched, >0=EXEC launched)

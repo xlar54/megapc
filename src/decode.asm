@@ -52,7 +52,7 @@ _ml_no_tab:
 
         ; --- Save previous raw_opcode to fixed RAM ---
         lda raw_opcode
-        sta $8F00
+        sta sti_shadow_flag
 
         ; (trace/debug code removed)
 
@@ -61,17 +61,17 @@ _ml_no_tab:
         ; PC INT 8 fires at ~18.2 Hz. At 50 Hz, fire every ~3 frames.
         ; We check every instruction but only act when frame changes.
         lda $D7FA
-        cmp $8F15               ; Last frame counter value
+        cmp last_frame_ctr               ; Last frame counter value
         beq _ml_no_tick
-        sta $8F15               ; Update last frame value
+        sta last_frame_ctr               ; Update last frame value
 
         ; Increment sub-frame counter for ~18 Hz from 50 Hz
-        inc $8F16               ; Sub-frame counter
-        lda $8F16
+        inc sub_frame_ctr               ; Sub-frame counter
+        lda sub_frame_ctr
         cmp #3                  ; Every 3 frames ≈ 16-17 Hz (close to 18.2)
         bcc _ml_no_tick
         lda #0
-        sta $8F16               ; Reset sub-frame counter
+        sta sub_frame_ctr               ; Reset sub-frame counter
 
         ; --- BDA tick counter increment (real-time ~18 Hz) ---
         lda #$6C
@@ -162,13 +162,13 @@ _ml_no_refresh:
         inc tick_counter+1
 +
         ; --- One-time BDA repair after DOS boot ---
-        lda $8F17               ; BDA repair done flag
+        lda bda_repair_done               ; BDA repair done flag
         bne _ml_tick_done
         lda tick_counter+1
         cmp #$08                ; Wait for enough ticks after boot
         bcc _ml_tick_done
         lda #1
-        sta $8F17               ; Mark done — only run once
+        sta bda_repair_done               ; Mark done — only run once
         ; Equipment word at 40:10
         lda #$10
         sta temp_ptr
@@ -202,7 +202,7 @@ _ml_no_refresh:
 
 _ml_tick_done:
         ; Signal INT 8
-        lda $8F17
+        lda bda_repair_done
         beq _ml_no_tick
         lda #1
         sta int8_asap
@@ -650,10 +650,10 @@ _od_no_rep:
         ; --- Deliver INT 8 if pending (after instruction is fully complete) ---
         lda int8_asap
         beq +
-        lda $8F1B               ; Interrupt inhibit (STI/MOV SS/POP SS shadow)
+        lda irq_inhibit               ; Interrupt inhibit (STI/MOV SS/POP SS shadow)
         beq _od_no_inhibit
         lda #0
-        sta $8F1B               ; Clear — shadow lasts one instruction only
+        sta irq_inhibit               ; Clear — shadow lasts one instruction only
         bra +                   ; Skip INT 8 this time
 _od_no_inhibit:
         lda flag_if

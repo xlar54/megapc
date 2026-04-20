@@ -137,7 +137,7 @@ MONO_COLOR      = $05
 MONO_REVERSE    = $20 | MONO_COLOR
 
 ; --- Screen / debug ---
-SECTOR_BUF      = $9800         ; 512-byte sector buffer ($9800-$99FF)
+; SECTOR_BUF defined in globals.asm (shared with fat_writer.asm)
 CGA_ROWS        = 25
 CGA_COLS        = 80
 
@@ -157,7 +157,7 @@ VIC_HOTREGS     = $D05D         ; VIC-IV hot registers (bit 7 = disable)
 ; ============================================================================
 ; Zero Page — 8086 Register File & Decoder State
 ; ============================================================================
-        .include "zeropage.asm"
+        .include "globals.asm"
 
 ; ============================================================================
 ; Entry Point
@@ -295,9 +295,9 @@ _beep_wait:
         sta ss_dirty
         sta ds_dirty
         lda #0
-        sta $8F17
-        sta $8F1B               ; Clear interrupt inhibit flag
-        sta $8F1E               ; Clear Ctrl-C pending flag
+        sta bda_repair_done
+        sta irq_inhibit               ; Clear interrupt inhibit flag
+        sta ctrlc_pending               ; Clear Ctrl-C pending flag
 
         ; Clear screen and vidbuf before emulation
         lda #147
@@ -444,12 +444,12 @@ call_fat_save_floppy:
         sta temp_ptr+3
 
         ; Write drive number
-        lda $8F25
+        lda fat_save_drive
         ldz #0
         sta [temp_ptr],z        ; fw_drive_num
 
         ; Write geometry for the selected drive
-        lda $8F25
+        lda fat_save_drive
         bne _cfsf_drive_b
         ; Drive A
         lda floppy_a_cyls
@@ -462,7 +462,7 @@ call_fat_save_floppy:
         ldz #3
         sta [temp_ptr],z        ; fw_spt
         lda floppy_a_bank
-        sta $8F26               ; Pass bank to fat_writer
+        sta fat_save_bank       ; Pass bank to fat_writer
         bra _cfsf_copy_fname
 _cfsf_drive_b:
         lda floppy_b_cyls
@@ -475,7 +475,7 @@ _cfsf_drive_b:
         ldz #3
         sta [temp_ptr],z
         lda floppy_b_bank
-        sta $8F26               ; Pass bank to fat_writer
+        sta fat_save_bank       ; Pass bank to fat_writer
 
 _cfsf_copy_fname:
         ; Copy filename to fw_filename (offset 4 from param block start)
@@ -531,7 +531,7 @@ _cfsf_fname_done:
         sta $02
 
         ; Convert scratch result to carry flag (JSRFAR doesn't preserve carry)
-        lda $8F25
+        lda fat_save_drive
         beq _cfsf_fail
         sec                     ; Success
         rts
