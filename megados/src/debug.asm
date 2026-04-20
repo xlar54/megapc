@@ -311,6 +311,10 @@ cmd_run_common:
 .run_ready:
 	call	prepare_run
 	jc	cmd_error
+	cmp	byte [run_mode], MODE_PROCEED
+	jne	.run_do
+	call	setup_proceed_break
+.run_do:
 	jmp	run_target
 
 cmd_regs:
@@ -1192,28 +1196,31 @@ run_target:
 	iret
 
 restore_debug_vectors:
+	; Must use cs: overrides when reading old_int*_off/_seg because AH=25h
+	; expects DS to hold the vector's segment; reading any subsequent variable
+	; from DS after that would fetch from the wrong segment.
 	push	ds
 
-	mov	dx, [old_int1_off]
-	mov	ax, [old_int1_seg]
+	mov	dx, [cs:old_int1_off]
+	mov	ax, [cs:old_int1_seg]
 	mov	ds, ax
 	mov	ax, 0x2501
 	int	0x21
 
-	mov	dx, [old_int3_off]
-	mov	ax, [old_int3_seg]
+	mov	dx, [cs:old_int3_off]
+	mov	ax, [cs:old_int3_seg]
 	mov	ds, ax
 	mov	ax, 0x2503
 	int	0x21
 
-	mov	dx, [old_int20_off]
-	mov	ax, [old_int20_seg]
+	mov	dx, [cs:old_int20_off]
+	mov	ax, [cs:old_int20_seg]
 	mov	ds, ax
 	mov	ax, 0x2520
 	int	0x21
 
-	mov	dx, [old_int21_off]
-	mov	ax, [old_int21_seg]
+	mov	dx, [cs:old_int21_off]
+	mov	ax, [cs:old_int21_seg]
 	mov	ds, ax
 	mov	ax, 0x2521
 	int	0x21
@@ -1221,7 +1228,155 @@ restore_debug_vectors:
 	pop	ds
 	ret
 
+; ============================================================================
+; setup_proceed_break — For P (proceed), plant a temp CC after a step-over
+; instruction so the target runs through the call/int/loop/rep as a unit.
+; For any other opcode, leave TF set and fall back to single-step behavior.
+; Must be called after prepare_run (which has already set TF for MODE_PROCEED).
+; ============================================================================
+setup_proceed_break:
+	push	ax
+	push	bx
+	push	cx
+	push	es
+
+	mov	byte [temp_break_active], 0
+
+	mov	ax, [target_cs]
+	mov	es, ax
+	mov	bx, [target_ip]
+	mov	al, [es:bx]
+
+	; Fixed-length step-over opcodes
+	cmp	al, 0xE8		; CALL rel16
+	je	.sb_len3
+	cmp	al, 0x9A		; CALL ptr16:16
+	je	.sb_len5
+	cmp	al, 0xCD		; INT imm8
+	je	.sb_len2
+	cmp	al, 0xE0		; LOOPNZ/LOOPNE cb
+	je	.sb_len2
+	cmp	al, 0xE1		; LOOPZ/LOOPE cb
+	je	.sb_len2
+	cmp	al, 0xE2		; LOOP cb
+	je	.sb_len2
+	cmp	al, 0xF2		; REPNE prefix (+1-byte string op)
+	je	.sb_len2
+	cmp	al, 0xF3		; REP/REPE prefix (+1-byte string op)
+	je	.sb_len2
+	cmp	al, 0xFF		; group 5: may be CALL near/far via modrm
+	je	.sb_ff
+	; Not a recognized step-over opcode — fall through to trace
+	jmp	.sb_done
+
+.sb_len2:
+	mov	cx, 2
+	jmp	.sb_install
+.sb_len3:
+	mov	cx, 3
+	jmp	.sb_install
+.sb_len5:
+	mov	cx, 5
+	jmp	.sb_install
+
+.sb_ff:
+	; FF /2 = CALL near [modrm], FF /3 = CALL far [modrm]. Others aren't step-over.
+	mov	al, [es:bx+1]		; modrm byte
+	mov	ah, al
+	mov	cl, 3
+	shr	ah, cl
+	and	ah, 0x07		; reg field
+	cmp	ah, 2
+	je	.sb_ff_decode
+	cmp	ah, 3
+	jne	.sb_done
+.sb_ff_decode:
+	; Compute total length: 1 (opcode) + modrm + addressing-mode bytes
+	mov	ah, al
+	and	ah, 0xC0		; mod
+	and	al, 0x07		; rm
+	cmp	ah, 0xC0
+	je	.sb_ff2			; mod=11: register form, 2 bytes
+	cmp	ah, 0x00
+	je	.sb_ff_mod00
+	cmp	ah, 0x40
+	je	.sb_ff3			; mod=01: +disp8, 3 bytes
+	; mod=10: +disp16, 4 bytes
+	mov	cx, 4
+	jmp	.sb_install
+.sb_ff_mod00:
+	cmp	al, 6			; mod=00 rm=110 → disp16 direct
+	je	.sb_ff4
+	mov	cx, 2
+	jmp	.sb_install
+.sb_ff2:
+	mov	cx, 2
+	jmp	.sb_install
+.sb_ff3:
+	mov	cx, 3
+	jmp	.sb_install
+.sb_ff4:
+	mov	cx, 4
+
+.sb_install:
+	; Compute break address = target_cs:target_ip + CX
+	mov	ax, [target_ip]
+	add	ax, cx
+	mov	[temp_break_off], ax
+	mov	ax, [target_cs]
+	mov	[temp_break_seg], ax
+	mov	es, ax
+	mov	bx, [temp_break_off]
+	mov	al, [es:bx]
+	mov	[temp_break_orig], al
+	mov	byte [es:bx], 0xCC
+	mov	byte [temp_break_active], 1
+	; Clear TF in target_flags so we run free until the CC fires
+	mov	ax, [target_flags]
+	and	ax, 0xFEFF
+	mov	[target_flags], ax
+
+.sb_done:
+	pop	es
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; restore_temp_break — Undo setup_proceed_break's patched byte.
+; If the stop came from our own temp CC, roll target_ip back by 1 so it
+; points at the restored instruction (INT3 pushes CS:IP+1).
+; ============================================================================
 restore_temp_break:
+	cmp	byte [temp_break_active], 0
+	je	.rtb_done
+	push	ax
+	push	bx
+	push	es
+	mov	ax, [temp_break_seg]
+	mov	es, ax
+	mov	bx, [temp_break_off]
+	mov	al, [temp_break_orig]
+	mov	[es:bx], al
+	; Was this stop our temp break? STOP_BREAK + target_ip-1 == temp_break_off
+	; (and matching segment)
+	cmp	byte [stop_reason], STOP_BREAK
+	jne	.rtb_clear
+	mov	ax, [target_cs]
+	cmp	ax, [temp_break_seg]
+	jne	.rtb_clear
+	mov	ax, [target_ip]
+	dec	ax
+	cmp	ax, [temp_break_off]
+	jne	.rtb_clear
+	mov	[target_ip], ax
+.rtb_clear:
+	mov	byte [temp_break_active], 0
+	pop	es
+	pop	bx
+	pop	ax
+.rtb_done:
 	ret
 
 int1_handler:
@@ -2918,5 +3073,11 @@ opcode_byte	db	0
 asm_accum_kind	db	0
 asm_reg_code	db	0
 asm_reg_width	db	0
+
+; Temp breakpoint state for P (proceed/step-over)
+temp_break_active	db	0
+temp_break_seg		dw	0
+temp_break_off		dw	0
+temp_break_orig		db	0
 
 end_of_prog:
