@@ -25,6 +25,13 @@ fat_buffer:	times	(9 * 512) db 0		; 4608 bytes for FAT (up to 1.44MB)
 batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
 io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
 bpb_buffer:	times	512 db 0		; 512 bytes for BPB reads (separate from dir_buffer)
+batch_arg_buf:	times	256 db 0		; Holds %0-%9 strings (null-separated)
+batch_args:	times	10 dw 0			; Pointers into batch_arg_buf for %0..%9
+expand_buf:	times	128 db 0		; Scratch for %-expansion before dispatch (MAX_CMD_LEN+1)
+goto_target:	times	32 db 0			; GOTO label name (null-terminated)
+if_lhs_buf:	times	64 db 0			; IF str1==str2 — LHS
+if_rhs_buf:	times	64 db 0			; IF str1==str2 — RHS
+if_invert:	db	0			; IF NOT flag
 
 ; ============================================================================
 ; Device Driver Chain — built-in character device drivers
@@ -1170,6 +1177,22 @@ cmd_dispatch:
 	mov	di, cmd_time
 	call	str_compare_cmd
 	je	do_time
+
+	mov	di, cmd_goto
+	call	str_compare_cmd
+	je	do_goto
+
+	mov	di, cmd_if
+	call	str_compare_cmd
+	je	do_if
+
+	mov	di, cmd_shift
+	call	str_compare_cmd
+	je	do_shift
+
+	mov	di, cmd_call
+	call	str_compare_cmd
+	je	do_call
 
 	; Check for drive switch (A: or B:)
 	mov	si, cmd_buffer
@@ -5270,12 +5293,19 @@ write_resolved_dir:
 ; ============================================================================
 ; run_batch — Load and execute a batch file
 ; ============================================================================
-; Input: SI = pointer to filename string (e.g., "AUTOEXEC.BAT")
+; Input: SI = pointer to filename string (e.g., "AUTOEXEC.BAT"), optionally
+;             followed by arguments separated by spaces
 ; Silently does nothing if file not found.
 ; Sets batch_active=1 and batch_ptr, then returns to cmd_loop which
 ; will read lines from the batch buffer instead of the keyboard.
 ;
 run_batch:
+	; Capture %0..%9 from the full command line BEFORE resolve_path
+	; consumes the string. resolve_path only parses the leading token.
+	push	si
+	call	batch_parse_args
+	pop	si
+
 	; Resolve the filename
 	call	resolve_path
 	jc	.rb_not_found
@@ -5385,10 +5415,14 @@ batch_next_line:
 	cmp	byte [si], 0
 	je	cmd_loop		; Empty line — get next
 
+	; Labels ":name" are not echoed and not dispatched
+	cmp	byte [si], ':'
+	je	cmd_loop
+
 	; Check for @ prefix — suppress echo for this line
 	mov	byte [batch_buffer - 1], 0  ; temp: this_line_silent flag (reuse byte before buffer)
 	cmp	byte [si], '@'
-	jne	.bnl_check_echo_state
+	jne	.bnl_after_at
 	mov	byte [batch_buffer - 1], 1  ; This line is silent
 	; Strip @ from buffer
 	inc	si
@@ -5398,6 +5432,15 @@ batch_next_line:
 	stosb
 	or	al, al
 	jnz	.bnl_shift
+
+.bnl_after_at:
+	; Expand %0..%9 and %VAR% into cmd_buffer in place
+	call	batch_expand_line
+	; Re-check for empty after expansion (e.g., %undefined% with nothing else)
+	mov	si, cmd_buffer
+	call	skip_spaces
+	cmp	byte [si], 0
+	je	cmd_loop
 
 .bnl_check_echo_state:
 	; Check for ECHO OFF / ECHO ON
@@ -5485,6 +5528,865 @@ batch_next_line:
 .bnl_eof:
 	mov	byte [batch_active], 0
 	jmp	cmd_loop
+
+; ============================================================================
+; batch_parse_args — Split command line into %0..%9 pointers
+; ============================================================================
+; Input: SI = null-terminated command line
+; Stores up to 10 space-separated tokens as null-terminated strings in
+; batch_arg_buf, with batch_args[N] = pointer to token N (or empty string).
+;
+batch_parse_args:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	push	es
+	mov	ax, ds
+	mov	es, ax
+	; First byte of arg_buf = empty string terminator, used for missing args
+	mov	di, batch_arg_buf
+	mov	byte [di], 0
+	; Initialize all 10 args to point at the empty string
+	mov	bx, batch_args
+	mov	cx, 10
+.bpa_init:
+	mov	word [bx], batch_arg_buf
+	add	bx, 2
+	dec	cx
+	jnz	.bpa_init
+	; Now walk the input line, copying tokens into arg_buf after the empty byte
+	inc	di			; Skip past the empty-string byte
+	mov	bx, batch_args
+	xor	cx, cx			; token index
+.bpa_next:
+	; Skip leading spaces/tabs
+.bpa_skip_ws:
+	mov	al, [si]
+	cmp	al, ' '
+	je	.bpa_skip_ws_adv
+	cmp	al, 9			; TAB
+	je	.bpa_skip_ws_adv
+	jmp	.bpa_token_start
+.bpa_skip_ws_adv:
+	inc	si
+	jmp	.bpa_skip_ws
+.bpa_token_start:
+	cmp	al, 0			; End of line?
+	je	.bpa_done
+	cmp	al, 0x0D
+	je	.bpa_done
+	; Store pointer to this arg
+	mov	[bx], di
+	add	bx, 2
+	inc	cx
+	; Copy token chars until space/null/CR
+.bpa_copy:
+	mov	al, [si]
+	cmp	al, 0
+	je	.bpa_end_token_final
+	cmp	al, 0x0D
+	je	.bpa_end_token_final
+	cmp	al, ' '
+	je	.bpa_end_token
+	cmp	al, 9
+	je	.bpa_end_token
+	mov	[di], al
+	inc	di
+	inc	si
+	jmp	.bpa_copy
+.bpa_end_token:
+	mov	byte [di], 0
+	inc	di
+	cmp	cx, 10
+	jae	.bpa_done
+	jmp	.bpa_next
+.bpa_end_token_final:
+	mov	byte [di], 0
+.bpa_done:
+	pop	es
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; batch_expand_line — Substitute %0..%9 and %VAR% in cmd_buffer
+; ============================================================================
+; Reads from cmd_buffer, writes expanded line to expand_buf, then copies back.
+; %% produces a literal %. Unknown %VAR% expands to empty.
+; Only active when batch_active != 0 (silently skips otherwise so interactive
+; lines keep their literal %).
+;
+batch_expand_line:
+	cmp	byte [batch_active], 0
+	jne	.bex_do
+	ret
+.bex_do:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	push	di
+	mov	si, cmd_buffer
+	mov	di, expand_buf
+	mov	cx, MAX_CMD_LEN		; output budget
+.bex_loop:
+	lodsb
+	or	al, al
+	jz	.bex_done
+	cmp	al, '%'
+	je	.bex_percent
+	stosb
+	dec	cx
+	jz	.bex_done
+	jmp	.bex_loop
+
+.bex_percent:
+	mov	al, [si]
+	or	al, al
+	jz	.bex_trailing_pct
+	cmp	al, '%'
+	jne	.bex_maybe_digit
+	; %% → literal %
+	inc	si
+	mov	al, '%'
+	stosb
+	dec	cx
+	jz	.bex_done
+	jmp	.bex_loop
+
+.bex_maybe_digit:
+	cmp	al, '0'
+	jb	.bex_try_var
+	cmp	al, '9'
+	ja	.bex_try_var
+	; %N — substitute batch_args[N]
+	sub	al, '0'
+	mov	bl, al
+	xor	bh, bh
+	shl	bx, 1
+	mov	dx, [batch_args + bx]	; DX = pointer to arg string in batch_arg_buf
+	inc	si			; consume digit
+	push	si
+	mov	si, dx
+.bex_copy_arg:
+	lodsb
+	or	al, al
+	jz	.bex_arg_end
+	stosb
+	dec	cx
+	jnz	.bex_copy_arg
+	pop	si
+	jmp	.bex_done
+.bex_arg_end:
+	pop	si
+	jmp	.bex_loop
+
+.bex_try_var:
+	; Scan forward for closing '%' (max 32 chars)
+	mov	bx, si			; BX = start of name
+	mov	dx, 32			; length limit
+.bex_var_find:
+	mov	al, [si]
+	or	al, al
+	jz	.bex_var_notfound
+	cmp	al, '%'
+	je	.bex_var_found
+	inc	si
+	dec	dx
+	jnz	.bex_var_find
+	; Limit reached — treat as not a var
+.bex_var_notfound:
+	; Emit literal '%' and continue from char after it
+	mov	al, '%'
+	stosb
+	dec	cx
+	jz	.bex_done
+	mov	si, bx			; resume parsing from what was the name start
+	jmp	.bex_loop
+
+.bex_var_found:
+	; SI = closing %, BX = start of name.
+	; Temporarily null-terminate the name, look it up, restore.
+	mov	byte [si], 0
+	push	si			; save closing-% address
+	push	cx
+	push	di
+	mov	si, bx
+	call	env_find_value		; CF=0 → ES:DX = value; CF=1 → miss
+	; env_find_value leaves ES = env_seg — restore ES to our data segment
+	; (push cs/pop es preserves flags so CF from env_find_value survives)
+	push	cs
+	pop	es
+	pop	di
+	pop	cx
+	pop	bx			; BX = closing-% address
+	mov	byte [bx], '%'		; restore
+	mov	si, bx
+	inc	si			; past closing %
+	jc	.bex_loop		; not found → emit nothing
+	; Found. Copy value at env_seg:DX into expand_buf at ES:DI
+	push	ds
+	push	si
+	mov	ax, [env_seg]
+	mov	ds, ax			; DS = env_seg for lodsb
+	mov	si, dx
+.bex_copy_val:
+	lodsb
+	or	al, al
+	jz	.bex_val_done
+	stosb				; writes to ES:DI = CS:DI (expand_buf)
+	dec	cx
+	jnz	.bex_copy_val
+	pop	si
+	pop	ds
+	jmp	.bex_done
+.bex_val_done:
+	pop	si
+	pop	ds
+	jmp	.bex_loop
+
+.bex_trailing_pct:
+	; Line ends with '%' — emit it literally
+	mov	al, '%'
+	stosb
+
+.bex_done:
+	mov	byte [di], 0
+	; Copy expand_buf back to cmd_buffer
+	mov	si, expand_buf
+	mov	di, cmd_buffer
+.bex_copyback:
+	lodsb
+	stosb
+	or	al, al
+	jnz	.bex_copyback
+	pop	di
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; env_find_value — Find environment variable value (case-insensitive)
+; ============================================================================
+; Input:  SI = null-terminated NAME (in DS)
+; Output: CF=0 → ES:DX points to the value string (in env segment)
+;         CF=1 → not found
+; Preserves all other registers.
+;
+env_find_value:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	di
+
+	mov	ax, [env_seg]
+	mov	es, ax
+	xor	bx, bx			; env offset
+
+.efv_next_var:
+	cmp	byte [es:bx], 0
+	je	.efv_not_found
+	mov	di, bx
+	push	si
+.efv_match:
+	mov	al, [si]
+	or	al, al
+	je	.efv_name_end
+	cmp	al, 'a'
+	jb	.efv_ucal
+	cmp	al, 'z'
+	ja	.efv_ucal
+	sub	al, 0x20
+.efv_ucal:
+	mov	ah, [es:di]
+	cmp	ah, 'a'
+	jb	.efv_ucah
+	cmp	ah, 'z'
+	ja	.efv_ucah
+	sub	ah, 0x20
+.efv_ucah:
+	cmp	al, ah
+	jne	.efv_nomatch
+	inc	si
+	inc	di
+	jmp	.efv_match
+.efv_name_end:
+	cmp	byte [es:di], '='
+	jne	.efv_nomatch
+	; Match! Value starts at ES:(DI+1)
+	pop	si
+	inc	di
+	mov	dx, di
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+
+.efv_nomatch:
+	pop	si
+.efv_skip:
+	cmp	byte [es:bx], 0
+	je	.efv_skipped
+	inc	bx
+	jmp	.efv_skip
+.efv_skipped:
+	inc	bx
+	jmp	.efv_next_var
+
+.efv_not_found:
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
+	ret
+
+; ============================================================================
+; do_goto — GOTO <label>  (batch only)
+; ============================================================================
+; SI is positioned after the GOTO keyword by str_compare_cmd.
+;
+do_goto:
+	cmp	byte [batch_active], 0
+	jne	.dg_ok
+	mov	si, msg_batch_only
+	call	print_string
+	jmp	cmd_loop
+.dg_ok:
+	call	skip_spaces
+	cmp	byte [si], ':'
+	jne	.dg_have
+	inc	si
+.dg_have:
+	; Copy target name (up to 31 chars) to goto_target, uppercased
+	mov	di, goto_target
+	mov	cx, 31
+.dg_cp:
+	mov	al, [si]
+	or	al, al
+	je	.dg_cp_end
+	cmp	al, 0x0D
+	je	.dg_cp_end
+	cmp	al, ' '
+	je	.dg_cp_end
+	cmp	al, 9
+	je	.dg_cp_end
+	; Uppercase
+	cmp	al, 'a'
+	jb	.dg_cp_store
+	cmp	al, 'z'
+	ja	.dg_cp_store
+	sub	al, 0x20
+.dg_cp_store:
+	mov	[di], al
+	inc	di
+	inc	si
+	dec	cx
+	jnz	.dg_cp
+.dg_cp_end:
+	mov	byte [di], 0
+
+	; Scan batch_buffer line by line for matching ':<target>' line
+	mov	si, batch_buffer
+.dg_scan_line:
+	cmp	si, [batch_end]
+	jae	.dg_notfound
+	mov	bx, si		; BX = start of this line
+.dg_skip_ws:
+	cmp	si, [batch_end]
+	jae	.dg_line_nomatch
+	mov	al, [si]
+	cmp	al, ' '
+	je	.dg_ws_adv
+	cmp	al, 9
+	je	.dg_ws_adv
+	jmp	.dg_check_colon
+.dg_ws_adv:
+	inc	si
+	jmp	.dg_skip_ws
+.dg_check_colon:
+	cmp	al, ':'
+	jne	.dg_line_nomatch
+	inc	si			; past ':'
+	; Compare with goto_target (case-insensitive, word-boundary terminated)
+	push	si
+	mov	di, goto_target
+.dg_match:
+	mov	al, [di]
+	or	al, al
+	je	.dg_target_end
+	mov	ah, [si]
+	cmp	ah, 'a'
+	jb	.dg_match_upper
+	cmp	ah, 'z'
+	ja	.dg_match_upper
+	sub	ah, 0x20
+.dg_match_upper:
+	cmp	al, ah
+	jne	.dg_nomatch_pop
+	inc	si
+	inc	di
+	jmp	.dg_match
+.dg_target_end:
+	; Target string ended — next char in line must be word boundary
+	mov	al, [si]
+	cmp	al, 0
+	je	.dg_match_ok
+	cmp	al, 0x0D
+	je	.dg_match_ok
+	cmp	al, 0x0A
+	je	.dg_match_ok
+	cmp	al, ' '
+	je	.dg_match_ok
+	cmp	al, 9
+	je	.dg_match_ok
+.dg_nomatch_pop:
+	pop	si
+	jmp	.dg_line_nomatch
+.dg_match_ok:
+	pop	si
+	; Match! Set batch_ptr to start of this line — batch_next_line will
+	; re-read it and the label skip will advance past it.
+	mov	[batch_ptr], bx
+	jmp	cmd_loop
+
+.dg_line_nomatch:
+	; Advance SI to start of next line (past next 0x0A, or EOF)
+	mov	si, bx
+.dg_next:
+	cmp	si, [batch_end]
+	jae	.dg_notfound
+	mov	al, [si]
+	inc	si
+	cmp	al, 0x0A
+	jne	.dg_next
+	jmp	.dg_scan_line
+
+.dg_notfound:
+	mov	si, msg_goto_target
+	call	print_string
+	; Terminate the batch (DOS behavior: unknown label ends batch)
+	mov	byte [batch_active], 0
+	jmp	cmd_loop
+
+; ============================================================================
+; do_shift — SHIFT (rotate batch_args[1..9] → [0..8], [9] = empty)
+; ============================================================================
+do_shift:
+	cmp	byte [batch_active], 0
+	jne	.ds_ok
+	mov	si, msg_batch_only
+	call	print_string
+	jmp	cmd_loop
+.ds_ok:
+	push	ax
+	push	cx
+	push	si
+	push	di
+	mov	si, batch_args + 2
+	mov	di, batch_args
+	mov	cx, 9
+	rep	movsw
+	mov	word [batch_args + 18], batch_arg_buf	; %9 = empty string
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	jmp	cmd_loop
+
+; ============================================================================
+; do_call — CALL <command>  (DOS 3.3+)
+; ============================================================================
+; Simple implementation: strip CALL prefix, re-dispatch the rest. This works
+; for CALL of .COM/.EXE programs. CALL of a .BAT from within a .BAT would
+; clobber batch state (no nesting yet).
+;
+do_call:
+	call	skip_spaces
+	; Shift remainder of line to start of cmd_buffer
+	mov	di, cmd_buffer
+.dc_shift:
+	mov	al, [si]
+	mov	[di], al
+	or	al, al
+	je	.dc_shifted
+	inc	si
+	inc	di
+	jmp	.dc_shift
+.dc_shifted:
+	mov	si, cmd_buffer
+	call	skip_spaces
+	cmp	byte [si], 0
+	je	cmd_loop		; CALL with no target
+	jmp	cmd_dispatch
+
+; ============================================================================
+; do_if — IF [NOT] <cond> <command>
+; ============================================================================
+; Conditions:
+;   EXIST <filename>
+;   ERRORLEVEL <n>           true if last_return_code >= n
+;   <str1>==<str2>           literal string compare (may be quoted)
+;
+; Strategy: copy LHS to if_lhs_buf and RHS to if_rhs_buf (for strcmp), keep
+; SI tracking the command position so cmd_dispatch can run on it.
+;
+do_if:
+	call	skip_spaces
+	mov	byte [if_invert], 0
+
+	; Check for optional NOT
+	push	si
+	mov	di, cmd_not
+	call	str_compare_cmd
+	je	.di_have_not
+	pop	si
+	jmp	.di_check_cond
+.di_have_not:
+	mov	byte [if_invert], 1
+	pop	ax			; discard saved SI (SI already advanced past NOT)
+	call	skip_spaces
+
+.di_check_cond:
+	; EXIST?
+	push	si
+	mov	di, cmd_exist
+	call	str_compare_cmd
+	je	.di_do_exist_enter
+	pop	si
+	; ERRORLEVEL?
+	push	si
+	mov	di, cmd_errorlevel
+	call	str_compare_cmd
+	je	.di_do_errlvl_enter
+	pop	si
+	; Fall through: string compare
+	jmp	.di_do_strcmp
+
+.di_do_exist_enter:
+	pop	ax			; discard saved SI
+	call	skip_spaces
+	jmp	.di_do_exist
+.di_do_errlvl_enter:
+	pop	ax
+	call	skip_spaces
+	jmp	.di_do_errlvl
+
+; --- IF EXIST filename command ---
+.di_do_exist:
+	; SI = start of filename
+	call	if_resolve_file		; advances SI past filename, CF=0 if exists
+	jc	.di_exist_f
+	mov	al, 1
+	jmp	.di_exist_eval
+.di_exist_f:
+	xor	al, al
+.di_exist_eval:
+	xor	al, [if_invert]
+	and	al, 1
+	jz	.di_false_skip
+	jmp	.di_dispatch_cmd
+
+; --- IF ERRORLEVEL n command ---
+.di_do_errlvl:
+	xor	ax, ax
+.di_el_parse:
+	mov	cl, [si]
+	cmp	cl, '0'
+	jb	.di_el_done
+	cmp	cl, '9'
+	ja	.di_el_done
+	sub	cl, '0'
+	mov	dx, 10
+	push	dx
+	mul	dx
+	pop	dx
+	xor	ch, ch
+	add	ax, cx
+	inc	si
+	jmp	.di_el_parse
+.di_el_done:
+	call	skip_spaces
+	mov	bl, al			; BL = threshold low
+	mov	al, [last_return_code]
+	cmp	al, bl
+	jae	.di_el_true
+	xor	al, al
+	jmp	.di_el_eval
+.di_el_true:
+	mov	al, 1
+.di_el_eval:
+	xor	al, [if_invert]
+	and	al, 1
+	jz	.di_false_skip
+	jmp	.di_dispatch_cmd
+
+; --- IF str1==str2 command ---
+.di_do_strcmp:
+	; Extract LHS (optionally quoted) into if_lhs_buf
+	mov	di, if_lhs_buf
+	call	if_extract_token
+	; SI now past LHS. Skip optional spaces, then expect '=='
+	call	skip_spaces
+	cmp	byte [si], '='
+	jne	.di_sc_false
+	cmp	byte [si+1], '='
+	jne	.di_sc_false
+	add	si, 2
+	call	skip_spaces
+	; Extract RHS into if_rhs_buf
+	mov	di, if_rhs_buf
+	call	if_extract_token
+	call	skip_spaces
+	; Compare if_lhs_buf and if_rhs_buf
+	push	si
+	mov	si, if_lhs_buf
+	mov	di, if_rhs_buf
+	call	str_eq
+	pop	si
+	jmp	.di_sc_eval
+.di_sc_false:
+	xor	al, al
+.di_sc_eval:
+	xor	al, [if_invert]
+	and	al, 1
+	jz	.di_false_skip
+	jmp	.di_dispatch_cmd
+
+.di_false_skip:
+	jmp	cmd_loop
+
+.di_dispatch_cmd:
+	cmp	byte [si], 0
+	je	cmd_loop
+	cmp	byte [si], 0x0D
+	je	cmd_loop
+	jmp	cmd_dispatch
+
+; ============================================================================
+; if_extract_token — Extract a possibly-quoted token at SI into DI-buffer
+; ============================================================================
+; Input:  SI = source (in DS), DI = destination buffer
+; Output: SI advanced past token (and closing quote if any)
+; Copies up to 63 chars, null-terminates.
+;
+if_extract_token:
+	push	ax
+	push	cx
+	push	di
+	mov	cx, 63
+	cmp	byte [si], '"'
+	je	.iet_quoted
+.iet_plain:
+	mov	al, [si]
+	or	al, al
+	jz	.iet_done
+	cmp	al, 0x0D
+	je	.iet_done
+	cmp	al, ' '
+	je	.iet_done
+	cmp	al, 9
+	je	.iet_done
+	cmp	al, '='
+	je	.iet_done
+	mov	[di], al
+	inc	di
+	inc	si
+	dec	cx
+	jnz	.iet_plain
+	jmp	.iet_done
+.iet_quoted:
+	inc	si			; skip opening "
+.iet_q_loop:
+	mov	al, [si]
+	or	al, al
+	jz	.iet_done
+	cmp	al, '"'
+	je	.iet_q_end
+	mov	[di], al
+	inc	di
+	inc	si
+	dec	cx
+	jnz	.iet_q_loop
+	jmp	.iet_done
+.iet_q_end:
+	inc	si			; skip closing "
+.iet_done:
+	mov	byte [di], 0
+	pop	di
+	pop	cx
+	pop	ax
+	ret
+
+; ============================================================================
+; strip_quotes — If SI points at a '"'-delimited string, strip quotes in place
+; ============================================================================
+; Input:  SI = pointer to null-terminated string
+; Output: SI = pointer to unquoted content (may equal input)
+; Modifies the string in place by null-terminating at the closing quote.
+;
+strip_quotes:
+	cmp	byte [si], '"'
+	jne	.sq_done
+	inc	si
+	push	si
+.sq_find:
+	mov	al, [si]
+	or	al, al
+	jz	.sq_pop
+	cmp	al, '"'
+	je	.sq_close
+	inc	si
+	jmp	.sq_find
+.sq_close:
+	mov	byte [si], 0
+.sq_pop:
+	pop	si
+.sq_done:
+	ret
+
+; ============================================================================
+; str_eq — Compare two null-terminated strings case-sensitively
+; ============================================================================
+; Input:  SI, DI = two strings (in DS)
+; Output: AL = 1 if equal, 0 otherwise
+;
+str_eq:
+	push	si
+	push	di
+.se_loop:
+	mov	al, [si]
+	mov	ah, [di]
+	cmp	al, ah
+	jne	.se_neq
+	or	al, al
+	jz	.se_eq
+	inc	si
+	inc	di
+	jmp	.se_loop
+.se_eq:
+	pop	di
+	pop	si
+	mov	al, 1
+	ret
+.se_neq:
+	pop	di
+	pop	si
+	xor	al, al
+	ret
+
+; ============================================================================
+; if_resolve_file — For IF EXIST: parse filename at SI, check existence
+; ============================================================================
+; Input:  SI = pointer to "<filename> <command>"
+; Output: CF=0 if file exists, CF=1 if not; SI advanced past filename+spaces
+;
+if_resolve_file:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	di
+	push	bp
+	mov	bp, sp
+	; Save position to remember end of filename (we'll null-terminate there)
+	; Scan filename in place — up to space/null/CR
+	mov	bx, si			; BX = filename start
+.irf_scan:
+	mov	al, [si]
+	or	al, al
+	jz	.irf_end
+	cmp	al, 0x0D
+	je	.irf_end
+	cmp	al, ' '
+	je	.irf_end
+	cmp	al, 9
+	je	.irf_end
+	inc	si
+	jmp	.irf_scan
+.irf_end:
+	; SI points at terminator. Save original byte and null-terminate.
+	mov	al, [si]
+	push	ax			; save orig byte + terminator position
+	push	si
+	mov	byte [si], 0
+	; Now resolve_path expects SI at start of filename
+	push	si			; save end pointer
+	mov	si, bx
+	call	resolve_path
+	pop	bx			; BX = end pointer (after filename)
+	jc	.irf_notfound
+	; Read directory and find the file
+	call	read_resolved_dir
+	jc	.irf_notfound
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.irf_search:
+	cmp	cx, 0
+	je	.irf_notfound
+	mov	al, [si]
+	cmp	al, 0
+	je	.irf_notfound
+	cmp	al, 0xE5
+	je	.irf_next
+	; Skip volume label entries
+	test	byte [si+11], 0x08
+	jnz	.irf_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.irf_found
+.irf_next:
+	add	si, 32
+	dec	cx
+	jmp	.irf_search
+.irf_found:
+	; Restore byte at filename terminator and set SI past filename
+	pop	si			; original terminator position
+	pop	ax			; original byte
+	mov	[si], al
+	call	skip_spaces		; now at command (or end)
+	pop	bp
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.irf_notfound:
+	pop	si			; original terminator position
+	pop	ax			; original byte
+	mov	[si], al
+	call	skip_spaces
+	pop	bp
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
+	ret
 
 ; ============================================================================
 ; print_2digit — Print AX as 2-digit number with leading zero
@@ -6078,7 +6980,20 @@ do_exec:
 	jne	.exec_not_bat
 	cmp	byte [exec_fname+10], 'T'
 	jne	.exec_not_bat
-	; It's a .BAT — rebuild name and call run_batch
+	; It's a .BAT — rebuild name and call run_batch.
+	; IMPORTANT: preserve the command tail (args) which lives in cmd_buffer
+	; and will be clobbered by the rewrite. Copy it to expand_buf first.
+	push	si
+	mov	si, [exec_cmdtail_ptr]
+	mov	di, expand_buf
+.exec_bat_save_tail:
+	lodsb
+	mov	[di], al
+	inc	di
+	or	al, al
+	jnz	.exec_bat_save_tail
+	pop	si
+
 	mov	di, cmd_buffer
 	mov	si, exec_fname
 	mov	cx, 8
@@ -6099,7 +7014,14 @@ do_exec:
 	inc	di
 	mov	byte [di], 'T'
 	inc	di
-	mov	byte [di], 0
+	; Append saved tail (args) after ".BAT"
+	mov	si, expand_buf
+.exec_bat_append:
+	lodsb
+	mov	[di], al
+	inc	di
+	or	al, al
+	jnz	.exec_bat_append
 	mov	si, cmd_buffer
 	call	run_batch
 	jmp	cmd_loop
@@ -13619,6 +14541,15 @@ cmd_date	db	'DATE', 0
 cmd_time	db	'TIME', 0
 cmd_prompt	db	'PROMPT', 0
 cmd_path	db	'PATH', 0
+cmd_goto	db	'GOTO', 0
+cmd_if		db	'IF', 0
+cmd_shift	db	'SHIFT', 0
+cmd_call	db	'CALL', 0
+cmd_not		db	'NOT', 0
+cmd_exist	db	'EXIST', 0
+cmd_errorlevel	db	'ERRORLEVEL', 0
+msg_goto_target	db	'Label not found', 0x0D, 0x0A, 0
+msg_batch_only	db	'Batch only', 0x0D, 0x0A, 0
 
 ; ============================================================================
 ; I/O Redirection

@@ -97,6 +97,7 @@ nasm_assemble('find.asm', 'FIND.COM')
 nasm_assemble('fc.asm', 'FC.COM')
 nasm_assemble('tree.asm', 'TREE.COM')
 nasm_assemble('mem.asm', 'MEM.COM')
+nasm_assemble('debug.asm', 'DEBUG.COM')
 nasm_assemble('doskey.asm', 'DOSKEY.COM')
 nasm_assemble('testdrv.asm', 'TESTDRV.SYS')
 nasm_assemble('beep.asm', 'BEEP.COM')
@@ -133,7 +134,7 @@ if os.path.exists(hello_code_path):
     os.remove(hello_code_path)
 
 # Copy non-assembled files to target
-for fname in ['GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']:
+for fname in ['GWBASIC.EXE', 'AUTOEXEC.BAT', 'TESTBAT.BAT', 'TESTBAT2.BAT', 'README.TXT']:
     src = os.path.join(SRC_DIR, fname)
     dst = os.path.join(TARGET_DIR, fname)
     if os.path.exists(src):
@@ -459,8 +460,9 @@ next_cluster = 2 + shell_clusters
 root_files = ['EDLIN.COM', 'BEEP.COM', 'MORE.COM', 'DOSKEY.COM',
               'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
               'ATTRIB.COM', 'FIND.COM', 'FC.COM', 'TREE.COM', 'MEM.COM',
+              'DEBUG.COM',
               'TESTDRV.SYS', 'CONFIG.SYS',
-              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
+              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'TESTBAT.BAT', 'TESTBAT2.BAT', 'README.TXT']
 
 # --- Files in TEST subdirectory ---
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
