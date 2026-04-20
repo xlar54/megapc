@@ -94,11 +94,12 @@ TBL_BIOS_18     = TBL_BASE + (18 * 256)
 TBL_BIOS_19     = TBL_BASE + (19 * 256)
 
 ; --- Attic addresses ---
-ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic
-FLOPPY_A_ATTIC  = $8100000      ; Floppy A image in attic (1.44MB at +1MB)
-FLOPPY_B_ATTIC  = $8200000      ; Floppy B image in attic (1.44MB at +2MB)
-SCREEN_SAVE_ATTIC = $8400000    ; Screen save area in attic (for TAB menu)
-                                ; Must be past floppy B max ($8200000 + 1.44MB = $8368000)
+; Layout: 2MB per drive so 1.44MB images never overlap each other,
+; and sentinel-based size detection can safely scan past 720K.
+ATTIC_BASE      = $8000000      ; 8086 linear 0 in attic (1MB guest RAM)
+FLOPPY_A_ATTIC  = $8100000      ; Floppy A image — 2MB slot ($8100000-$82FFFFF)
+FLOPPY_B_ATTIC  = $8300000      ; Floppy B image — 2MB slot ($8300000-$84FFFFF)
+SCREEN_SAVE_ATTIC = $8500000    ; Screen save area in attic (for TAB menu)
 
 ; --- Cache constants ---
 CACHE_LINES     = 4             ; Number of cache lines

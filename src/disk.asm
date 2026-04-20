@@ -3,7 +3,8 @@
 ; ============================================================================
 ;
 ; Handles BIOS INT 13h disk services.
-; Floppy image is stored in attic RAM at FLOPPY_A_ATTIC ($8100000).
+; Drive A image: FLOPPY_A_ATTIC ($8100000, 2MB slot).
+; Drive B image: FLOPPY_B_ATTIC ($8300000, 2MB slot).
 ;
 ; Supported functions:
 ;   AH=00: Reset disk
@@ -922,12 +923,13 @@ _i13_write_dpt:
 ; load_floppy_drive — Load floppy disk image to attic RAM via Hyppo
 ; ============================================================================
 ; Uses Hyppo trap $2E (setname) and $3E (loadfile_attic).
-; Loads fd.img from SD card FAT32 to attic at FLOPPY_A_ATTIC ($8100000).
+; Loads the named floppy image from SD card FAT32 into attic.
 ;
 ; Hyppo setname: Y = high byte of page-aligned filename, A=$2E, sta $D640, clv
 ; Hyppo loadfile_attic: X=addr low, Y=addr mid, Z=addr high byte
 ;   Address is 28-bit: $08ZZYYXX (the $08 prefix means attic)
-;   For FLOPPY_A_ATTIC=$8100000: ZZ=$10, YY=$00, XX=$00
+;   Drive A: ZZ=$10 → $8100000 (2MB slot)
+;   Drive B: ZZ=$30 → $8300000 (2MB slot)
 ;
 ; Input:  A = drive number (0=A, 1=B)
 ;         floppy_fname_page = filename (page-aligned, null-terminated)
@@ -953,11 +955,11 @@ load_floppy_drive:
         clv
         bcc _lfd_fail
 
-        ; Load to attic: Drive A=$8100000 (ZZ=$10), Drive B=$8200000 (ZZ=$20)
+        ; Load to attic: Drive A=$8100000 (ZZ=$10), Drive B=$8300000 (ZZ=$30)
         pla                     ; Recover drive number
         pha
         beq _lfd_drive_a
-        ldz #$20                ; Drive B
+        ldz #$30                ; Drive B
         bra _lfd_load
 _lfd_drive_a:
         ldz #$10                ; Drive A
@@ -977,8 +979,8 @@ _lfd_load:
         sta floppy_b_loaded
         lda #0
         sta floppy_b_dirty      ; Fresh image, not dirty
-        lda #$20
-        sta floppy_b_bank       ; Attic bank for drive B
+        lda #$30
+        sta floppy_b_bank       ; Attic bank for drive B ($8300000)
         ; First, pick size-based default from sentinel scan
         lda #1
         jsr _lfd_detect_size
@@ -1023,25 +1025,25 @@ _lfd_fail_b:
 ; _lfd_fill_sentinel — Fill floppy's attic slot with $5A sentinel byte
 ; ============================================================================
 ; Input: A = drive (0=A, 1=B)
-; Fills 12 banks (768K) — enough to detect up to 720K images reliably.
-; Images > 720K keep using the 360K default (safe) since they're rare
-; as blank files and usually come pre-formatted.
+; Fills 24 banks (1.5MB) — enough to detect up to 1.44MB images.
+; Each drive gets its own 2MB attic slot, so filling 1.5MB never
+; overlaps the neighboring slot.
 ;
 _lfd_fill_sentinel:
-        ; Save drive and pick dma_dst_bank base ($10=A, $20=B)
+        ; Save drive and pick dma_dst_bank base ($10=A, $30=B)
         beq _lfs_a
-        lda #$20
+        lda #$30
         bra _lfs_set_base
 _lfs_a:
         lda #$10
 _lfs_set_base:
         sta _lfs_bank_base
-        ; Fill 12 banks of 64K each = 768K
+        ; Fill 24 banks of 64K each = 1.5MB
         lda #0
         sta _lfs_chunk
 _lfs_loop:
         lda _lfs_chunk
-        cmp #12
+        cmp #24
         bcs _lfs_done
         ; Set dma target for this chunk
         clc
@@ -1071,7 +1073,7 @@ _lfs_bank_base  .byte 0
 ;
 ; Boundary offsets (first byte past each standard image size):
 ;   160K = $028000, 180K = $02D000, 320K = $050000,
-;   360K = $05A000, 720K = $0B4000
+;   360K = $05A000, 720K = $0B4000, 1.2MB = $12C000
 ; Check 4 bytes at each boundary — if all $5A, image is ≤ that size.
 ; Falls back to 1.44MB if no sentinel match in checked range.
 ;
@@ -1079,9 +1081,9 @@ _lfd_detect_size:
         sta _lfd_det_drive
         ; _lds_mb_nibble holds the drive's MB offset shifted to high nibble:
         ;   drive A (attic MB 1) → $10
-        ;   drive B (attic MB 2) → $20
+        ;   drive B (attic MB 3) → $30
         beq _lds_a
-        lda #$20
+        lda #$30
         bra _lds_mb_done
 _lds_a:
         lda #$10
@@ -1119,7 +1121,13 @@ _lds_mb_done:
         ldy #$0B
         jsr _lds_check4
         bcs _lds_720
-        ; Default: treat as 1.44MB
+        ; 1.2MB boundary: bank $12, addr $C000
+        lda #$00
+        ldx #$C0
+        ldy #$12
+        jsr _lds_check4
+        bcs _lds_12m
+        ; Default: treat as 1.44MB (or larger)
         bra _lds_144
 
 ; Store SPT, heads, cyls, type to floppy_a_* or floppy_b_* based on drive.
@@ -1181,6 +1189,13 @@ _lds_720:
         sta _lds_geom_type
         lda #80
         jmp _lds_store
+_lds_12m:
+        ldx #15
+        ldy #2
+        lda #$02
+        sta _lds_geom_type
+        lda #80
+        jmp _lds_store
 _lds_144:
         ldx #18
         ldy #2
@@ -1198,15 +1213,18 @@ _lds_geom_type  .byte 0
 ; Builds a 32-bit flat pointer for 45GS02 [ptr],z addressing:
 ;   byte 0 = addr_lo (A)
 ;   byte 1 = addr_hi (X)
-;   byte 2 = (drive_MB_nibble << 4) | bank_within_drive
-;           where drive_MB_nibble = 1 for A ($81), 2 for B ($82)
+;   byte 2 = drive_base_nibble + Y  (ADDITION, not OR — Y may exceed $0F,
+;           e.g. bank $12 for the 1.2MB boundary, which must carry into
+;           the high nibble to advance the MB offset correctly)
+;           drive A base = $10, drive B base = $30
 ;   byte 3 = $08 (attic region)
 _lds_check4:
         sta temp_ptr
         stx temp_ptr+1
-        ; byte 2: combine drive MB nibble (high) with bank (low)
+        ; byte 2: drive base + Y (ADC so bank counts > 15 carry into MB)
         tya
-        ora _lds_mb_nibble      ; $10 or $20 or'd with bank
+        clc
+        adc _lds_mb_nibble      ; $10 (A) or $30 (B) + bank count
         sta temp_ptr+2
         lda #$08                ; attic marker in byte 3
         sta temp_ptr+3

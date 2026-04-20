@@ -860,7 +860,7 @@ menu_save_screen:
         lda #$00
         sta dma_dst_lo
         sta dma_dst_hi
-        lda #$40                ; SCREEN_SAVE_ATTIC = $8400000
+        lda #$50                ; SCREEN_SAVE_ATTIC = $8500000
         sta dma_dst_bank
 
         lda #<2000
@@ -881,8 +881,8 @@ menu_save_screen:
         sta dma_dst_lo
         lda #$07
         sta dma_dst_hi
-        lda #$40
-        sta dma_dst_bank        ; $84007D0
+        lda #$50
+        sta dma_dst_bank        ; $85007D0
 
         lda #<2000
         sta dma_count_lo
@@ -899,7 +899,7 @@ menu_restore_screen:
         lda #$00
         sta dma_src_lo
         sta dma_src_hi
-        lda #$40
+        lda #$50
         sta dma_src_bank
 
         lda #<SCREEN_BASE
@@ -920,7 +920,7 @@ menu_restore_screen:
         sta dma_src_lo
         lda #$07
         sta dma_src_hi
-        lda #$40
+        lda #$50
         sta dma_src_bank
 
         lda #$00
