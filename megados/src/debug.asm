@@ -71,7 +71,46 @@ start:
 
 	mov	si, msg_banner
 	call	print_str
-	jmp	main_loop
+
+	; If a filename was passed on the DEBUG command line (PSP:0x80 tail),
+	; copy it into cmd_text, store via store_filename, and jump into the
+	; load path so "DEBUG FOO.COM" auto-loads FOO.COM at target:0x100.
+	push	ds
+	mov	ds, [psp_seg]
+	mov	al, [0x80]
+	pop	ds
+	or	al, al
+	jz	main_loop
+	xor	ah, ah
+	mov	cx, ax
+	push	ds
+	mov	ds, [psp_seg]
+	mov	si, 0x81
+	push	cs
+	pop	es
+	mov	di, cmd_text
+.auto_copy:
+	mov	al, [si]
+	cmp	al, 0x0D
+	je	.auto_copy_done
+	or	al, al
+	jz	.auto_copy_done
+	mov	[es:di], al
+	inc	si
+	inc	di
+	loop	.auto_copy
+.auto_copy_done:
+	mov	byte [es:di], 0
+	pop	ds
+	mov	si, cmd_text
+	call	skip_delims
+	cmp	byte [si], 0
+	je	main_loop
+	call	store_filename
+	jc	main_loop
+	cmp	byte [file_name_set], 0
+	je	main_loop
+	jmp	cmd_load.load_have_name
 
 start_fail:
 	mov	si, msg_no_memory
@@ -346,6 +385,20 @@ cmd_regs:
 	cmp	byte [si], 0
 	je	.show_all
 
+	; "R F" alone (not "RFL") enters flag-edit mode.
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'F'
+	jne	.parse_reg_ptr_call
+	mov	al, [si + 1]
+	or	al, al
+	jz	.flag_edit
+	cmp	al, ' '
+	je	.flag_edit
+	cmp	al, 9
+	je	.flag_edit
+	; Not "F<ws>" — fall through (probably FL)
+.parse_reg_ptr_call:
 	call	parse_reg_ptr
 	jc	cmd_error
 	mov	[reg_ptr], bx
@@ -361,6 +414,11 @@ cmd_regs:
 	jne	cmd_error
 
 .show_all:
+	call	show_target_regs
+	jmp	main_loop
+
+.flag_edit:
+	call	do_flag_edit
 	call	show_target_regs
 	jmp	main_loop
 
@@ -501,6 +559,11 @@ show_target_regs:
 	call	print_str
 	mov	ax, [target_flags]
 	call	print_hex16
+	mov	al, ' '
+	call	putc
+	mov	al, ' '
+	call	putc
+	call	print_flags_mnemonic
 	call	crlf
 
 	mov	si, msg_def
@@ -518,6 +581,131 @@ show_target_regs:
 	call	print_hex16
 	call	crlf
 	ret
+
+; ============================================================================
+; print_flags_mnemonic — print 8 space-separated flag mnemonics for target_flags
+; ============================================================================
+; Uses the classic DEBUG form: OV/NV DN/UP EI/DI NG/PL ZR/NZ AC/NA PE/PO CY/NC
+;
+print_flags_mnemonic:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	si
+	mov	dx, [target_flags]
+	mov	bx, flag_mnem_tbl
+	mov	cx, 8
+.pfm_loop:
+	mov	ax, [bx + 4]		; bit mask
+	test	dx, ax
+	jz	.pfm_clear
+	mov	si, bx			; set mnemonic at bx+0
+	jmp	.pfm_print
+.pfm_clear:
+	lea	si, [bx + 2]		; clear mnemonic at bx+2
+.pfm_print:
+	mov	al, [si]
+	call	putc
+	mov	al, [si + 1]
+	call	putc
+	add	bx, 6
+	dec	cx
+	jz	.pfm_done
+	mov	al, ' '
+	call	putc
+	jmp	.pfm_loop
+.pfm_done:
+	pop	si
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; do_flag_edit — "R F": show current mnemonics, read input, toggle flags
+; ============================================================================
+; Each input token is a 2-char mnemonic. Set mnemonics set the flag;
+; clear mnemonics clear the flag. Unknown tokens are ignored.
+;
+do_flag_edit:
+	call	print_flags_mnemonic
+	mov	al, ' '
+	call	putc
+	mov	al, '-'
+	call	putc
+	call	read_command
+	mov	si, cmd_text
+.fe_tok:
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.fe_done
+	; Build uppercased 2-char token in DX (DL=first, DH=second)
+	mov	al, [si]
+	call	to_upper
+	mov	dl, al
+	mov	al, [si + 1]
+	call	to_upper
+	mov	dh, al
+	inc	si
+	inc	si
+	; Walk flag_mnem_tbl
+	push	si
+	mov	si, flag_mnem_tbl
+	mov	cx, 8
+.fe_walk:
+	mov	ax, [si]		; SET mnemonic (little-endian 2 bytes)
+	cmp	ax, dx
+	je	.fe_set
+	mov	ax, [si + 2]		; CLEAR mnemonic
+	cmp	ax, dx
+	je	.fe_clear
+	add	si, 6
+	loop	.fe_walk
+	pop	si
+	jmp	.fe_tok
+.fe_set:
+	mov	ax, [si + 4]
+	or	[target_flags], ax
+	pop	si
+	jmp	.fe_tok
+.fe_clear:
+	mov	ax, [si + 4]
+	not	ax
+	and	[target_flags], ax
+	pop	si
+	jmp	.fe_tok
+.fe_done:
+	ret
+
+; Flag mnemonic table — 8 entries × 6 bytes each.
+; Layout per entry: [0..1] SET mnemonic, [2..3] CLEAR mnemonic, [4..5] bit mask
+flag_mnem_tbl:
+	db	'OV'
+	db	'NV'
+	dw	0x0800		; OF
+	db	'DN'
+	db	'UP'
+	dw	0x0400		; DF
+	db	'EI'
+	db	'DI'
+	dw	0x0200		; IF
+	db	'NG'
+	db	'PL'
+	dw	0x0080		; SF
+	db	'ZR'
+	db	'NZ'
+	dw	0x0040		; ZF
+	db	'AC'
+	db	'NA'
+	dw	0x0010		; AF
+	db	'PE'
+	db	'PO'
+	dw	0x0004		; PF
+	db	'CY'
+	db	'NC'
+	dw	0x0001		; CF
 
 cmd_compare:
 	inc	si
@@ -3351,6 +3539,7 @@ msg_help	db	0x0D, 0x0A
 		db	'P [addr]            Proceed', 0x0D, 0x0A
 		db	'S start end bytes   Search byte pattern', 0x0D, 0x0A
 		db	'R [reg [value]]     Show/edit target registers', 0x0D, 0x0A
+		db	'R F                 Edit flags (OV/NV DN/UP ...)', 0x0D, 0x0A
 		db	'T [addr]            Trace', 0x0D, 0x0A
 		db	'U [addr] [count]    Unassemble', 0x0D, 0x0A
 		db	'W                   Write target bytes', 0x0D, 0x0A
