@@ -36,6 +36,12 @@ LINE_BYTES	equ	16
 SEARCH_MAX	equ	32
 FNAME_MAX	equ	79
 
+; User breakpoint table
+BP_COUNT	equ	10
+BP_SIZE		equ	6		; per slot: seg(2) off(2) orig(1) flags(1)
+BP_F_ACTIVE	equ	0x01		; user set this BP
+BP_F_PATCHED	equ	0x02		; bp_install wrote CC this run
+
 MODE_GO		equ	0
 MODE_TRACE	equ	1
 MODE_PROCEED	equ	2
@@ -91,6 +97,8 @@ main_loop:
 	je	cmd_quit
 	cmp	al, 'A'
 	je	cmd_assemble
+	cmp	al, 'B'
+	je	cmd_b_group
 	cmp	al, 'C'
 	je	cmd_compare
 	cmp	al, 'D'
@@ -311,6 +319,7 @@ cmd_run_common:
 .run_ready:
 	call	prepare_run
 	jc	cmd_error
+	call	bp_install
 	cmp	byte [run_mode], MODE_PROCEED
 	jne	.run_do
 	call	setup_proceed_break
@@ -979,7 +988,9 @@ cmd_error:
 
 run_return:
 	call	restore_debug_vectors
+	call	stop_adjust_ip		; adjusts target_ip if stop was at a planted CC
 	call	restore_temp_break
+	call	bp_restore
 	push	cs
 	pop	ds
 	push	cs
@@ -1037,6 +1048,20 @@ reset_target_frame:
 	mov	[last_dump_seg], ax
 	mov	word [last_dump_off], 0x0100
 	call	seed_target_stack
+	; Clear user breakpoint table — old BPs from a prior target are no
+	; longer valid offsets in this one.
+	push	cx
+	push	di
+	mov	cx, BP_COUNT * BP_SIZE
+	mov	di, bp_table
+	xor	al, al
+	push	es
+	push	ds
+	pop	es
+	rep	stosb
+	pop	es
+	pop	di
+	pop	cx
 	ret
 
 seed_target_stack:
@@ -1344,9 +1369,8 @@ setup_proceed_break:
 	ret
 
 ; ============================================================================
-; restore_temp_break — Undo setup_proceed_break's patched byte.
-; If the stop came from our own temp CC, roll target_ip back by 1 so it
-; points at the restored instruction (INT3 pushes CS:IP+1).
+; restore_temp_break — Undo setup_proceed_break's patched byte (IP adjust is
+; handled by stop_adjust_ip, which covers both P's temp break and user BPs).
 ; ============================================================================
 restore_temp_break:
 	cmp	byte [temp_break_active], 0
@@ -1359,25 +1383,284 @@ restore_temp_break:
 	mov	bx, [temp_break_off]
 	mov	al, [temp_break_orig]
 	mov	[es:bx], al
-	; Was this stop our temp break? STOP_BREAK + target_ip-1 == temp_break_off
-	; (and matching segment)
-	cmp	byte [stop_reason], STOP_BREAK
-	jne	.rtb_clear
-	mov	ax, [target_cs]
-	cmp	ax, [temp_break_seg]
-	jne	.rtb_clear
-	mov	ax, [target_ip]
-	dec	ax
-	cmp	ax, [temp_break_off]
-	jne	.rtb_clear
-	mov	[target_ip], ax
-.rtb_clear:
 	mov	byte [temp_break_active], 0
 	pop	es
 	pop	bx
 	pop	ax
 .rtb_done:
 	ret
+
+; ============================================================================
+; bp_install — patch 0xCC at every active user breakpoint, save original byte
+; ============================================================================
+; Skips any slot that sits at target_cs:target_ip so the user can G through
+; the instruction they're currently stopped on without the BP firing again.
+; Sets BP_F_PATCHED in each slot actually written so bp_restore knows which
+; slots to undo.
+;
+bp_install:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	es
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+.bpi_loop:
+	mov	al, [si + 5]
+	test	al, BP_F_ACTIVE
+	jz	.bpi_next
+	; Skip BP at target_cs:target_ip (would re-fire immediately)
+	mov	ax, [target_cs]
+	cmp	ax, [si]
+	jne	.bpi_do
+	mov	ax, [target_ip]
+	cmp	ax, [si + 2]
+	je	.bpi_next
+.bpi_do:
+	mov	ax, [si]
+	mov	es, ax
+	mov	bx, [si + 2]
+	mov	al, [es:bx]
+	mov	[si + 4], al
+	mov	byte [es:bx], 0xCC
+	or	byte [si + 5], BP_F_PATCHED
+.bpi_next:
+	add	si, BP_SIZE
+	loop	.bpi_loop
+	pop	es
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; bp_restore — write original byte back at every slot we patched
+; ============================================================================
+; Only touches slots that bp_install marked BP_F_PATCHED. Clears the flag
+; after restore but leaves BP_F_ACTIVE set so the BP re-arms on next G.
+;
+bp_restore:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	es
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+.bpr_loop:
+	test	byte [si + 5], BP_F_PATCHED
+	jz	.bpr_next
+	mov	ax, [si]
+	mov	es, ax
+	mov	bx, [si + 2]
+	mov	al, [si + 4]
+	mov	[es:bx], al
+	and	byte [si + 5], ~BP_F_PATCHED & 0xFF
+.bpr_next:
+	add	si, BP_SIZE
+	loop	.bpr_loop
+	pop	es
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; stop_adjust_ip — If the stop was at a planted INT 3 (P's temp break or a
+; user BP), roll target_ip back by 1 so it points at the restored instruction.
+; If INT 3 was in user code (CC compiled into the program), leave IP alone.
+; ============================================================================
+; Assumes bp_restore and restore_temp_break have NOT yet run (uses their
+; saved addresses to identify the hit). Caller should invoke this BEFORE
+; the restore pair.
+;
+stop_adjust_ip:
+	cmp	byte [stop_reason], STOP_BREAK
+	jne	.sai_done
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	mov	bx, [target_cs]
+	mov	ax, [target_ip]
+	dec	ax			; AX = address of CC byte
+	; Check P's temp break first
+	cmp	byte [temp_break_active], 0
+	je	.sai_check_user
+	cmp	bx, [temp_break_seg]
+	jne	.sai_check_user
+	cmp	ax, [temp_break_off]
+	jne	.sai_check_user
+	mov	[target_ip], ax
+	jmp	.sai_out
+.sai_check_user:
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+.sai_loop:
+	test	byte [si + 5], BP_F_PATCHED
+	jz	.sai_next
+	cmp	bx, [si]
+	jne	.sai_next
+	cmp	ax, [si + 2]
+	jne	.sai_next
+	mov	[target_ip], ax
+	jmp	.sai_out
+.sai_next:
+	add	si, BP_SIZE
+	loop	.sai_loop
+.sai_out:
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+.sai_done:
+	ret
+
+; ============================================================================
+; cmd_b_group — dispatch BP / BL / BC subcommands
+; ============================================================================
+cmd_b_group:
+	inc	si			; past 'B'
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'P'
+	je	do_bp
+	cmp	al, 'L'
+	je	do_bl
+	cmp	al, 'C'
+	je	do_bc
+	jmp	cmd_error
+
+; --- BP seg:off | BP off ---
+do_bp:
+	inc	si
+	call	skip_delims
+	call	parse_addr
+	jc	cmd_error
+	; AX = off, DX = seg
+	push	ax
+	push	dx
+	; Scan for duplicate; remember first free slot
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+	xor	di, di			; DI = free-slot pointer, 0 = none
+.dbp_scan:
+	test	byte [si + 5], BP_F_ACTIVE
+	jnz	.dbp_active
+	; Free slot
+	or	di, di
+	jnz	.dbp_scan_next
+	mov	di, si
+	jmp	.dbp_scan_next
+.dbp_active:
+	cmp	dx, [si]
+	jne	.dbp_scan_next
+	cmp	ax, [si + 2]
+	jne	.dbp_scan_next
+	; Duplicate
+	pop	dx
+	pop	ax
+	mov	si, msg_bp_dup
+	call	print_str
+	jmp	main_loop
+.dbp_scan_next:
+	add	si, BP_SIZE
+	loop	.dbp_scan
+	pop	dx
+	pop	ax
+	or	di, di
+	jz	.dbp_full
+	mov	[di], dx
+	mov	[di + 2], ax
+	mov	byte [di + 5], BP_F_ACTIVE
+	mov	si, msg_bp_set
+	call	print_str
+	jmp	main_loop
+.dbp_full:
+	mov	si, msg_bp_full
+	call	print_str
+	jmp	main_loop
+
+; --- BL (list breakpoints) ---
+do_bl:
+	inc	si
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+	xor	bx, bx			; index 0..9
+	mov	byte [bp_list_any], 0
+.dbl_loop:
+	test	byte [si + 5], BP_F_ACTIVE
+	jz	.dbl_next
+	mov	byte [bp_list_any], 1
+	push	bx
+	push	cx
+	push	si
+	mov	al, bl
+	add	al, '0'
+	call	putc
+	mov	al, ':'
+	call	putc
+	mov	al, ' '
+	call	putc
+	mov	ax, [si]
+	call	print_hex16
+	mov	al, ':'
+	call	putc
+	mov	ax, [si + 2]
+	call	print_hex16
+	call	crlf
+	pop	si
+	pop	cx
+	pop	bx
+.dbl_next:
+	inc	bx
+	add	si, BP_SIZE
+	loop	.dbl_loop
+	cmp	byte [bp_list_any], 0
+	jne	.dbl_done
+	mov	si, msg_bp_none
+	call	print_str
+.dbl_done:
+	jmp	main_loop
+
+; --- BC n | BC * ---
+do_bc:
+	inc	si
+	call	skip_delims
+	cmp	byte [si], '*'
+	je	.dbc_all
+	call	parse_hex_byte
+	jc	cmd_error
+	cmp	al, BP_COUNT
+	jae	cmd_error
+	xor	ah, ah
+	mov	bl, BP_SIZE
+	mul	bl			; AX = idx * BP_SIZE
+	mov	si, bp_table
+	add	si, ax
+	test	byte [si + 5], BP_F_ACTIVE
+	jz	.dbc_notset
+	mov	byte [si + 5], 0
+	mov	si, msg_bp_cleared
+	call	print_str
+	jmp	main_loop
+.dbc_notset:
+	mov	si, msg_bp_notset
+	call	print_str
+	jmp	main_loop
+.dbc_all:
+	mov	cx, BP_COUNT
+	mov	si, bp_table
+.dbc_all_loop:
+	mov	byte [si + 5], 0
+	add	si, BP_SIZE
+	loop	.dbc_all_loop
+	mov	si, msg_bp_cleared_all
+	call	print_str
+	jmp	main_loop
 
 int1_handler:
 	mov	byte [cs:stop_reason], STOP_TRACE
@@ -2906,6 +3189,9 @@ msg_banner	db	0x0D, 0x0A
 
 msg_help	db	0x0D, 0x0A
 		db	'A addr ...           Assemble (limited set)', 0x0D, 0x0A
+		db	'BP addr             Set breakpoint', 0x0D, 0x0A
+		db	'BL                  List breakpoints', 0x0D, 0x0A
+		db	'BC n | *            Clear breakpoint n (or all)', 0x0D, 0x0A
 		db	'C start end dest    Compare memory', 0x0D, 0x0A
 		db	'D [addr] [end]      Dump memory', 0x0D, 0x0A
 		db	'E addr bytes...     Enter hex bytes', 0x0D, 0x0A
@@ -2940,6 +3226,13 @@ msg_too_big	db	'File too large', 0x0D, 0x0A, 0
 msg_file_error	db	'File error', 0x0D, 0x0A, 0
 msg_stopped	db	'Execution stopped', 0x0D, 0x0A, 0
 msg_not_yet	db	'Not implemented yet', 0x0D, 0x0A, 0
+msg_bp_set	db	'BP set', 0x0D, 0x0A, 0
+msg_bp_dup	db	'BP already at that address', 0x0D, 0x0A, 0
+msg_bp_full	db	'BP table full', 0x0D, 0x0A, 0
+msg_bp_none	db	'No breakpoints', 0x0D, 0x0A, 0
+msg_bp_cleared	db	'BP cleared', 0x0D, 0x0A, 0
+msg_bp_cleared_all	db	'All BPs cleared', 0x0D, 0x0A, 0
+msg_bp_notset	db	'BP not set', 0x0D, 0x0A, 0
 
 msg_ax		db	'AX=', 0
 msg_bx		db	' BX=', 0
@@ -3079,5 +3372,9 @@ temp_break_active	db	0
 temp_break_seg		dw	0
 temp_break_off		dw	0
 temp_break_orig		db	0
+
+; User breakpoint table
+bp_table:	times BP_COUNT * BP_SIZE db 0
+bp_list_any	db	0
 
 end_of_prog:
