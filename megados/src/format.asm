@@ -140,11 +140,20 @@ start:
 	mov	[bpb_heads], ax
 
 	; Determine format-specific BPB values from total sectors
+	; 320  = 160K  (40*1*8)  → SPC=1, SPF=1, root=64,  media=FE
+	; 360  = 180K  (40*1*9)  → SPC=1, SPF=2, root=64,  media=FC
+	; 640  = 320K  (40*2*8)  → SPC=2, SPF=1, root=112, media=FF
 	; 720  = 360K  (40*2*9)  → SPC=2, SPF=2, root=112, media=FD
 	; 1440 = 720K  (80*2*9)  → SPC=2, SPF=3, root=112, media=F9
 	; 2400 = 1.2MB (80*2*15) → SPC=1, SPF=7, root=224, media=F9
 	; 2880 = 1.44MB(80*2*18) → SPC=1, SPF=9, root=224, media=F0
 	mov	ax, [bpb_totsec]
+	cmp	ax, 320
+	je	.fmt_160k
+	cmp	ax, 360
+	je	.fmt_180k
+	cmp	ax, 640
+	je	.fmt_320k
 	cmp	ax, 720
 	je	.fmt_360k
 	cmp	ax, 1440
@@ -155,6 +164,27 @@ start:
 	je	.fmt_1440k
 	; Unknown — default to 360K-like
 	jmp	.fmt_360k
+
+.fmt_160k:
+	mov	byte [bpb_spc], 1
+	mov	word [bpb_spf], 1
+	mov	word [bpb_rootents], 64
+	mov	byte [bpb_media], 0xFE
+	jmp	.fmt_detected
+
+.fmt_180k:
+	mov	byte [bpb_spc], 1
+	mov	word [bpb_spf], 2
+	mov	word [bpb_rootents], 64
+	mov	byte [bpb_media], 0xFC
+	jmp	.fmt_detected
+
+.fmt_320k:
+	mov	byte [bpb_spc], 2
+	mov	word [bpb_spf], 1
+	mov	word [bpb_rootents], 112
+	mov	byte [bpb_media], 0xFF
+	jmp	.fmt_detected
 
 .fmt_360k:
 	mov	byte [bpb_spc], 2

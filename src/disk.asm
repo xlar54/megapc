@@ -1429,7 +1429,7 @@ _dfg_160k:
         jsr _dfg_store_heads
         lda #40
         jsr _dfg_store_cyls
-        lda #$01
+        lda #$01                ; BIOS type: 5.25" DD (same group as 360K)
         jsr _dfg_store_type
         bra _dfg_print
 
@@ -1587,17 +1587,60 @@ _dfg_print:
         lda #'('
         jsr CHROUT
 
-        ; Print format name based on type
+        ; Pick format name by BIOS type first (handles 720K and 1.2MB
+        ; unambiguously), then disambiguate the DD (type=$01) formats
+        ; by SPT + heads.
         jsr _dfg_read_type
-        cmp #$01
-        beq _dfg_p360
         cmp #$02
         beq _dfg_p12
         cmp #$03
         beq _dfg_p720
+        cmp #$01
+        beq _dfg_pick_dd
         ; Default: 1.44MB
         ldx #0
 -       lda _dfg_144,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+
+_dfg_pick_dd:
+        ; type $01 covers 160K/180K/320K/360K — pick by SPT + heads
+        jsr _dfg_read_heads
+        cmp #2
+        beq _dfg_pick_dd_2h
+        ; 1 head: 160K (8 SPT) or 180K (9 SPT)
+        jsr _dfg_read_spt
+        cmp #9
+        beq _dfg_p180
+        bra _dfg_p160
+_dfg_pick_dd_2h:
+        ; 2 heads: 320K (8 SPT) or 360K (9 SPT)
+        jsr _dfg_read_spt
+        cmp #9
+        beq _dfg_p360
+        bra _dfg_p320
+_dfg_p160:
+        ldx #0
+-       lda _dfg_160,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p180:
+        ldx #0
+-       lda _dfg_180,x
+        beq _dfg_close
+        jsr CHROUT
+        inx
+        bne -
+        bra _dfg_close
+_dfg_p320:
+        ldx #0
+-       lda _dfg_320,x
         beq _dfg_close
         jsr CHROUT
         inx
@@ -1744,6 +1787,12 @@ _dfg_read_type:
 
 _dfg_msg:
         .text "FLOPPY: ", 0
+_dfg_160:
+        .text "160K", 0
+_dfg_180:
+        .text "180K", 0
+_dfg_320:
+        .text "320K", 0
 _dfg_360:
         .text "360K", 0
 _dfg_720:
