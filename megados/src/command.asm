@@ -614,6 +614,12 @@ start_init:
 	; INT 24h — Critical error handler
 	mov	word [es:0x90], int24_handler
 	mov	word [es:0x92], SHELL_SEG
+	; INT 28h — DOS idle (safe IRET stub)
+	mov	word [es:0xA0], int_iret_stub
+	mov	word [es:0xA2], SHELL_SEG
+	; INT 2Ah — Network/critical section (safe IRET stub; GW-BASIC probes this)
+	mov	word [es:0xA8], int_iret_stub
+	mov	word [es:0xAA], SHELL_SEG
 
 	; Restore ES = SHELL_SEG
 	push	ds
@@ -13262,6 +13268,16 @@ int23_handler:
 ; Default handler: return AL=3 (fail the call)
 int24_handler:
 	mov	al, 3		; Fail
+	iret
+
+; ============================================================================
+; int_iret_stub — No-op handler for DOS interrupts we don't implement
+; ============================================================================
+; Used for INT 28h (DOS idle), INT 2Ah (network/critical section check).
+; GW-BASIC probes INT 2Ah at startup with AH=0; IRET preserves AH=0 so the
+; caller sees "not installed", which is the correct answer.
+;
+int_iret_stub:
 	iret
 
 ; Global wrapper for mcb_merge_free (callable from outside int21_handler)
