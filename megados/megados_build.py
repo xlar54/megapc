@@ -457,17 +457,19 @@ next_dir_entry = 1
 next_cluster = 2 + shell_clusters
 
 # --- Files in root directory ---
-root_files = ['EDLIN.COM', 'BEEP.COM', 'MORE.COM', 'DOSKEY.COM',
+root_files = ['EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
               'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
               'ATTRIB.COM', 'FIND.COM', 'FC.COM', 'TREE.COM', 'MEM.COM',
               'DEBUG.COM',
               'TESTDRV.SYS', 'CONFIG.SYS',
-              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'TESTBAT.BAT', 'TESTBAT2.BAT', 'README.TXT']
+              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
 
 # --- Files in TEST subdirectory ---
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
               'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'ARGS.COM',
+              'BEEP.COM',
+              'TESTBAT.BAT', 'TESTBAT2.BAT',
               'HELLO.EXE', 'README.TXT']
 
 def add_file_to_image(fname, dir_offset, dir_entry_idx):

@@ -20,10 +20,10 @@ goto lbl_b
 :lbl_d
 
 echo [if exist]
-if exist command.com echo   pass: command.com found
+if exist test.com echo   pass: test.com found
 if not exist nosuch.xyz echo   pass: nosuch.xyz not found
 if exist nosuch.xyz echo   fail: ghost file
-if not exist command.com echo   fail: command.com missing
+if not exist test.com echo   fail: test.com missing
 
 echo [if string]
 if foo==foo echo   pass: foo eq foo
