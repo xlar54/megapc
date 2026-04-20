@@ -431,9 +431,43 @@ cmd_assemble:
 	mov	[work_start], ax
 	call	skip_delims
 	cmp	byte [si], 0
-	je	cmd_error
+	je	.a_interactive
+	; One-shot: "A addr <instruction>"
 	call	assemble_line
 	jc	cmd_error
+	mov	ax, [work_seg]
+	mov	[last_dump_seg], ax
+	mov	ax, [work_start]
+	mov	[last_dump_off], ax
+	jmp	main_loop
+
+; --- Interactive assemble mode ---
+; Prompt with "SEG:OFF _" each line. Empty line exits. On failure the
+; error is shown and the same address is re-prompted. On success the
+; address advances (assemble_line has updated work_start).
+.a_interactive:
+.ai_prompt:
+	mov	ax, [work_seg]
+	call	print_hex16
+	mov	al, ':'
+	call	putc
+	mov	ax, [work_start]
+	call	print_hex16
+	mov	al, ' '
+	call	putc
+	call	read_command
+	mov	si, cmd_text
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.ai_done
+	call	assemble_line
+	jc	.ai_err
+	jmp	.ai_prompt
+.ai_err:
+	mov	si, msg_error
+	call	print_str
+	jmp	.ai_prompt
+.ai_done:
 	mov	ax, [work_seg]
 	mov	[last_dump_seg], ax
 	mov	ax, [work_start]
@@ -445,12 +479,14 @@ cmd_unassemble:
 	call	skip_delims
 	cmp	byte [si], 0
 	jne	.u_have_addr
-	mov	ax, [target_cs]
+	; "U" alone: continue 32 bytes from last_dump_off (or target IP on first call)
+	mov	ax, [last_dump_seg]
 	mov	[work_seg], ax
-	mov	ax, [target_ip]
+	mov	ax, [last_dump_off]
 	mov	[work_start], ax
-	mov	cx, 8
-	jmp	.u_loop_check
+	add	ax, 0x1F
+	mov	[u_end_off], ax
+	jmp	.u_run
 
 .u_have_addr:
 	call	parse_addr
@@ -459,25 +495,26 @@ cmd_unassemble:
 	mov	[work_start], ax
 	call	skip_delims
 	cmp	byte [si], 0
-	je	.u_default_count
+	je	.u_default_end
+	; Parse second argument as inclusive end address (classic DEBUG syntax).
 	call	parse_hex_word
 	jc	cmd_error
-	mov	cx, ax
-	jmp	.u_loop_check
+	mov	[u_end_off], ax
+	jmp	.u_run
 
-.u_default_count:
-	mov	cx, 8
+.u_default_end:
+	mov	ax, [work_start]
+	add	ax, 0x1F			; ~32 bytes default window
+	mov	[u_end_off], ax
 
-.u_loop_check:
-	or	cx, cx
-	jz	main_loop
-
-.u_loop:
-	push	cx
+.u_run:
+	mov	ax, [work_start]
+	cmp	ax, [u_end_off]
+	ja	.u_done
 	call	disasm_current
 	mov	[work_start], ax
-	pop	cx
-	loop	.u_loop
+	jmp	.u_run
+.u_done:
 	mov	ax, [work_seg]
 	mov	[last_dump_seg], ax
 	mov	ax, [work_start]
@@ -2804,7 +2841,9 @@ disasm_current:
 	inc	ax
 
 .du_done:
+	push	ax			; crlf clobbers AL (and thus the returned offset)
 	call	crlf
+	pop	ax
 	pop	es
 	pop	di
 	pop	si
@@ -3712,5 +3751,7 @@ bp_table:	times BP_COUNT * BP_SIZE db 0
 bp_list_any	db	0
 bp_skip_pending	db	0		; 1 = int1_handler should re-install BPs and continue
 bp_install_force db	0		; 1 = install every active BP even at current IP
+
+u_end_off	dw	0		; U command: inclusive end offset
 
 end_of_prog:
