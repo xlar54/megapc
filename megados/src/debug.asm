@@ -8,16 +8,16 @@
 ;   G [addr]            Go
 ;   H value1 value2     Hex add/subtract
 ;   I port              Input byte from port
-;   L                   Load named file at target:0100
+;   L [file [args]]     Load file at target:0100 (EXE aware)
 ;   M start end dest    Move range
-;   N filename          Set current file name
+;   N file [args]       Set current file name and target args
 ;   O port byte         Output byte to port
 ;   P [addr]            Proceed one instruction
 ;   R [reg [value]]     Show or edit target registers
 ;   S start end bytes   Search for hex byte pattern
 ;   T [addr]            Trace one instruction
-;   U [addr] [count]    Unassemble
-;   W                   Write target bytes to named file
+;   U [addr [end]]      Unassemble
+;   W [addr [len]]      Write bytes to named file
 ;   R                   Show debugger state
 ;   ?                   Show help
 ;   Q                   Quit
@@ -106,10 +106,65 @@ start:
 	call	skip_delims
 	cmp	byte [si], 0
 	je	main_loop
+	; Split filename and args. BX = start of filename; scan SI to the
+	; first whitespace/null to find filename end; temporarily null-
+	; terminate there, call store_filename, then restore the char.
+	mov	bx, si
+.auto_fname_end:
+	mov	al, [si]
+	or	al, al
+	je	.auto_have_fname
+	cmp	al, ' '
+	je	.auto_have_fname
+	cmp	al, 9
+	je	.auto_have_fname
+	inc	si
+	jmp	.auto_fname_end
+.auto_have_fname:
+	; SI = byte after filename (ws or null). Save & null-terminate.
+	mov	al, [si]
+	mov	ah, al			; save original byte
+	mov	byte [si], 0
+	push	si
+	push	ax
+	mov	si, bx
 	call	store_filename
+	pop	ax
+	pop	si
+	mov	[si], ah
 	jc	main_loop
 	cmp	byte [file_name_set], 0
 	je	main_loop
+
+	; Copy the remaining tail (just the args) into target PSP:80.
+	; SI points at the byte after the filename; walk past leading ws,
+	; then copy chars into target_seg:0x81, count into target_seg:0x80,
+	; and put a 0x0D terminator at the end.
+	call	skip_delims
+	push	ds
+	push	es
+	mov	ax, [target_seg]
+	mov	es, ax
+	mov	di, 0x81
+	xor	cx, cx			; CX = length
+.auto_args_copy:
+	mov	al, [si]
+	or	al, al
+	je	.auto_args_done
+	mov	[es:di], al
+	inc	si
+	inc	di
+	inc	cx
+	cmp	cx, 126
+	jb	.auto_args_copy
+.auto_args_done:
+	mov	byte [es:di], 0x0D
+	mov	[es:0x80], cl
+	pop	es
+	pop	ds
+
+	call	rebuild_target_fcbs
+
 	jmp	cmd_load.load_have_name
 
 start_fail:
@@ -193,17 +248,81 @@ cmd_quit:
 cmd_name:
 	inc	si
 	call	skip_delims
+	cmp	byte [si], 0
+	je	.n_just_clear			; bare N clears the name
+	; Split filename from args exactly like the startup auto-load path.
+	mov	bx, si
+.n_fname_end:
+	mov	al, [si]
+	or	al, al
+	je	.n_have_fname
+	cmp	al, ' '
+	je	.n_have_fname
+	cmp	al, 9
+	je	.n_have_fname
+	inc	si
+	jmp	.n_fname_end
+.n_have_fname:
+	mov	al, [si]
+	mov	ah, al
+	mov	byte [si], 0
+	push	si
+	push	ax
+	mov	si, bx
 	call	store_filename
+	pop	ax
+	pop	si
+	mov	[si], ah
 	jc	cmd_error
 	cmp	byte [file_name_set], 0
 	je	.name_cleared
+
+	; Rebuild target PSP:80 with the args portion so a later L/G run
+	; sees the user's arguments instead of whatever was there before.
+	call	skip_delims
+	push	ds
+	push	es
+	mov	ax, [target_seg]
+	mov	es, ax
+	mov	di, 0x81
+	xor	cx, cx
+.n_args_copy:
+	mov	al, [si]
+	or	al, al
+	je	.n_args_done
+	mov	[es:di], al
+	inc	si
+	inc	di
+	inc	cx
+	cmp	cx, 126
+	jb	.n_args_copy
+.n_args_done:
+	mov	byte [es:di], 0x0D
+	mov	[es:0x80], cl
+	pop	es
+	pop	ds
+
+	call	rebuild_target_fcbs
+
 	mov	si, msg_name_set
 	call	print_str
 	mov	si, file_name
 	call	print_str
 	call	crlf
 	jmp	main_loop
+
+.n_just_clear:
+	call	store_filename			; clears file_name with empty input
+	jc	cmd_error
 .name_cleared:
+	; Also wipe any args in target PSP:80 and rebuild empty FCBs.
+	push	es
+	mov	ax, [target_seg]
+	mov	es, ax
+	mov	byte [es:0x80], 0
+	mov	byte [es:0x81], 0x0D
+	pop	es
+	call	rebuild_target_fcbs
 	mov	si, msg_name_cleared
 	call	print_str
 	jmp	main_loop
@@ -213,8 +332,56 @@ cmd_load:
 	call	skip_delims
 	cmp	byte [si], 0
 	je	.load_have_name
+	; Split filename from args exactly like cmd_name / auto-load, so
+	; "L PROG.COM arg1 arg2" sets the target PSP tail and FCBs too.
+	mov	bx, si
+.l_fname_end:
+	mov	al, [si]
+	or	al, al
+	je	.l_have_fname
+	cmp	al, ' '
+	je	.l_have_fname
+	cmp	al, 9
+	je	.l_have_fname
+	inc	si
+	jmp	.l_fname_end
+.l_have_fname:
+	mov	al, [si]
+	mov	ah, al
+	mov	byte [si], 0
+	push	si
+	push	ax
+	mov	si, bx
 	call	store_filename
+	pop	ax
+	pop	si
+	mov	[si], ah
 	jc	cmd_error
+
+	; Copy args (if any) into target PSP:80 and rebuild FCBs.
+	call	skip_delims
+	push	ds
+	push	es
+	mov	ax, [target_seg]
+	mov	es, ax
+	mov	di, 0x81
+	xor	cx, cx
+.l_args_copy:
+	mov	al, [si]
+	or	al, al
+	je	.l_args_done
+	mov	[es:di], al
+	inc	si
+	inc	di
+	inc	cx
+	cmp	cx, 126
+	jb	.l_args_copy
+.l_args_done:
+	mov	byte [es:di], 0x0D
+	mov	[es:0x80], cl
+	pop	es
+	pop	ds
+	call	rebuild_target_fcbs
 
 .load_have_name:
 	cmp	byte [file_name_set], 0
@@ -225,15 +392,50 @@ cmd_load:
 
 	call	seek_handle_end
 	jc	.load_close_fail
-	or	dx, dx
-	jnz	.load_too_big
-	cmp	ax, 0xFE00
-	ja	.load_too_big
 	mov	[file_size], ax
+	mov	[file_size_hi], dx		; full 32-bit size (EXEs can have large reloc tables)
 
 	call	seek_handle_start
 	jc	.load_close_fail
 
+	; Peek at first 28 bytes to detect MZ/ZM EXE header. Check the full
+	; 32-bit size — a file >64K with low word < 28 is still big enough
+	; to peek and must not fall through to the COM path.
+	cmp	word [file_size_hi], 0
+	jne	.peek_header
+	cmp	word [file_size], 28
+	jb	.load_as_com
+.peek_header:
+	push	ds
+	push	cs
+	pop	ds
+	mov	bx, [file_handle]
+	mov	cx, 28
+	mov	dx, exe_header
+	mov	ah, 0x3F
+	int	0x21
+	pop	ds
+	jc	.load_close_fail
+	cmp	ax, 28				; short peek from a ≥28-byte file = disk
+	jne	.load_close_fail		; error; don't misclassify MZ/ZM
+	mov	ax, [exe_header]
+	cmp	ax, 0x5A4D			; 'MZ'
+	je	.load_as_exe
+	cmp	ax, 0x4D5A			; 'ZM'
+	je	.load_as_exe
+
+.load_as_com:
+	; COM: the whole file loads at target_seg:0x100, so it must fit in
+	; the segment window (64K minus 256 for the PSP). We can't enforce
+	; this pre-EXE-check because EXE files with big headers/reloc tables
+	; but sub-64K images are still loadable.
+	cmp	word [file_size_hi], 0
+	jne	.load_too_big
+	cmp	word [file_size], 0xFE00
+	ja	.load_too_big
+	; Rewind and read whole file at target_seg:0x100 (COM behavior).
+	call	seek_handle_start
+	jc	.load_close_fail
 	push	ds
 	mov	bx, [file_handle]
 	mov	cx, [file_size]
@@ -261,6 +463,167 @@ cmd_load:
 	mov	[default_seg], ax
 	mov	[last_dump_seg], ax
 	mov	word [last_dump_off], 0x0100
+	jmp	.load_print_size
+
+; --- EXE load path ---
+; Skip the MZ header, load the code portion at target_seg:0x0100 (so it
+; appears at load_seg=target_seg+0x10, offset 0 — same linear address).
+; Apply each relocation by adding load_seg to the 16-bit word it points at.
+; Then set target CS:IP, SS:SP, DS, ES from the header.
+.load_as_exe:
+	mov	ax, [target_seg]
+	add	ax, 0x10			; skip PSP (16 paragraphs)
+	mov	[exe_load_seg], ax
+
+	; Header size in bytes = header_paragraphs * 16. A malformed EXE can
+	; claim a header bigger than the file — reject rather than let the
+	; subtraction underflow and send the loader off into garbage.
+	mov	ax, [exe_header + 8]
+	or	ax, ax
+	jz	.load_close_fail		; header_paragraphs == 0 is invalid
+	mov	cl, 4
+	; Reject header >= 0x1000 paragraphs (would overflow the 16-bit
+	; header_bytes computation into 64K+).
+	cmp	ax, 0x1000
+	jae	.load_close_fail
+	shl	ax, cl
+	mov	[exe_hdr_bytes], ax
+	; Header must not exceed total file size (32-bit compare).
+	cmp	word [file_size_hi], 0
+	jne	.hdr_ok				; file >64K → any 16-bit header fits
+	cmp	ax, [file_size]
+	ja	.load_close_fail
+.hdr_ok:
+
+	; Code size = file_size(32-bit) - header_bytes(16-bit)
+	mov	ax, [file_size]
+	mov	dx, [file_size_hi]
+	sub	ax, [exe_hdr_bytes]
+	sbb	dx, 0
+	; Must fit a 64K segment at target_seg:0x100.
+	or	dx, dx
+	jnz	.load_too_big
+	cmp	ax, 0xFE00
+	ja	.load_too_big
+	mov	[exe_code_size], ax
+
+	; Seek past header
+	mov	bx, [file_handle]
+	xor	cx, cx
+	mov	dx, [exe_hdr_bytes]
+	mov	ax, 0x4200
+	int	0x21
+	jc	.load_close_fail
+
+	; Read code into target_seg:0x0100. Load BX/CX from DEBUG's DS *before*
+	; switching DS to target_seg — otherwise the indirect loads hit
+	; target_seg's empty memory and we end up asking AH=3F to read 0 bytes.
+	mov	bx, [file_handle]
+	mov	cx, [exe_code_size]
+	mov	dx, 0x0100
+	push	ds
+	mov	ax, [target_seg]
+	mov	ds, ax
+	mov	ah, 0x3F
+	int	0x21
+	pop	ds
+	jc	.load_close_fail
+	; Reject short read — a truncated EXE would otherwise half-load.
+	cmp	ax, [exe_code_size]
+	jne	.load_close_fail
+
+	; Apply relocations (if any)
+	mov	ax, [exe_header + 6]		; reloc count
+	or	ax, ax
+	jz	.exe_reloc_done
+	mov	[exe_reloc_count], ax
+
+	; Seek to relocation table
+	mov	bx, [file_handle]
+	xor	cx, cx
+	mov	dx, [exe_header + 24]
+	mov	ax, 0x4200
+	int	0x21
+	jc	.load_close_fail
+
+.exe_reloc_loop:
+	push	ds
+	push	cs
+	pop	ds
+	mov	bx, [file_handle]
+	mov	cx, 4
+	mov	dx, reloc_entry
+	mov	ah, 0x3F
+	int	0x21
+	pop	ds
+	jc	.load_close_fail
+	cmp	ax, 4				; each reloc entry is exactly 4 bytes
+	jne	.load_close_fail
+
+	; reloc_entry[0] = offset, [2] = segment (both relative to load image).
+	; Bounds-check against the loaded image before writing — a malformed
+	; EXE could otherwise scribble outside the code block. Compute the
+	; 32-bit linear offset (reloc_seg*16 + reloc_off), require the high
+	; half to be zero (so <64K into the image), and require the 2-byte
+	; word write to fit within exe_code_size.
+	mov	ax, [reloc_entry + 2]
+	mov	cx, 16
+	mul	cx				; DX:AX = reloc_seg * 16
+	add	ax, [reloc_entry]
+	adc	dx, 0
+	or	dx, dx
+	jne	.load_close_fail
+	add	ax, 2				; need offset + 2 <= code_size
+	jc	.load_close_fail
+	cmp	ax, [exe_code_size]
+	ja	.load_close_fail
+	sub	ax, 2				; restore offset
+	mov	bx, [reloc_entry + 2]
+	add	bx, [exe_load_seg]		; actual segment in memory
+	push	ds
+	mov	ds, bx
+	mov	bx, ax
+	mov	ax, [exe_load_seg]
+	add	[bx], ax			; relocate the word in place
+	pop	ds
+
+	dec	word [exe_reloc_count]
+	jnz	.exe_reloc_loop
+
+.exe_reloc_done:
+	call	close_named_handle
+	jc	cmd_error
+
+	; Initialize target state, then override for EXE.
+	call	reset_target_frame
+	mov	ax, [exe_load_seg]
+	add	ax, [exe_header + 22]		; CS = load_seg + initial_cs
+	mov	[target_cs], ax
+	mov	ax, [exe_header + 20]		; IP = initial_ip
+	mov	[target_ip], ax
+	mov	ax, [exe_load_seg]
+	add	ax, [exe_header + 14]		; SS = load_seg + initial_ss
+	mov	[target_ss], ax
+	mov	ax, [exe_header + 16]		; SP = initial_sp
+	mov	[target_sp], ax
+	mov	ax, [target_seg]		; DS/ES = PSP segment
+	mov	[target_ds], ax
+	mov	[target_es], ax
+	mov	ax, [exe_code_size]
+	mov	[target_cx], ax
+	mov	word [target_bx], 0
+	mov	word [target_dx], 0
+	mov	byte [target_loaded], 1
+
+	mov	ax, [target_cs]
+	mov	[default_seg], ax
+	mov	[last_dump_seg], ax
+	mov	ax, [target_ip]
+	mov	[last_dump_off], ax
+	mov	ax, [exe_code_size]
+	mov	[file_size], ax			; show code size, not total file
+
+.load_print_size:
 
 	mov	si, msg_loaded
 	call	print_str
@@ -291,7 +654,40 @@ cmd_write:
 	inc	si
 	call	skip_delims
 	cmp	byte [si], 0
-	jne	cmd_error
+	je	.w_defaults
+	; Parse address.
+	call	parse_addr
+	jc	cmd_error
+	mov	[w_seg], dx
+	mov	[w_off], ax
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.w_len_from_cx
+	; Parse explicit length.
+	call	parse_hex_word
+	jc	cmd_error
+	mov	[w_len], ax
+	jmp	.w_do
+
+.w_len_from_cx:
+	mov	ax, [target_cx]
+	mov	[w_len], ax
+	jmp	.w_do
+
+.w_defaults:
+	; "W" alone: DS:BX for len CX (classic DOS DEBUG semantics). This
+	; supports the E/A + R BX + R CX + W workflow for building files
+	; from scratch. L populates target_bx/cx with its own defaults, but
+	; for EXE-loaded targets DS:BX points at the PSP — use explicit
+	; "W CS:0 <len>" to write the loaded code back out.
+	mov	ax, [target_ds]
+	mov	[w_seg], ax
+	mov	ax, [target_bx]
+	mov	[w_off], ax
+	mov	ax, [target_cx]
+	mov	[w_len], ax
+
+.w_do:
 	cmp	byte [file_name_set], 0
 	je	print_no_name
 
@@ -306,16 +702,19 @@ cmd_write:
 	jc	cmd_file_error
 	mov	[file_handle], ax
 
-	push	ds
 	mov	bx, [file_handle]
-	mov	cx, [target_cx]
-	mov	dx, [target_bx]
-	mov	ax, [target_ds]
+	mov	cx, [w_len]
+	mov	dx, [w_off]
+	push	ds
+	mov	ax, [w_seg]
 	mov	ds, ax
 	mov	ah, 0x40
 	int	0x21
 	pop	ds
 	jc	.write_close_fail
+	; Short write (AX < requested) = disk full / out of space.
+	cmp	ax, [w_len]
+	jne	.write_close_fail
 	mov	[file_size], ax
 
 	call	close_named_handle
@@ -350,11 +749,25 @@ cmd_run_common:
 	inc	si
 	call	skip_delims
 	cmp	byte [si], 0
-	je	.run_ready
+	je	.run_check_term
 	call	parse_addr
 	jc	cmd_error
 	mov	[target_ip], ax
 	mov	[target_cs], dx
+	; An explicit address means the user wants to start fresh — clear
+	; the terminated flag so the guard below accepts the run.
+	mov	byte [target_terminated], 0
+	jmp	.run_ready
+.run_check_term:
+	; Bare G/T/P without an address: refuse to resume a terminated target.
+	; IP is sitting past the INT 20/4C that terminated it, so continuing
+	; would run into whatever follows in memory. The user can reload
+	; (L) or set an explicit address on the run command to start over.
+	cmp	byte [target_terminated], 0
+	je	.run_ready
+	mov	si, msg_terminated
+	call	print_str
+	jmp	main_loop
 .run_ready:
 	call	prepare_run
 	jc	cmd_error
@@ -402,13 +815,23 @@ cmd_regs:
 	call	parse_reg_ptr
 	jc	cmd_error
 	mov	[reg_ptr], bx
+	mov	[reg_size], al
 	call	skip_delims
 	cmp	byte [si], 0
 	je	.show_all
 	call	parse_hex_word
 	jc	cmd_error
 	mov	bx, [reg_ptr]
+	cmp	byte [reg_size], 1
+	jne	.cr_store_word
+	; Byte register: high byte of parsed value must be 0.
+	or	ah, ah
+	jne	cmd_error
+	mov	[bx], al
+	jmp	.cr_done
+.cr_store_word:
 	mov	[bx], ax
+.cr_done:
 	call	skip_delims
 	cmp	byte [si], 0
 	jne	cmd_error
@@ -1288,10 +1711,20 @@ run_return:
 	jmp	main_loop
 
 init_target:
-	mov	bx, 0x1000
+	; Grab all available memory so big EXEs (and their BSS requirements
+	; from header min_paragraphs) actually fit. Ask for the max first;
+	; that's expected to fail with BX = largest free block, and we
+	; re-request with that.
+	mov	bx, 0xFFFF
+	mov	ah, 0x48
+	int	0x21
+	jnc	.it_got
+	or	bx, bx
+	jz	.it_fail
 	mov	ah, 0x48
 	int	0x21
 	jc	.it_fail
+.it_got:
 	mov	[target_seg], ax
 
 	push	ds
@@ -1307,11 +1740,102 @@ init_target:
 	pop	es
 	pop	ds
 
+	; Fix up target PSP fields that must reflect target_seg rather than
+	; DEBUG's PSP. MegaDOS's normal exec (see command.asm ~7063) sets:
+	;   PSP:00 = CD 20 (INT 20h terminate) — inherited from DEBUG, same
+	;   PSP:02 = memory top segment = target_seg + MCB_size + 1
+	;   PSP:05 = CD 21 CB (CALL 5 dispatch) — inherited, same
+	;   PSP:16 = parent PSP segment (DEBUG is the "parent" here)
+	push	ds
+	push	es
+	; ES = target_seg PSP
+	mov	ax, [cs:target_seg]
+	mov	es, ax
+	; DS = target's MCB (target_seg - 1)
+	dec	ax
+	mov	ds, ax
+	mov	ax, [0x03]			; block size in paragraphs (DS:0x03)
+	add	ax, [cs:target_seg]
+	inc	ax				; memtop = target_seg + size + 1
+	mov	[es:0x02], ax
+	; Parent PSP = DEBUG itself so PSP-introspection doesn't leak
+	; DEBUG's parent (COMMAND.COM) through to the target.
+	mov	ax, [cs:psp_seg]
+	mov	[es:0x16], ax
+	; Clear command tail: length 0 at PSP:80, CR at PSP:81. Auto-load
+	; from the start path may re-populate this with real program args.
+	mov	byte [es:0x80], 0
+	mov	byte [es:0x81], 0x0D
+	pop	es
+	pop	ds
+
 	call	reset_target_frame
+	call	rebuild_target_fcbs		; default-FCB starting state
 	clc
 	ret
 .it_fail:
 	stc
+	ret
+
+; ============================================================================
+; close_target_handles — Close any user-range handles (5..19) the target
+; left open in its JFT. Called from debug_stop_common on a terminate-family
+; stop so DEBUG catching INT 20 / AH=00/31/4C doesn't leak handles that DOS
+; would normally free on termination.
+; Precondition: DOS's current PSP is still the target's (we haven't done
+; AH=50 back to DEBUG yet), and we're on DEBUG's own stack.
+;
+close_target_handles:
+	push	ax
+	push	bx
+	push	es
+	mov	es, [cs:target_seg]
+	mov	bx, 5				; system handles 0-4 are stdin/out/err/aux/prn
+.cth_loop:
+	cmp	bx, 20				; matches MegaDOS MAX_HANDLES
+	jae	.cth_done
+	cmp	byte [es:0x18 + bx], 0xFF
+	je	.cth_next
+	push	bx
+	mov	ah, 0x3E
+	int	0x21
+	pop	bx
+.cth_next:
+	inc	bx
+	jmp	.cth_loop
+.cth_done:
+	pop	es
+	pop	bx
+	pop	ax
+	ret
+
+; ============================================================================
+; rebuild_target_fcbs — Populate default FCB #1 (PSP:5C) and FCB #2 (PSP:6C)
+; by parsing the current command tail at target PSP:81 via DOS AH=29h.
+; Matches MegaDOS's normal EXEC behavior (see command.asm ~7173). Used by
+; init_target, auto-load, cmd_name's set/clear paths.
+;
+rebuild_target_fcbs:
+	push	ax
+	push	si
+	push	di
+	push	ds
+	push	es
+	mov	ax, [cs:target_seg]
+	mov	ds, ax				; DS = target_seg (source = PSP:81 tail)
+	mov	es, ax				; ES = target_seg (dest = FCBs)
+	mov	si, 0x81
+	mov	di, 0x5C
+	mov	ax, 0x2900
+	int	0x21
+	mov	di, 0x6C			; AH=29 advanced SI past first arg
+	mov	ax, 0x2900
+	int	0x21
+	pop	es
+	pop	ds
+	pop	di
+	pop	si
+	pop	ax
 	ret
 
 reset_target_frame:
@@ -1325,7 +1849,7 @@ reset_target_frame:
 	mov	word [target_bp], 0
 	mov	word [target_ip], 0x0100
 	mov	word [target_sp], 0xFFFE
-	mov	word [target_flags], 0x0200
+	mov	word [target_flags], 0x0202	; bit 1 is reserved-always-1 on 8086
 	mov	[target_cs], ax
 	mov	[target_ds], ax
 	mov	[target_es], ax
@@ -1333,6 +1857,11 @@ reset_target_frame:
 	mov	[default_seg], ax
 	mov	[last_dump_seg], ax
 	mov	word [last_dump_off], 0x0100
+	; Target's DTA defaults to PSP:0080 (normal DOS program default).
+	mov	[target_dta_seg], ax
+	mov	word [target_dta_off], 0x0080
+	; Fresh target: not yet run to termination.
+	mov	byte [target_terminated], 0
 	call	seed_target_stack
 	; Clear user breakpoint table — old BPs from a prior target are no
 	; longer valid offsets in this one.
@@ -1482,6 +2011,30 @@ install_debug_vectors:
 	ret
 
 run_target:
+	; Save DEBUG's current DTA and switch to the target's remembered DTA.
+	; target_dta_* defaults to target PSP:0080 but is updated on every
+	; stop, so a target that has called AH=1A keeps its DTA across
+	; breakpoints/single-steps.
+	mov	ah, 0x2F
+	int	0x21
+	mov	[saved_dta_off], bx
+	mov	[saved_dta_seg], es
+	mov	dx, [target_dta_off]
+	mov	ax, [target_dta_seg]
+	push	ds
+	mov	ds, ax
+	mov	ah, 0x1A
+	int	0x21
+	pop	ds
+
+	; Switch DOS's current PSP to the target's before we hand off control
+	; so AH=51/62 and other PSP-tied services see the target's context
+	; rather than DEBUG's. DS/ES are still DEBUG's here, which is what
+	; the INT 21h AH=50 path expects.
+	mov	bx, [target_seg]
+	mov	ah, 0x50
+	int	0x21
+
 	cli
 	mov	[debugger_ss], ss
 	mov	[debugger_sp], sp
@@ -2042,14 +2595,25 @@ int3_handler:
 
 int20_handler:
 	mov	byte [cs:stop_reason], STOP_INT20
+	mov	byte [cs:target_terminated], 1
 	jmp	debug_stop_common
 
 int21_handler:
+	; Catch every terminate-family call so DOS doesn't free/resize the
+	; target block behind DEBUG's back.
+	;   AH=00  CP/M-style terminate (jumps to the 4Ch path in MegaDOS)
+	;   AH=31  terminate & stay resident (resizes + leaves DEBUG control)
+	;   AH=4C  terminate with return code
+	or	ah, ah
+	jz	.i21_stop
+	cmp	ah, 0x31
+	je	.i21_stop
 	cmp	ah, 0x4C
 	je	.i21_stop
 	jmp	far [cs:old_int21_off]
 .i21_stop:
 	mov	byte [cs:stop_reason], STOP_INT21
+	mov	byte [cs:target_terminated], 1
 	jmp	debug_stop_common
 
 debug_stop_common:
@@ -2105,6 +2669,44 @@ debug_stop_common:
 	push	cs
 	pop	es
 	cld
+	sti
+
+	; If the target just hit a terminate-family call (INT 20h / AH=00 /
+	; 31 / 4C), DOS didn't get to run its own cleanup because we trapped
+	; it. Close any handles 5..19 the target left open, before we switch
+	; the current PSP back to DEBUG. AH=3E uses the current PSP's JFT
+	; for the handle→SFT lookup, so it has to run while target_seg is
+	; still current.
+	cmp	byte [target_terminated], 0
+	je	.no_handle_cleanup
+	call	close_target_handles
+.no_handle_cleanup:
+
+	; Restore DOS's current PSP to DEBUG's now that the target is paused,
+	; so DEBUG's own DOS calls (file I/O, print, etc.) operate on its PSP.
+	mov	bx, [psp_seg]
+	mov	ah, 0x50
+	int	0x21
+
+	; Snapshot the target's current DTA before restoring DEBUG's, so a
+	; target that called AH=1A mid-run keeps that DTA on the next G/T/P.
+	mov	ah, 0x2F
+	int	0x21
+	mov	[target_dta_off], bx
+	mov	[target_dta_seg], es
+
+	; Restore DEBUG's saved DTA. If the target changed DTA via AH=1A,
+	; DEBUG's subsequent FindFirst/FindNext/FCB calls would otherwise
+	; inherit the stale target DTA and corrupt its DTA area. Load DX
+	; from DEBUG's DS first, then change DS to the saved segment.
+	mov	dx, [saved_dta_off]
+	mov	ax, [saved_dta_seg]
+	push	ds
+	mov	ds, ax
+	mov	ah, 0x1A
+	int	0x21
+	pop	ds
+
 	jmp	run_return
 
 ; ============================================================================
@@ -2204,6 +2806,10 @@ parse_hex_word:
 	stc
 	ret
 
+; parse_reg_ptr — parse a register name at SI
+; Output: BX = pointer to target_* storage, AL = 1 (byte) or 2 (word),
+;         SI advanced past the name, CF=0 on success.
+;         CF=1 on failure.
 parse_reg_ptr:
 	mov	al, [si]
 	call	to_upper
@@ -2215,64 +2821,144 @@ parse_reg_ptr:
 	cmp	dl, 'A'
 	jne	.prp_bx
 	cmp	dh, 'X'
-	jne	.prp_fail
+	je	.prp_ax_w
+	cmp	dh, 'L'
+	je	.prp_al_b
+	cmp	dh, 'H'
+	je	.prp_ah_b
+	jmp	.prp_fail
+.prp_ax_w:
 	add	si, 2
 	mov	bx, target_ax
+	mov	al, 2
+	clc
+	ret
+.prp_al_b:
+	add	si, 2
+	mov	bx, target_ax
+	mov	al, 1
+	clc
+	ret
+.prp_ah_b:
+	add	si, 2
+	mov	bx, target_ax + 1
+	mov	al, 1
 	clc
 	ret
 .prp_bx:
 	cmp	dl, 'B'
 	jne	.prp_cx
 	cmp	dh, 'X'
-	jne	.prp_bp
+	je	.prp_bx_w
+	cmp	dh, 'P'
+	je	.prp_bp_w
+	cmp	dh, 'L'
+	je	.prp_bl_b
+	cmp	dh, 'H'
+	je	.prp_bh_b
+	jmp	.prp_fail
+.prp_bx_w:
 	add	si, 2
 	mov	bx, target_bx
+	mov	al, 2
 	clc
 	ret
-.prp_bp:
-	cmp	dh, 'P'
-	jne	.prp_fail
+.prp_bp_w:
 	add	si, 2
 	mov	bx, target_bp
+	mov	al, 2
+	clc
+	ret
+.prp_bl_b:
+	add	si, 2
+	mov	bx, target_bx
+	mov	al, 1
+	clc
+	ret
+.prp_bh_b:
+	add	si, 2
+	mov	bx, target_bx + 1
+	mov	al, 1
 	clc
 	ret
 .prp_cx:
 	cmp	dl, 'C'
 	jne	.prp_dx
 	cmp	dh, 'X'
-	je	.prp_cx_hit
+	je	.prp_cx_w
 	cmp	dh, 'S'
-	jne	.prp_fail
+	je	.prp_cs_w
+	cmp	dh, 'L'
+	je	.prp_cl_b
+	cmp	dh, 'H'
+	je	.prp_ch_b
+	jmp	.prp_fail
+.prp_cs_w:
 	add	si, 2
 	mov	bx, target_cs
+	mov	al, 2
 	clc
 	ret
-.prp_cx_hit:
+.prp_cx_w:
 	add	si, 2
 	mov	bx, target_cx
+	mov	al, 2
+	clc
+	ret
+.prp_cl_b:
+	add	si, 2
+	mov	bx, target_cx
+	mov	al, 1
+	clc
+	ret
+.prp_ch_b:
+	add	si, 2
+	mov	bx, target_cx + 1
+	mov	al, 1
 	clc
 	ret
 .prp_dx:
 	cmp	dl, 'D'
 	jne	.prp_es
 	cmp	dh, 'X'
-	jne	.prp_ds
+	je	.prp_dx_w
+	cmp	dh, 'S'
+	je	.prp_ds_w
+	cmp	dh, 'I'
+	je	.prp_di_w
+	cmp	dh, 'L'
+	je	.prp_dl_b
+	cmp	dh, 'H'
+	je	.prp_dh_b
+	jmp	.prp_fail
+.prp_dx_w:
 	add	si, 2
 	mov	bx, target_dx
+	mov	al, 2
 	clc
 	ret
-.prp_ds:
-	cmp	dh, 'S'
-	jne	.prp_di
+.prp_dl_b:
+	add	si, 2
+	mov	bx, target_dx
+	mov	al, 1
+	clc
+	ret
+.prp_dh_b:
+	add	si, 2
+	mov	bx, target_dx + 1
+	mov	al, 1
+	clc
+	ret
+.prp_ds_w:
 	add	si, 2
 	mov	bx, target_ds
+	mov	al, 2
 	clc
 	ret
-.prp_di:
-	cmp	dh, 'I'
-	jne	.prp_fail
+.prp_di_w:
 	add	si, 2
 	mov	bx, target_di
+	mov	al, 2
 	clc
 	ret
 .prp_es:
@@ -2282,6 +2968,7 @@ parse_reg_ptr:
 	jne	.prp_fail
 	add	si, 2
 	mov	bx, target_es
+	mov	al, 2
 	clc
 	ret
 .prp_fl:
@@ -2291,6 +2978,7 @@ parse_reg_ptr:
 	jne	.prp_fail
 	add	si, 2
 	mov	bx, target_flags
+	mov	al, 2
 	clc
 	ret
 .prp_ip:
@@ -2300,6 +2988,7 @@ parse_reg_ptr:
 	jne	.prp_fail
 	add	si, 2
 	mov	bx, target_ip
+	mov	al, 2
 	clc
 	ret
 .prp_si:
@@ -2309,6 +2998,7 @@ parse_reg_ptr:
 	jne	.prp_sp
 	add	si, 2
 	mov	bx, target_si
+	mov	al, 2
 	clc
 	ret
 .prp_sp:
@@ -2316,6 +3006,7 @@ parse_reg_ptr:
 	jne	.prp_ss
 	add	si, 2
 	mov	bx, target_sp
+	mov	al, 2
 	clc
 	ret
 .prp_ss:
@@ -2323,6 +3014,7 @@ parse_reg_ptr:
 	jne	.prp_fail
 	add	si, 2
 	mov	bx, target_ss
+	mov	al, 2
 	clc
 	ret
 .prp_fail:
@@ -3571,9 +4263,9 @@ msg_help	db	0x0D, 0x0A
 		db	'G [addr]            Go', 0x0D, 0x0A
 		db	'H value1 value2     Hex add/subtract', 0x0D, 0x0A
 		db	'I port              Read byte from port', 0x0D, 0x0A
-		db	'L [file]            Load file at target:0100', 0x0D, 0x0A
+		db	'L [file [args]]     Load file (EXE aware)', 0x0D, 0x0A
 		db	'M start end dest    Move range', 0x0D, 0x0A
-		db	'N filename          Set current file name', 0x0D, 0x0A
+		db	'N file [args]       Set file name and target args', 0x0D, 0x0A
 		db	'O port byte         Write byte to port', 0x0D, 0x0A
 		db	'P [addr]            Proceed', 0x0D, 0x0A
 		db	'S start end bytes   Search byte pattern', 0x0D, 0x0A
@@ -3581,7 +4273,7 @@ msg_help	db	0x0D, 0x0A
 		db	'R F                 Edit flags (OV/NV DN/UP ...)', 0x0D, 0x0A
 		db	'T [addr]            Trace', 0x0D, 0x0A
 		db	'U [addr] [count]    Unassemble', 0x0D, 0x0A
-		db	'W                   Write target bytes', 0x0D, 0x0A
+		db	'W [addr [len]]      Write bytes to current file', 0x0D, 0x0A
 		db	'Q                   Quit', 0x0D, 0x0A
 		db	'Hex only. Use SEG:OFF for explicit segments.', 0x0D, 0x0A, 0
 
@@ -3598,6 +4290,7 @@ msg_written	db	'Wrote bytes: ', 0
 msg_too_big	db	'File too large', 0x0D, 0x0A, 0
 msg_file_error	db	'File error', 0x0D, 0x0A, 0
 msg_stopped	db	'Execution stopped', 0x0D, 0x0A, 0
+msg_terminated	db	'Target terminated — reload or set address to resume', 0x0D, 0x0A, 0
 msg_not_yet	db	'Not implemented yet', 0x0D, 0x0A, 0
 msg_bp_set	db	'BP set', 0x0D, 0x0A, 0
 msg_bp_dup	db	'BP already at that address', 0x0D, 0x0A, 0
@@ -3716,11 +4409,18 @@ compare_dst_byte	db	0
 math_left	dw	0
 math_right	dw	0
 reg_ptr		dw	0
+reg_size	db	0		; 1 = byte register, 2 = word register
 
 file_name_set	db	0
 file_name	times FNAME_MAX + 1 db 0
 file_handle	dw	0
 file_size	dw	0
+file_size_hi	dw	0		; high word of 32-bit file size
+saved_dta_off	dw	0		; DEBUG's DTA saved across target runs
+saved_dta_seg	dw	0
+target_dta_off	dw	0		; Target's remembered DTA (survives stops)
+target_dta_seg	dw	0
+target_terminated db	0		; 1 = target hit INT 20 / AH=00 / 31 / 4C
 
 run_mode	db	0
 stop_reason	db	0
@@ -3753,5 +4453,16 @@ bp_skip_pending	db	0		; 1 = int1_handler should re-install BPs and continue
 bp_install_force db	0		; 1 = install every active BP even at current IP
 
 u_end_off	dw	0		; U command: inclusive end offset
+
+w_seg		dw	0		; W command: source segment
+w_off		dw	0		; W command: source offset
+w_len		dw	0		; W command: byte count
+
+exe_header	times 28 db 0		; First 28 bytes of an EXE MZ header
+exe_load_seg	dw	0		; Segment at which EXE code is loaded
+exe_code_size	dw	0		; Code portion size (file minus header)
+exe_hdr_bytes	dw	0		; Header size in bytes
+exe_reloc_count	dw	0		; Remaining relocation entries
+reloc_entry	dw	0, 0		; Current (offset, segment) from reloc table
 
 end_of_prog:

@@ -2,6 +2,99 @@ MEGA8086 Emulator — Status
 ===========================
 Last updated: 2026-04-20
 
+RECENT CHANGES (2026-04-20, part 3 — DEBUG deep polish)
+=========================================================
+
+DEBUG.COM transformed from a "capable first-pass clone" into a
+near-complete DOS DEBUG replacement. Command set now covers the full
+single-letter parity: A B C D E F G H I L M N O P Q R S T U W BP BL BC ?
+
+Breakpoints (BP/BL/BC):
+  - Up to 10 persistent software breakpoints via 0xCC patch/restore.
+  - Shared infrastructure with P's step-over temp break.
+  - Loop-back supported: BP at current target IP is skipped the first
+    pass, then int1_handler single-steps through it and re-installs
+    all BPs (via bp_install_all) so the target hits the same BP on a
+    jump-back in the same G run.
+  - Cleared on L / target reset.
+  - stop_adjust_ip rolls IP back by 1 on planted-CC hit, leaves target
+    IP alone on in-code INT 3.
+
+Interactive A and E:
+  - "A addr" / "E addr" with no payload enter DOS-DEBUG-style prompt
+    loops; empty line exits, '-' backs up in E.
+  - One-shot forms ("A addr <instr>", "E addr bytes...") still work.
+
+R polish:
+  - Register dump appends flag mnemonics (OV/NV DN/UP EI/DI NG/PL ZR/NZ
+    AC/NA PE/PO CY/NC) after FL=XXXX.
+  - "R F" enters flag edit; input is space-separated 2-char mnemonics.
+  - Sub-register editing: R AL/AH/BL/BH/CL/CH/DL/DH with byte validation.
+
+Loading:
+  - "DEBUG FOO.COM arg1 arg2" auto-loads at startup via the PSP tail.
+  - L, N, and auto-load all split filename from args identically and
+    rebuild the target's PSP:80 tail + default FCBs (PSP:5C/6C) via
+    the same rebuild_target_fcbs helper using DOS AH=29h.
+  - MZ/ZM EXE loader: strips header, applies relocations, sets
+    CS:IP/SS:SP from header, bounds-checks reloc targets into the
+    loaded image, 32-bit file-size tracking (so large-on-disk EXEs
+    with sub-64K code images work), header-size sanity checks.
+  - All read paths detect short reads and reject instead of loading
+    truncated or partially relocated images.
+  - W [addr [len]]: explicit address/length for writing; short-write
+    detection via AX vs requested length after AH=40h.
+  - U [addr [end]]: second argument is now an inclusive end address
+    matching DOS DEBUG (was being misread as a count).
+
+Target process model:
+  - init_target now allocates all available memory (AH=48 with BX=0xFFFF
+    retry pattern) instead of a fixed 0x1000 paragraphs — EXEs with
+    significant BSS or >64K requirements now fit.
+  - Target PSP:02 (memory top) rewritten to match its own block size.
+  - Target PSP:16 (parent PSP) points at DEBUG itself.
+  - FLAGS initialized to 0x0202 (bit 1 is reserved-always-1).
+
+Runtime integration with DOS:
+  - run_target switches DOS's current PSP to target_seg via AH=50h
+    before handing off; debug_stop_common restores DEBUG's PSP on stop.
+    Target programs calling AH=51/62 now see their own PSP.
+  - DTA is saved/restored per-target: run_target installs the target's
+    remembered DTA (default PSP:0080, survives stops), stop path
+    snapshots any AH=1A changes and restores DEBUG's DTA.
+  - Terminate-family calls caught: INT 20h, AH=00h, AH=31h, AH=4Ch all
+    stop DEBUG instead of bypassing to real DOS (where they would
+    free/resize target_seg behind DEBUG's back).
+  - target_terminated flag guards bare G/T/P after a terminate; user
+    must supply an explicit address or L a fresh program to continue.
+  - close_target_handles walks the target's JFT on a terminate-stop
+    and closes handles 5-19 (normal DOS would do this on AH=4Ch —
+    now DEBUG does it since we trap that call).
+
+Emulator fix (required for DEBUG's trace):
+  - 8086 TF timing corrected. Previously the opcode_done TF check
+    used the *current* flag_tf, which self-triggered INT 1 on any
+    IRET/POPF that loaded TF=1. Now flag_tf is snapshotted at
+    instruction start into trap_flag_var, and opcode_done checks the
+    snapshot — so T stops *after* the next instruction runs, matching
+    real 8086. Fixes classic "DEBUG T leaves IP unchanged" behavior.
+
+Other fixes along the way:
+  - disasm_current was trashing its own return-value AX via crlf
+    clobbering AL. Saved AX around crlf.
+  - restore_debug_vectors was corrupting IVT[3/20/21] because the loop
+    set DS to each old_int*_seg for the AH=25h install, then read the
+    *next* vector's offset from that same DS. First INT 21 after
+    restore (e.g. the "Execution stopped" print) then jumped through
+    a trashed vector and rebooted. Reading via cs: overrides fixes it.
+
+Known remaining gaps:
+  - Narrow U disassembler (~30 opcodes recognized). Broader opcode
+    coverage is the single biggest remaining DEBUG improvement.
+  - Narrow A assembler parallel to U.
+  - BP clear-by-address (only by index).
+  - Files with both on-disk size AND load image >64K unsupported.
+
 RECENT CHANGES (2026-04-20, part 2)
 =====================================
 
@@ -604,10 +697,13 @@ MEGADOS EXTERNAL PROGRAMS
 ==========================
 
   EDLIN.COM   Line editor (see EDLIN section below)
-  DEBUG.COM   Memory/register debugger (C/D/E/F/H/I/M/O/S/R/A/U/G/T/P/?/Q).
-              T traces one instruction at a time via TF/INT 1.
-              P steps over CALL/INT/LOOP/REP/FF /2 /3 via an INT 3
-              temp-breakpoint; other opcodes fall back to T.
+  DEBUG.COM   Memory/register debugger. Single-letter parity with DOS
+              DEBUG: A B C D E F G H I L M N O P Q R S T U W (+ BP/BL/BC).
+              Interactive A and E, R F flag edit, sub-register editing,
+              EXE loader with relocations, breakpoints with re-arm on
+              loop-back, target PSP/DTA/FCBs set up like a normal DOS
+              exec, terminate-family calls caught and handles cleaned
+              up. Narrow A/U opcode coverage is the main remaining gap.
   MORE.COM    Display file one screen at a time (Q to quit)
   BEEP.COM    PC speaker test (PIT Timer 2 tones)
   ARGS.COM    Display command line arguments (test utility)
