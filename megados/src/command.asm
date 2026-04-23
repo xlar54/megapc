@@ -7136,7 +7136,7 @@ do_exec:
 	push	bx
 	mov	bx, 5
 .inherit_refcount:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.inherit_done
 	mov	al, [es:0x18 + bx]
 	cmp	al, 0xFF
@@ -7159,7 +7159,8 @@ do_exec:
 	mov	[es:0x2C], ax
 
 	; PSP:32 — Max file handles (must match MAX_HANDLES)
-	mov	word [es:0x32], MAX_HANDLES
+	mov	ax, [cs:files_limit]		; advertise runtime FILES= value
+	mov	[es:0x32], ax
 	; PSP:34 — Pointer to handle table (default: PSP:18)
 	mov	word [es:0x34], 0x18
 	mov	ax, [exec_seg]
@@ -7732,6 +7733,10 @@ int21_handler:
 	je	.i21_32
 	cmp	ah, 0x31
 	je	.i21_31
+	cmp	ah, 0x67
+	je	.i21_67
+	cmp	ah, 0x52
+	je	.i21_52
 	; Unhandled — return error (CF=1, AX=1 invalid function)
 	mov	ax, 1
 	push	bp
@@ -7764,6 +7769,15 @@ int21_handler:
 	mov	es, [cs:exec_seg]
 	mov	bl, [es:0x18 + 1]	; JFT[1] = SFT index for stdout
 	xor	bh, bh
+	; Bound-check JFT[1]. Programs like Multiplan put their FCB at
+	; PSP:0010h and let AH=29 overwrite PSP:0018..001B (JFT[0..3]) with
+	; filename bytes, which leaves JFT[1] holding a garbage value. Fall
+	; back to SFT slot 1 (the standard stdout device) so console output
+	; keeps working rather than indexing out of file_handles.
+	cmp	bx, MAX_HANDLES
+	jb	.i21_02_jft_ok
+	mov	bx, 1
+.i21_02_jft_ok:
 	push	bx
 	mov	cl, 4
 	shl	bx, cl
@@ -8059,7 +8073,7 @@ int21_handler:
 	; Find a free handle (start at 5)
 	mov	bx, 5
 .i21_3c_find_handle:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_3c_no_handle
 	mov	ax, bx
 	push	bx
@@ -8304,7 +8318,7 @@ int21_handler:
 	; Find a free handle (start at 5)
 	mov	bx, 5
 .i21_3d_find_handle:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_3d_no_handle
 	mov	ax, bx
 	push	bx
@@ -8345,6 +8359,14 @@ int21_handler:
 	mov	byte [es:di-1], 0
 .i21_3d_name_done:
 	pop	ds			; DS = SHELL_SEG again
+
+	; Is this a reserved DOS device name like \DEV\CON? Old DOS 2.x
+	; programs (Multiplan included) open the console this way to get
+	; a handle that's explicitly the CON device, independent of
+	; whether stdin/stdout were redirected.
+	mov	si, cmd_buffer
+	call	.i21_3d_check_devcon
+	jnc	.i21_3d_open_con
 
 	mov	si, cmd_buffer
 	call	resolve_path
@@ -8462,6 +8484,96 @@ int21_handler:
 .i21_3d_mode	db	0
 .i21_3d_handle	dw	0
 .i21_3d_ds	dw	0
+.i21_3d_devcon_str	db	'\DEV\CON'
+
+; Compare DS:SI against '\DEV\CON' (case-insensitive). Returns CF=0 if
+; the string at SI is exactly "\DEV\CON" followed by NUL, CF=1 otherwise.
+.i21_3d_check_devcon:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	di
+	mov	di, .i21_3d_devcon_str
+	mov	cx, 8
+.i21_3d_devcon_loop:
+	mov	al, [si]
+	cmp	al, 'a'
+	jb	.i21_3d_devcon_no_up
+	cmp	al, 'z'
+	ja	.i21_3d_devcon_no_up
+	sub	al, 0x20
+.i21_3d_devcon_no_up:
+	mov	bl, [cs:di]
+	cmp	al, bl
+	jne	.i21_3d_devcon_fail
+	inc	si
+	inc	di
+	loop	.i21_3d_devcon_loop
+	mov	al, [si]
+	test	al, al
+	jne	.i21_3d_devcon_fail
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.i21_3d_devcon_fail:
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
+	ret
+
+; Open \DEV\CON as a device handle. Pops the saved handle number from
+; the stack (pushed at line 8519), wires file_handles[handle] with the
+; device bit, points JFT[handle] at SFT 0 (CON/stdin), bumps SFT 0's
+; refcount, and returns CF=0 with AX=handle. Stack at entry is:
+;   top: handle # (pushed after got_handle)
+;   then: es, di, si, cx, bx  (the outer AH=3D save set)
+.i21_3d_open_con:
+	pop	bx			; handle number
+	mov	ax, bx
+	mov	cl, 4
+	shl	ax, cl
+	mov	di, ax			; file_handles offset
+	mov	al, [cs:.i21_3d_mode]
+	inc	al
+	or	al, 0x80		; device flag
+	mov	[cs:file_handles + di], al
+	mov	byte [cs:file_handles + di + 1], 0
+	mov	word [cs:file_handles + di + 2], 0
+	mov	word [cs:file_handles + di + 4], 0
+	mov	word [cs:file_handles + di + 6], 0
+	mov	word [cs:file_handles + di + 8], 0
+	mov	word [cs:file_handles + di + 10], 0
+	mov	word [cs:file_handles + di + 12], 0
+	mov	word [cs:file_handles + di + 14], 0
+	; JFT[handle] = 0 (SFT index for CON/stdin)
+	push	es
+	mov	es, [cs:exec_seg]
+	mov	byte [es:0x18 + bx], 0
+	pop	es
+	; Bump SFT 0's refcount so close can decrement it without tearing
+	; the permanent CON entry down.
+	inc	byte [cs:sft_refcount]
+	mov	ax, bx			; return handle in AX
+	mov	ds, [cs:.i21_3d_ds]
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE	; CF=0
+	pop	bp
+	iret
+
 .i21_3d_no_handle:
 	pop	bx
 	pop	es
@@ -8479,7 +8591,7 @@ int21_handler:
 ; --- AH=3E: Close file ---
 ; Input: BX = handle
 .i21_3e:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_3e_bad
 	push	ax
 	push	cx
@@ -8606,7 +8718,7 @@ int21_handler:
 ; Input: BX = handle, CX = bytes to read, DS:DX = buffer
 ; Output: AX = bytes actually read, CF=0
 .i21_3f:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_3f_bad
 
 	push	bx
@@ -8820,7 +8932,7 @@ int21_handler:
 ; Input: BX = handle, CX = bytes, DS:DX = buffer
 ; Output: AX = bytes written
 .i21_40:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_40_bad
 
 	; File write
@@ -9081,7 +9193,7 @@ int21_handler:
 ;        CX:DX = offset
 ; Output: DX:AX = new position
 .i21_42:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_42_bad
 	mov	[cs:.i21_42_method], al	; Save method before AL is clobbered
 	push	es
@@ -9633,7 +9745,7 @@ int21_handler:
 
 .i21_44_get:
 	; AL=0: Get device info for handle BX
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_44_bad_handle
 	push	si
 	call	handle_to_sft
@@ -9738,7 +9850,7 @@ int21_handler:
 ; Input: BX = handle to duplicate
 ; Returns: AX = new handle, CF=0 success
 .i21_45:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_45_err
 	; Get the SFT index for the source handle from the JFT
 	push	cx
@@ -9789,7 +9901,7 @@ int21_handler:
 ; Input: BX = source handle, CX = target handle
 ; Target handle is closed if open, then made a copy of source
 .i21_46:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_46_err
 	cmp	cx, MAX_HANDLES
 	jae	.i21_46_err
@@ -9917,6 +10029,168 @@ int21_handler:
 	mov	bx, [cs:exec_seg]
 	iret
 
+; --- AH=52: Get List of Lists / SYSVAR (undocumented) ---
+; Returns ES:BX = pointer to DOS internal structure. Many DOS 3.x
+; programs (including Multiplan) call this to inspect FILES, LASTDRIVE,
+; MCB chain head, etc. Before returning we sync (a) the SFT entry count
+; from files_limit so it matches the runtime FILES= setting, and (b) the
+; refcount field of each SFT entry from the live sft_refcount array so
+; callers that walk the SFT see the actual in-use state rather than the
+; static header.
+.i21_52:
+	push	ax
+	push	bx
+	push	cx
+	push	si
+	push	di
+	push	ds
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	ax, [files_limit]
+	mov	[sysvar_sft + 4], ax		; SFT block entry count
+	mov	si, sft_refcount
+	mov	di, sysvar_sft + 6		; first entry's refcount field
+	mov	cx, ax
+.i52_sync:
+	xor	ax, ax
+	mov	al, [si]			; sft_refcount[i] (byte)
+	mov	[di], ax			; entry+0 = refcount (word)
+	inc	si
+	add	di, SFT_ENT_SIZE
+	loop	.i52_sync
+	; Refresh DPBs from the live per-drive geometry so values like
+	; sectors/FAT, root entries, media byte, and max cluster reflect
+	; the actually-mounted floppy instead of a fixed 360K template.
+	call	.refresh_dpb_a
+	call	.refresh_dpb_b
+	pop	ds
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	pop	ax
+	mov	bx, SHELL_SEG
+	mov	es, bx
+	mov	bx, sysvar_start
+	iret
+
+; --- Refresh per-drive DPB from runtime BPB geometry ---
+; Populates a DPB's variable fields (sectors/cluster, shift, root
+; entries, first data sector, max cluster+1, sectors per FAT, first
+; dir sector, media byte) from the live geo_X_* block that was
+; captured from the mounted floppy's BPB. Skips the write if the
+; drive hasn't been accessed yet (geo_X_loaded == 0), leaving the
+; static template values in place.
+;
+; Input:  DS = SHELL_SEG
+;         SI = offset of geo_X base (first byte: loaded flag)
+;         DI = offset of dpb_X base
+; Layout offsets within each geo block:
+;   +0  loaded (byte)     +5  spc (word)     +7  root_sec (word)
+;   +11 data_start (word) +13 total (word)   +17 spf (word)
+;   +19 rootents (word)   +23 media (byte)
+.refresh_dpb_from_geo:
+	cmp	byte [si], 0
+	jne	.rdpb_go
+	ret
+.rdpb_go:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	; +04: sectors-per-cluster - 1
+	mov	ax, [si + 5]
+	dec	ax
+	mov	[di + 0x04], al
+	; +05: cluster→sector shift (log2 of spc)
+	mov	ax, [si + 5]
+	xor	cl, cl
+.rdpb_shl:
+	cmp	ax, 1
+	jbe	.rdpb_shl_done
+	shr	ax, 1
+	inc	cl
+	jmp	.rdpb_shl
+.rdpb_shl_done:
+	mov	[di + 0x05], cl
+	; +09: root directory entries
+	mov	ax, [si + 19]
+	mov	[di + 0x09], ax
+	; +0B: first data sector
+	mov	ax, [si + 11]
+	mov	[di + 0x0B], ax
+	; +0D: highest cluster number + 1 = data_clusters + 2
+	mov	ax, [si + 13]		; total sectors
+	sub	ax, [si + 11]		; minus data_start
+	xor	dx, dx
+	mov	bx, [si + 5]		; divisor = spc
+	div	bx			; AX = data sectors / spc
+	add	ax, 2			; clusters 0/1 reserved
+	mov	[di + 0x0D], ax
+	; +0F: sectors per FAT (byte field, low byte of geo value)
+	mov	ax, [si + 17]
+	mov	[di + 0x0F], al
+	; +10: first directory sector
+	mov	ax, [si + 7]
+	mov	[di + 0x10], ax
+	; +16: media descriptor
+	mov	al, [si + 23]
+	mov	[di + 0x16], al
+	; +17: access flag (0 = already-accessed DPB)
+	mov	byte [di + 0x17], 0
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+.refresh_dpb_a:
+	push	si
+	push	di
+	mov	si, geo_a_loaded
+	mov	di, dpb_a
+	call	.refresh_dpb_from_geo
+	pop	di
+	pop	si
+	ret
+
+.refresh_dpb_b:
+	push	si
+	push	di
+	mov	si, geo_b_loaded
+	mov	di, dpb_b
+	call	.refresh_dpb_from_geo
+	pop	di
+	pop	si
+	ret
+
+; --- AH=67: Set Handle Count (DOS 3.3+) ---
+; Input: BX = new JFT size
+; Programs like Multiplan call this to reserve handles up-front. Our
+; JFT is physically 20 bytes in the PSP so MAX_HANDLES caps concurrent
+; opens. For BX<=MAX_HANDLES we honor the request by updating PSP:32
+; so a subsequent re-read reflects the resize. For BX>MAX_HANDLES we
+; cap at MAX_HANDLES and still succeed — a strict DOS-faithful impl
+; would allocate an external JFT buffer and update PSP:34/36 too, but
+; that's overkill for current needs.
+.i21_67:
+	push	ax
+	push	es
+	mov	ax, bx
+	cmp	ax, MAX_HANDLES
+	jbe	.i67_store
+	mov	ax, MAX_HANDLES
+.i67_store:
+	mov	es, [cs:exec_seg]
+	mov	[es:0x32], ax
+	pop	es
+	pop	ax
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE		; CF=0 success
+	pop	bp
+	iret
+
 ; --- AH=0D: Disk reset (flush buffers) ---
 ; No-op since we write through
 .i21_0d:
@@ -9961,12 +10235,36 @@ int21_handler:
 ; Input: DS:SI = command line, ES:DI = FCB buffer
 ; Returns: AL = 0 if valid, DS:SI advanced
 ; Simplified: just fill FCB with spaces and return success
+;
+; DOS 2.x-era programs (Multiplan included) sometimes place their FCB
+; inside the PSP — Multiplan uses PSP:0010h and PSP:0036h across
+; different code paths. The 12-byte write at ES:DI then lands on PSP
+; fields that DOS 3.x added later (JFT at PSP:0x18..0x2B and JFT far
+; pointer at PSP:0x34..0x37). MegaDOS itself does not rely on PSP:34/36
+; for handle lookups, but a program that reads them to validate DOS
+; state will see garbage. When ES matches the child PSP we snapshot
+; PSP:34..37 before the write and restore them after, so programs
+; passing DI=0x36 don't accidentally destroy their own JFT pointer.
 .i21_29:
 	push	cx
 	push	di
-	; Clear FCB (37 bytes)
 	push	ax
-	mov	cx, 37
+	; Snapshot PSP:34..37 if ES == exec_seg (current child PSP)
+	push	bx
+	mov	bx, es
+	cmp	bx, [cs:exec_seg]
+	jne	.i21_29_no_save
+	mov	bx, [es:0x34]
+	mov	[cs:.i21_29_save_34], bx
+	mov	bx, [es:0x36]
+	mov	[cs:.i21_29_save_36], bx
+	mov	byte [cs:.i21_29_restore], 1
+	jmp	.i21_29_save_done
+.i21_29_no_save:
+	mov	byte [cs:.i21_29_restore], 0
+.i21_29_save_done:
+	pop	bx
+	mov	cx, 12
 	xor	al, al
 	rep	stosb
 	pop	ax
@@ -10063,8 +10361,21 @@ int21_handler:
 .i21_29_done:
 	pop	di
 	pop	cx
+	; Restore PSP:34..37 if we snapshotted on entry
+	cmp	byte [cs:.i21_29_restore], 0
+	je	.i21_29_exit
+	push	bx
+	mov	bx, [cs:.i21_29_save_34]
+	mov	[es:0x34], bx
+	mov	bx, [cs:.i21_29_save_36]
+	mov	[es:0x36], bx
+	pop	bx
+.i21_29_exit:
 	xor	al, al			; Success
 	iret
+.i21_29_save_34:	dw 0
+.i21_29_save_36:	dw 0
+.i21_29_restore:	db 0
 
 ; --- AH=39: Create directory ---
 ; Input: DS:DX = ASCIIZ pathname
@@ -11774,18 +12085,13 @@ int21_handler:
 	call	read_fat
 	jc	.i21_14_eof_restore
 
-	; Walk cluster chain to find the cluster containing our offset
+	; Walk cluster chain to find the cluster containing our offset.
+	; Use the live geo_bpc (bytes-per-cluster) instead of a hardcoded
+	; 1024 so AH=14/21/27 work on any disk format we mount.
 	mov	ax, [.i21_14_offset]
 	mov	dx, [.i21_14_offset+2]
-	; Bytes per cluster = geo_bpc
-	; Divide DX:AX by 1024 to get cluster index
-	mov	cx, 10
-.i21_14_div_loop:
-	shr	dx, 1
-	rcr	ax, 1
-	dec	cx
-	jnz	.i21_14_div_loop
-	; AX = cluster index from start, DX should be 0
+	div	word [cs:geo_bpc]	; AX = cluster index, DX = offset in cluster
+	mov	[cs:.i21_14_clust_off], dx
 	mov	cx, ax			; CX = clusters to skip
 	mov	ax, [exec_cluster]	; AX = start cluster
 	or	cx, cx
@@ -11797,37 +12103,63 @@ int21_handler:
 	dec	cx
 	jnz	.i21_14_walk_chain
 .i21_14_at_cluster:
-	; AX = cluster number containing our data
-	; Calculate offset within cluster
-	push	ax
-	mov	ax, [.i21_14_offset]
-	and	ax, 0x03FF		; Offset within 1024-byte cluster
-	mov	[cs:.i21_14_clust_off], ax
-	pop	ax
+	; AX = cluster containing first byte of the record.
+	; Set up a copy loop that spans cluster boundaries — old code
+	; clamped at one cluster, truncating records bigger than geo_bpc.
+	mov	[cs:.i21_14_cur_cluster], ax
+	mov	ax, [.i21_14_recsize]
+	mov	[cs:.i21_14_remain], ax
+	mov	ax, [dta_off]
+	mov	[cs:.i21_14_dest_off], ax
+	mov	ax, [dta_seg]
+	mov	[cs:.i21_14_dest_seg], ax
 
-	; Read this cluster into batch_buffer (preserve dir_buffer)
+.i21_14_read_step:
+	; Read current cluster into batch_buffer
+	mov	ax, [cs:.i21_14_cur_cluster]
 	mov	bx, SHELL_SEG
 	mov	es, bx
 	mov	bx, batch_buffer
 	call	read_cluster_data
 	jc	.i21_14_eof_restore
 
-	; Copy record_size bytes from batch_buffer+clust_off to DTA
-	mov	si, batch_buffer
-	add	si, [.i21_14_clust_off]
-	mov	di, [dta_off]
-	mov	es, [dta_seg]
-	mov	cx, [.i21_14_recsize]
-	; Don't read past cluster boundary
-	mov	ax, 1024
-	sub	ax, [.i21_14_clust_off]	; Bytes left in cluster
+	; bytes_avail = geo_bpc - clust_off
+	mov	ax, [cs:geo_bpc]
+	sub	ax, [cs:.i21_14_clust_off]
+	; copy_count = min(remain, bytes_avail)
+	mov	cx, [cs:.i21_14_remain]
 	cmp	cx, ax
-	jbe	.i21_14_copy_ok
-	mov	cx, ax			; Clamp to cluster boundary
-.i21_14_copy_ok:
-	push	cx			; Save actual bytes copied
+	jbe	.i21_14_step_use_cx
+	mov	cx, ax
+.i21_14_step_use_cx:
+	; Copy CX bytes from batch_buffer+clust_off to dest
+	mov	si, batch_buffer
+	add	si, [cs:.i21_14_clust_off]
+	mov	di, [cs:.i21_14_dest_off]
+	mov	es, [cs:.i21_14_dest_seg]
+	push	ds
+	push	cs
+	pop	ds
+	push	cx
 	rep	movsb
 	pop	cx
+	pop	ds
+	; Update destination + remain
+	mov	[cs:.i21_14_dest_off], di
+	sub	[cs:.i21_14_remain], cx
+	jz	.i21_14_step_done
+	; Need more — advance to next cluster
+	mov	ax, [cs:.i21_14_cur_cluster]
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jae	.i21_14_step_done	; chain ended; use what we have
+	mov	[cs:.i21_14_cur_cluster], ax
+	mov	word [cs:.i21_14_clust_off], 0
+	jmp	.i21_14_read_step
+.i21_14_step_done:
+	; Total bytes copied = recsize - remain.
+	mov	cx, [cs:.i21_14_recsize]
+	sub	cx, [cs:.i21_14_remain]
 
 	; Advance record pointer in FCB
 	mov	ds, [cs:.i21_14_fcb_seg]
@@ -11840,6 +12172,12 @@ int21_handler:
 	inc	word [si+0x0C]		; Next block
 .i21_14_no_block_inc:
 	mov	[si+0x20], al
+
+	; If the FAT chain ended before we copied the full record, the
+	; on-disk allocation is shorter than the directory file size says.
+	; That's a partial record regardless of what file_size suggests.
+	cmp	word [cs:.i21_14_remain], 0
+	jne	.i21_14_partial
 
 	; Check if we read a partial record (past EOF)
 	mov	ax, [cs:.i21_14_offset]
@@ -11862,6 +12200,26 @@ int21_handler:
 	iret
 
 .i21_14_partial:
+	; Zero-fill the unread tail of the record so the caller sees a
+	; clean buffer past the last valid byte instead of stale memory.
+	; .i21_14_remain holds bytes-not-copied; .i21_14_dest_off points at
+	; the first unfilled byte; .i21_14_dest_seg is the DTA segment.
+	push	ax
+	push	cx
+	push	di
+	push	es
+	mov	cx, [cs:.i21_14_remain]
+	test	cx, cx
+	jz	.i21_14_no_zero_tail
+	mov	di, [cs:.i21_14_dest_off]
+	mov	es, [cs:.i21_14_dest_seg]
+	xor	al, al
+	rep	stosb
+.i21_14_no_zero_tail:
+	pop	es
+	pop	di
+	pop	cx
+	pop	ax
 	pop	ds
 	pop	es
 	pop	di
@@ -11887,6 +12245,10 @@ int21_handler:
 .i21_14_fcb_off:	dw	0
 .i21_14_fcb_seg:	dw	0
 .i21_14_clust_off:	dw	0
+.i21_14_cur_cluster:	dw	0
+.i21_14_remain:		dw	0
+.i21_14_dest_off:	dw	0
+.i21_14_dest_seg:	dw	0
 
 ; --- AH=15: Sequential write (FCB) ---
 ; Input: DS:DX = opened FCB
@@ -12026,17 +12388,12 @@ int21_handler:
 	pop	ax
 .i21_15_have_start:
 
-	; Walk cluster chain to find the cluster containing our offset
+	; Walk cluster chain to find the cluster containing our offset.
+	; Use live geo_bpc instead of hardcoded 1024.
 	mov	ax, [.i21_15_offset]
 	mov	dx, [.i21_15_offset+2]
-	; Divide DX:AX by 1024 to get cluster index
-	mov	cx, 10
-.i21_15_div_loop:
-	shr	dx, 1
-	rcr	ax, 1
-	dec	cx
-	jnz	.i21_15_div_loop
-	; AX = cluster index from start
+	div	word [cs:geo_bpc]	; AX = cluster index, DX = offset in cluster
+	mov	[cs:.i21_15_clust_off], dx
 	mov	cx, ax			; CX = clusters to skip
 	mov	ax, [exec_cluster]	; AX = start cluster
 	or	cx, cx
@@ -12089,47 +12446,83 @@ int21_handler:
 	jnz	.i21_15_walk_chain
 
 .i21_15_at_cluster:
-	; AX = cluster number to write into
+	; AX = cluster number to write first byte into. clust_off was already
+	; computed by the divide above (DX = remainder, saved into
+	; .i21_15_clust_off). Set up a read-modify-write loop that spans
+	; cluster boundaries — extending the chain when the record runs off
+	; the end of the existing allocation.
 	mov	[cs:.i21_15_cur_cl], ax
+	mov	ax, [cs:.i21_15_recsize]
+	mov	[cs:.i21_15_remain], ax
+	mov	ax, [cs:dta_off]
+	mov	[cs:.i21_15_src_off], ax
 
-	; Calculate offset within cluster
-	push	ax
-	mov	ax, [.i21_15_offset]
-	and	ax, 0x03FF		; Offset within 1024-byte cluster
-	mov	[cs:.i21_15_clust_off], ax
-	pop	ax
-
-	; Read existing cluster data into batch_buffer (preserve dir_buffer)
+.i21_15_write_step:
+	; Read existing cluster (so the unmodified bytes survive)
+	mov	ax, [cs:.i21_15_cur_cl]
 	mov	bx, SHELL_SEG
 	mov	es, bx
 	mov	bx, batch_buffer
 	call	read_cluster_data
 	jc	.i21_15_err
 
-	; Copy record_size bytes from DTA to batch_buffer+clust_off
+	; copy_count = min(remain, geo_bpc - clust_off)
+	mov	ax, [cs:geo_bpc]
+	sub	ax, [cs:.i21_15_clust_off]
+	mov	cx, [cs:.i21_15_remain]
+	cmp	cx, ax
+	jbe	.i21_15_step_use_cx
+	mov	cx, ax
+.i21_15_step_use_cx:
+	; Copy CX bytes from DTA to batch_buffer + clust_off
 	mov	di, batch_buffer
-	add	di, [.i21_15_clust_off]
-	mov	si, [cs:dta_off]
+	add	di, [cs:.i21_15_clust_off]
+	mov	si, [cs:.i21_15_src_off]
 	push	ds
 	mov	ds, [cs:dta_seg]
-	mov	cx, [cs:.i21_15_recsize]
-	; Don't write past cluster boundary
-	mov	ax, 1024
-	sub	ax, [cs:.i21_15_clust_off]
-	cmp	cx, ax
-	jbe	.i21_15_copy_ok
-	mov	cx, ax
-.i21_15_copy_ok:
+	push	cx
 	rep	movsb
+	pop	cx
 	pop	ds
+	mov	[cs:.i21_15_src_off], si
+	sub	[cs:.i21_15_remain], cx
 
-	; Write cluster back to disk
+	; Write the modified cluster back
 	mov	ax, [cs:.i21_15_cur_cl]
 	mov	bx, SHELL_SEG
 	mov	es, bx
 	mov	bx, batch_buffer
 	call	write_cluster_data
 	jc	.i21_15_err
+
+	; Done if no more bytes
+	cmp	word [cs:.i21_15_remain], 0
+	je	.i21_15_step_done
+
+	; Advance to next cluster — fetch from FAT chain
+	mov	ax, [cs:.i21_15_cur_cl]
+	call	fat12_next_cluster
+	cmp	ax, 0xFF8
+	jb	.i21_15_step_have_next
+	; Chain ended — allocate a new cluster and link it
+	call	.i21_15_alloc_cluster
+	jc	.i21_15_err
+	; AX = new cluster. Link cur_cl → new, then mark new → EOF.
+	push	ax			; save new cluster #
+	mov	bx, ax			; BX = new
+	mov	ax, [cs:.i21_15_cur_cl]
+	call	fat12_write_cluster	; cur_cl → new
+	pop	ax			; AX = new cluster
+	push	ax
+	mov	bx, 0xFFF
+	call	fat12_write_cluster	; new → EOF
+	call	write_fat
+	pop	ax			; AX = new cluster (continue loop with it)
+.i21_15_step_have_next:
+	mov	[cs:.i21_15_cur_cl], ax
+	mov	word [cs:.i21_15_clust_off], 0
+	jmp	.i21_15_write_step
+.i21_15_step_done:
 
 	; Advance record pointer in FCB
 	mov	ds, [cs:.i21_15_fcb_seg]
@@ -12244,7 +12637,35 @@ int21_handler:
 	inc	ax
 	jmp	.i21_15_find_free
 .i21_15_found_free:
+	; AX = newly allocated cluster. Zero-fill it on disk so any future
+	; reads from gaps (intermediate extension clusters, or the unwritten
+	; tail of a cluster that the current write only partially fills)
+	; return zeros instead of stale data from a previously-deleted file.
+	pop	cx			; balance the push at top
+	mov	[cs:.i21_15_alloc_save], ax
+	push	bx
+	push	si
+	push	di
+	push	es
+	push	ds
+	push	cx
+	mov	cx, SHELL_SEG
+	mov	es, cx
+	mov	ds, cx
+	mov	di, batch_buffer
+	mov	cx, [cs:geo_bpc]
+	xor	al, al
+	rep	stosb
 	pop	cx
+	mov	ax, [cs:.i21_15_alloc_save]
+	mov	bx, batch_buffer
+	call	write_cluster_data	; ignore CF — best effort
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
+	mov	ax, [cs:.i21_15_alloc_save]
 	clc
 	ret
 .i21_15_no_free:
@@ -12259,6 +12680,9 @@ int21_handler:
 .i21_15_clust_off:	dw	0
 .i21_15_cur_cl:		dw	0
 .i21_15_last_cl:	dw	0
+.i21_15_remain:		dw	0
+.i21_15_src_off:	dw	0
+.i21_15_alloc_save:	dw	0
 
 ; --- AH=16: Create file (FCB) ---
 ; Input: DS:DX = FCB
@@ -13481,7 +13905,7 @@ int21_handler:
 	push	bx
 	mov	bx, 5
 .i21_4b_inherit_ref:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_4b_inherit_done
 	mov	al, [es:0x18 + bx]
 	cmp	al, 0xFF
@@ -13512,7 +13936,8 @@ int21_handler:
 	mov	[es:0x2C], ax
 	pop	bx
 	; PSP:32/34 Handle table
-	mov	word [es:0x32], MAX_HANDLES
+	mov	ax, [cs:files_limit]		; advertise runtime FILES= value
+	mov	[es:0x32], ax
 	mov	word [es:0x34], 0x18
 	mov	ax, [exec_seg]
 	mov	word [es:0x36], ax
@@ -13730,7 +14155,7 @@ int21_handler:
 	mov	es, [cs:exec_seg]
 	mov	bx, 5
 .i21_31_close:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.i21_31_closed
 	cmp	byte [es:0x18 + bx], 0xFF
 	je	.i21_31_close_next
@@ -13795,7 +14220,7 @@ term_common:
 	mov	es, [cs:exec_seg]
 	mov	bx, 5
 .term_close:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.term_closed
 	cmp	byte [es:0x18 + bx], 0xFF
 	je	.term_close_next
@@ -14103,7 +14528,7 @@ int23_handler:
 	mov	es, [exec_seg]
 	mov	bx, 5
 .int23_close:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.int23_closed
 	cmp	byte [es:0x18 + bx], 0xFF
 	je	.int23_close_next
@@ -14219,7 +14644,7 @@ do_mcb_merge_free:
 ;         CF=1 if invalid/closed handle
 ; Preserves: AX, CX, DX, DI, ES
 handle_to_sft:
-	cmp	bx, MAX_HANDLES
+	cmp	bx, [cs:files_limit]
 	jae	.hts_bad
 	push	es
 	push	bx
@@ -14227,6 +14652,12 @@ handle_to_sft:
 	mov	bl, [es:0x18 + bx]	; BL = SFT index from JFT
 	cmp	bl, 0xFF
 	je	.hts_bad_pop
+	; Bound-check the SFT index the JFT returned. Programs that place
+	; their FCB at PSP:0010h let AH=29 overwrite JFT[0..3] with filename
+	; bytes (e.g. 'S' = 0x53), which would otherwise index way past
+	; file_handles. Reject out-of-range SFT indices as invalid handle.
+	cmp	bl, MAX_HANDLES
+	jae	.hts_bad_pop
 	xor	bh, bh
 	mov	si, bx
 	push	cx
@@ -15452,11 +15883,42 @@ process_config_sys:
 .cfg_dev_seg:	dw	0
 
 ; --- FILES= handler ---
+; Parse an unsigned decimal number and clamp into files_limit. The SFT
+; itself is fixed at MAX_HANDLES=20 slots, so we cap at that; values
+; below 20 reduce the per-program JFT window (useful for testing
+; programs that assume low handle counts). Values above 20 are
+; accepted but silently clamped to the compile-time ceiling — a true
+; DOS-style resize of the JFT (AH=67 with external buffer) isn't
+; implemented.
 .cfg_files:
-	; SI points past "FILES="
 	call	skip_spaces
-	; Parse number (ignored for now — MAX_HANDLES is compile-time)
-	; Just acknowledge it
+	xor	ax, ax
+.cf_digit:
+	mov	cl, [si]
+	cmp	cl, '0'
+	jb	.cf_done
+	cmp	cl, '9'
+	ja	.cf_done
+	; AX = AX * 10 + (CL - '0')
+	mov	bx, ax
+	shl	ax, 1
+	shl	ax, 1
+	add	ax, bx
+	shl	ax, 1
+	xor	ch, ch
+	sub	cl, '0'
+	add	ax, cx
+	inc	si
+	jmp	.cf_digit
+.cf_done:
+	or	ax, ax
+	jz	.cf_skip			; FILES=0 is meaningless, leave default
+	cmp	ax, MAX_HANDLES
+	jbe	.cf_store
+	mov	ax, MAX_HANDLES
+.cf_store:
+	mov	[files_limit], ax
+.cf_skip:
 	ret
 
 ; --- BREAK= handler ---
@@ -15597,6 +16059,254 @@ exec_depth:	db	0		; Nesting depth (0=shell launched, >0=EXEC launched)
 exec_cmdtail_ptr: dw	0		; Pointer to command tail in cmd_buffer
 env_seg:	dw	0		; Segment of environment block
 break_flag:	db	0		; Ctrl-C check flag
+files_limit:	dw	MAX_HANDLES	; runtime JFT size (FILES= in CONFIG.SYS)
+
+; --- DOS List of Lists / SYSVAR (returned by INT 21h AH=52h) ---
+; DOS 3.3 layout. Programs calling AH=52 receive ES:BX pointing at
+; sysvar_start; the bytes preceding it are the NUL device driver
+; header (accessible via negative offsets from BX). sysvar+8 and
+; sysvar+12 point at real CLOCK$ and CON device headers (declared
+; after the SFT block) so probing programs see a valid device chain
+; instead of null far pointers.
+nul_dev_start:
+	dw	0xFFFF, 0xFFFF		; -22..-19: NUL next ptr (end of chain)
+	dw	0x8004			; -18..-17: NUL attributes (char + NUL)
+	dw	dev_driver_stub		; -16..-15: strategy
+	dw	dev_driver_stub		; -14..-13: interrupt
+	db	'NUL     '		; -12..-5:  device name
+	dw	0, 0			; -4..-1:   padding
+sysvar_start:
+	dw	dpb_a, SHELL_SEG	; +0:  DPB (DCB) chain head → drive A
+	dw	sysvar_sft		; +4:  first SFT offset
+	dw	SHELL_SEG		; +6:  first SFT segment
+	dw	clock_dev_header, SHELL_SEG	; +8:  CLOCK$ device header
+	dw	con_dev_header, SHELL_SEG	; +12: CON device header
+	dw	512			; +16: max bytes per block
+	dw	buf_chain_head, SHELL_SEG	; +18: buffer chain head
+	dw	cds_array, SHELL_SEG	; +22: current dir array
+	dd	0			; +26: FCB table
+	dw	0			; +30: protected FCBs
+	db	2			; +32: number of block devices
+	db	2			; +33: LASTDRIVE (A..B; matches CDS entries)
+
+; DOS 3.3 System File Table (SFT) block. Programs that walk the chain
+; via sysvar+4 want:
+;   +0..+3: next SFT pointer (far) — 0xFFFFFFFF = end of chain
+;   +4..+5: count of entries in this block
+;   +6...:  array of SFT entries, 59 bytes each on DOS 3.x
+; Each entry: refcount (0 = free), open mode, attribute, device info,
+; device/DCB ptr, clusters, time, date, size, position, filename, ...
+; Slots 0-4 model the five standard devices so AH=52 consumers reading
+; past the header don't see "no handles in use" and decide DOS is dead.
+SFT_ENT_SIZE	equ	59
+sysvar_sft:
+	dd	0xFFFFFFFF		; +0: next SFT = end of chain
+	dw	MAX_HANDLES		; +4: entry count
+	; Entry 0 — stdin (CON, refcount 1, char device, input)
+	dw	1			; refcount
+	dw	0x8001			; open mode: read + char dev
+	db	0			; attribute
+	dw	0x80D3			; device info: ISDEV|ISCIN|ISCOT|BINARY|SPECIAL
+	dw	con_dev_header, SHELL_SEG	; device driver ptr
+	dw	0, 0, 0			; cluster/time/date (6 bytes)
+	dd	0			; file size
+	dd	0			; file position
+	dw	0			; rel cluster
+	dd	0			; dir sector
+	db	0			; dir entry
+	db	'CON        '		; 11-byte name
+	times	SFT_ENT_SIZE - 43 db 0	; pad to full entry size
+	; Entry 1 — stdout (same as stdin; shares CON device)
+	dw	1, 0x8001
+	db	0
+	dw	0x80D3
+	dw	con_dev_header, SHELL_SEG	; device driver ptr
+	dw	0, 0, 0			; cluster/time/date (6 bytes)
+	dd	0
+	dd	0
+	dw	0
+	dd	0
+	db	0
+	db	'CON        '
+	times	SFT_ENT_SIZE - 43 db 0
+	; Entry 2 — stderr
+	dw	1, 0x8001
+	db	0
+	dw	0x80D3
+	dw	con_dev_header, SHELL_SEG	; device driver ptr
+	dw	0, 0, 0			; cluster/time/date (6 bytes)
+	dd	0
+	dd	0
+	dw	0
+	dd	0
+	db	0
+	db	'CON        '
+	times	SFT_ENT_SIZE - 43 db 0
+	; Entry 3 — stdaux
+	dw	1, 0x8001
+	db	0
+	dw	0x80C0			; BINARY device
+	dw	aux_dev_header, SHELL_SEG	; device driver ptr
+	dw	0, 0, 0			; cluster/time/date (6 bytes)
+	dd	0
+	dd	0
+	dw	0
+	dd	0
+	db	0
+	db	'AUX        '
+	times	SFT_ENT_SIZE - 43 db 0
+	; Entry 4 — stdprn
+	dw	1, 0x8001
+	db	0
+	dw	0xA0C0			; BINARY|NULDEV
+	dw	prn_dev_header, SHELL_SEG	; device driver ptr
+	dw	0, 0, 0			; cluster/time/date (6 bytes)
+	dd	0
+	dd	0
+	dw	0
+	dd	0
+	db	0
+	db	'PRN        '
+	times	SFT_ENT_SIZE - 43 db 0
+	; Entries 5..MAX_HANDLES-1 — free (refcount 0). 15 * 59 = 885 bytes.
+	times	885 db 0
+
+; Device driver entry stub. DOS character-device strategy and interrupt
+; entry points are FAR-called, so a single FAR RET is the minimal valid
+; implementation. MP probes the device chain for name/attributes but
+; does not actually invoke these, so a shared stub is fine.
+dev_driver_stub:
+	retf
+
+; CLOCK$ device header — char device with CLOCK bit; chains to CON.
+clock_dev_header:
+	dw	con_dev_header, SHELL_SEG	; next → CON
+	dw	0x8008				; char + CLOCK
+	dw	dev_driver_stub			; strategy
+	dw	dev_driver_stub			; interrupt
+	db	'CLOCK$  '			; 8-byte name
+
+; CON device header — char device with STDIN/STDOUT/SPECIAL; chains to AUX.
+con_dev_header:
+	dw	aux_dev_header, SHELL_SEG	; next → AUX
+	dw	0x8013				; char + SPECIAL + STDIN + STDOUT
+	dw	dev_driver_stub			; strategy
+	dw	dev_driver_stub			; interrupt
+	db	'CON     '			; 8-byte name
+
+; AUX device header — char device; chains to PRN.
+aux_dev_header:
+	dw	prn_dev_header, SHELL_SEG	; next → PRN
+	dw	0x8000				; char device
+	dw	dev_driver_stub			; strategy
+	dw	dev_driver_stub			; interrupt
+	db	'AUX     '			; 8-byte name
+
+; PRN device header — char device; chains to NUL (end).
+prn_dev_header:
+	dw	nul_dev_start, SHELL_SEG	; next → NUL
+	dw	0x8000				; char device
+	dw	dev_driver_stub			; strategy
+	dw	dev_driver_stub			; interrupt
+	db	'PRN     '			; 8-byte name
+
+; --- Block device header for drives A and B ---
+; Block device drivers are NOT part of the char-device chain rooted at
+; sysvar+8/+12 — they are reached only via each DPB's +12 field. A
+; single header serves both drives (units 0 and 1). Attributes=0 is
+; the default IBM-compatible block device; strategy/interrupt are the
+; same FAR RET stub used by the char devices since MP does not invoke
+; them, it only validates that the pointer resolves.
+blk_dev_header:
+	dw	0xFFFF, 0xFFFF			; next (end of chain; block devs aren't linked)
+	dw	0x0000				; attributes: default block device
+	dw	dev_driver_stub			; strategy
+	dw	dev_driver_stub			; interrupt
+	db	2				; number of units (A and B)
+	db	0, 0, 0, 0, 0, 0, 0		; reserved/signature
+
+; --- DOS 3.3 Disk Parameter Blocks (DPBs) ---
+; One per mounted drive. sysvar+0 (DCB chain head) points at dpb_a so
+; probing programs can walk the chain. All DPB fields describe the
+; 360K/720K/1.44M float we normally boot; MP only validates that the
+; pointer resolves to something that looks like a DPB, it does not
+; perform disk I/O through this structure.
+dpb_a:
+	db	0				; +00 drive (0=A)
+	db	0				; +01 unit within driver
+	dw	512				; +02 bytes/sector
+	db	1				; +04 sectors-per-cluster - 1 (→ 2 spc)
+	db	1				; +05 cluster→sector shift
+	dw	1				; +06 reserved sectors
+	db	2				; +08 number of FATs
+	dw	112				; +09 root dir entries
+	dw	14				; +0B first data sector
+	dw	354				; +0D highest cluster + 1
+	db	2				; +0F sectors per FAT
+	dw	5				; +10 first dir sector
+	dw	blk_dev_header, SHELL_SEG	; +12 device header ptr
+	db	0xFD				; +16 media descriptor (360K/720K)
+	db	0xFF				; +17 access flag (not accessed)
+	dw	dpb_b, SHELL_SEG		; +18 next DPB
+	dw	0xFFFF				; +1C last-accessed dir cluster
+	dw	2				; +1E next free cluster hint
+
+dpb_b:
+	db	1				; +00 drive (1=B)
+	db	1				; +01 unit within driver
+	dw	512
+	db	1
+	db	1
+	dw	1
+	db	2
+	dw	112
+	dw	14
+	dw	354
+	db	2
+	dw	5
+	dw	blk_dev_header, SHELL_SEG	; +12 device header ptr
+	db	0xFD
+	db	0xFF
+	dw	0xFFFF, 0xFFFF			; +18 next DPB = end of chain
+	dw	0xFFFF
+	dw	2
+
+; --- DOS buffer chain head (single fake buffer, end-of-chain) ---
+; DOS keeps a linked list of sector buffers. We publish one that claims
+; to be unassigned (drive=0xFF) so programs walking the chain see a
+; consistent "no dirty buffers, single buffer in pool" view.
+buf_chain_head:
+	dw	0xFFFF, 0xFFFF			; next buffer (end)
+	db	0xFF				; drive (0xFF = free)
+	db	0				; dirty/flags
+	dw	0, 0				; sector number (DWORD)
+	dw	0				; unused
+	times	16 db 0				; small dummy buffer payload
+
+; --- DOS 3.3 Current Directory Structure (CDS) array ---
+; One 81-byte entry per drive (up to LASTDRIVE). Index 0 = A:, 1 = B:.
+; Each entry must start with a valid pathname; MP reads this to learn
+; the cwd for a drive letter.
+cds_array:
+	; Drive A
+	db	'A:\', 0			; +00 pathname (up to 67 bytes)
+	times	63 db 0				; pad to 67 bytes total
+	dw	0x4000				; +43 flags (physical drive)
+	dw	dpb_a, SHELL_SEG		; +45 DPB far pointer
+	dw	0				; +49 start cluster (0 = root)
+	dw	0xFFFF				; +4B unused
+	dw	0xFFFF				; +4D unused
+	dw	2				; +4F backslash offset in path
+	; Drive B
+	db	'B:\', 0
+	times	63 db 0
+	dw	0x4000
+	dw	dpb_b, SHELL_SEG
+	dw	0
+	dw	0xFFFF
+	dw	0xFFFF
+	dw	2
+
 verify_flag:	db	0		; Disk verify flag
 last_error:	dw	0		; Last extended error code
 
@@ -15609,8 +16319,10 @@ last_return_code: dw	0		; Return code from last AH=4C
 dta_seg:	dw	0		; DTA segment (default: PSP:0080)
 dta_off:	dw	0x0080		; DTA offset
 
-; File handle table — 8 handles (0-7), each 16 bytes
-; Handles 0-4 are predefined (stdin/stdout/stderr/stdaux/stdprn)
+; File handle table — MAX_HANDLES slots (the SFT), each FH_SIZE bytes.
+; Handles 0-4 are predefined (stdin/stdout/stderr/stdaux/stdprn).
+; Per-program JFT size is runtime-configurable via CONFIG.SYS FILES=
+; (see files_limit) up to MAX_HANDLES.
 MAX_HANDLES	equ	20
 FH_SIZE		equ	16		; Bytes per handle entry
 
