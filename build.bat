@@ -4,6 +4,7 @@ del target\*.d81
 del target\*.lst
 del target\*.lbl
 del target\megapc
+python megados\megados_build.py
 nasm -f bin -o target\bios.bin src\bios\bios.asm
 64tass --nostart -o target\cp437.bin src\cp437_font.asm
 64tass --nostart -l target\ftwriter.lbl -L target\ftwriter.lst -o target\ftwriter.bin src\fat_writer.asm
