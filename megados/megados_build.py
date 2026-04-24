@@ -90,6 +90,7 @@ nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
 nasm_assemble('disktest.asm', 'DISKTEST.COM')
 nasm_assemble('fdtest.asm', 'FDTEST.COM')
 nasm_assemble('bnd64k.asm', 'BND64K.COM')
+nasm_assemble('edit.asm', 'EDIT.COM')
 nasm_assemble('edlin.asm', 'EDLIN.COM')
 nasm_assemble('format.asm', 'FORMAT.COM')
 nasm_assemble('chkdsk.asm', 'CHKDSK.COM')
@@ -460,7 +461,7 @@ next_dir_entry = 1
 next_cluster = 2 + shell_clusters
 
 # --- Files in root directory ---
-root_files = ['EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
+root_files = ['EDIT.COM', 'EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
               'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
               'ATTRIB.COM', 'FIND.COM', 'FC.COM', 'TREE.COM', 'MEM.COM',
               'DEBUG.COM',
