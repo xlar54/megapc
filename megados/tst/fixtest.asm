@@ -7,6 +7,9 @@
 ;           a later write into one of them goes to THAT entry only.
 ;   Test 3: AH=3Ch on an existing file frees the old cluster chain
 ;           instead of leaking it.
+;   Test 4: AH=40h refuses to write through a read-only handle, and
+;           AH=3Fh refuses to read from a write-only handle. Both
+;           must return CF=1, AX=5 (access denied).
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -28,6 +31,7 @@
 	call	test1
 	call	test2
 	call	test3
+	call	test4
 
 	call	nl
 	mov	si, msg_summary
@@ -36,14 +40,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 3
+	mov	al, 4
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 3
+	mov	al, 4
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -596,6 +600,148 @@ test3:
 	ret
 
 ; ============================================================================
+; Test 4 — handle permission: writes through RO handle must fail, and
+; reads through WO handle must fail, both with AX=5 (access denied).
+; ============================================================================
+test4:
+	mov	si, msg_t4
+	call	pstr
+
+	; Make sure the file exists and has a couple of bytes (so a read attempt
+	; through the write-only handle would otherwise succeed).
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t4
+	int	0x21
+	jc	.t4_fail_io
+	mov	[t4_handle], ax
+	mov	bx, [t4_handle]
+	mov	cx, 4
+	mov	dx, t4_seed
+	mov	ah, 0x40
+	int	0x21
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; --- Part A: open read-only, attempt to write ---
+	mov	ax, 0x3D00
+	mov	dx, fn_t4
+	int	0x21
+	jc	.t4_fail_io
+	mov	[t4_handle], ax
+
+	mov	bx, [t4_handle]
+	mov	cx, 4
+	mov	dx, t4_seed
+	mov	ah, 0x40
+	int	0x21
+	jnc	.t4_fail_ro_write	; should have rejected
+	cmp	ax, 5
+	jne	.t4_fail_ro_ax
+
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; --- Part B: open write-only, attempt to read ---
+	mov	ax, 0x3D01
+	mov	dx, fn_t4
+	int	0x21
+	jc	.t4_fail_io
+	mov	[t4_handle], ax
+
+	mov	bx, [t4_handle]
+	mov	cx, 4
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jnc	.t4_fail_wo_read	; should have rejected
+	cmp	ax, 5
+	jne	.t4_fail_wo_ax
+
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+.t4_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t4_io
+	call	pstr
+	call	nl
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t4_fail_ro_write:
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t4_ro_write
+	call	pstr
+	call	nl
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t4_fail_ro_ax:
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t4_ro_ax
+	call	pstr
+	call	nl
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t4_fail_wo_read:
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t4_wo_read
+	call	pstr
+	call	nl
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t4_fail_wo_ax:
+	mov	bx, [t4_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t4_wo_ax
+	call	pstr
+	call	nl
+	mov	dx, fn_t4
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -715,18 +861,28 @@ msg_t3_disk	db	'get-free-space', 0
 msg_t3_noalloc	db	'populated file reports no allocation', 0
 msg_t3_leak	db	'clusters leaked on truncate', 0
 
+msg_t4		db	'T4 handle permission enforced: ', 0
+msg_t4_io	db	'io', 0
+msg_t4_ro_write	db	'write through RO handle succeeded', 0
+msg_t4_ro_ax	db	'wrong AX for RO-write reject', 0
+msg_t4_wo_read	db	'read through WO handle succeeded', 0
+msg_t4_wo_ax	db	'wrong AX for WO-read reject', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
 fn_t2c		db	'T2C.TMP', 0
 fn_t3		db	'T3.TMP', 0
+fn_t4		db	'T4.TMP', 0
 
 t2_data		db	'HELLO'
+t4_seed		db	'SEED'
 
 pass_count	dw	0
 t1_handle	dw	0
 t2_handle	dw	0
 t3_handle	dw	0
+t4_handle	dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
 

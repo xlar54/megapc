@@ -8960,6 +8960,9 @@ int21_handler:
 	; Check handle is open
 	cmp	byte [cs:file_handles + si], 0
 	je	.i21_3f_bad_pop
+	; Mode 2 = opened write-only; reads are not allowed.
+	cmp	byte [cs:file_handles + si], 2
+	je	.i21_3f_access_denied
 
 	; Save caller's DS:DX
 	mov	[cs:.i21_3f_ds], ds
@@ -9145,6 +9148,18 @@ int21_handler:
 	pop	bp
 	iret
 
+.i21_3f_access_denied:
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
+	mov	ax, 5			; Access denied
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
 .i21_3f_ds	dw	0
 .i21_3f_dx	dw	0
 .i21_3f_cx	dw	0
@@ -9173,6 +9188,9 @@ int21_handler:
 
 	cmp	byte [cs:file_handles + si], 0
 	je	.i21_40_bad_pop
+	; Mode 1 = opened read-only; writes (and truncates) are not allowed.
+	cmp	byte [cs:file_handles + si], 1
+	je	.i21_40_access_denied
 
 	; CX=0 means truncate file at current position
 	cmp	cx, 0
@@ -9368,6 +9386,18 @@ int21_handler:
 	pop	bx
 .i21_40_bad:
 	mov	ax, 6
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_40_access_denied:
+	pop	es
+	pop	di
+	pop	si
+	pop	bx
+	mov	ax, 5			; Access denied
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
