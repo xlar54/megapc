@@ -2665,6 +2665,10 @@ do_ren:
 ; COPY — copy a file
 ; ============================================================================
 do_copy:
+	; Clear any stale partial-chain tracking from a prior failed COPY so
+	; .copy_free_partial can't free someone else's allocated chain if an
+	; early error path fires before we re-initialize below.
+	mov	word [copy_first_cl], 0
 	; SI points past "COPY" — get source filename
 	call	skip_spaces
 	cmp	byte [si], 0
@@ -2849,6 +2853,13 @@ do_copy:
 	mov	word [copy_prev_cl], 0	; No previous dest cluster yet
 	mov	word [copy_first_cl], 0	; First dest cluster (for dir entry)
 
+	; Empty source file (start_cluster < 2) has no data chain to walk —
+	; skip the copy loop entirely so we don't try to read cluster 0.
+	cmp	ax, 2
+	jb	.copy_chain_end
+	cmp	ax, 0xFF8
+	jae	.copy_chain_end
+
 .copy_next_cluster:
 	mov	[copy_src_cl], ax	; Save current source cluster
 
@@ -2998,14 +3009,54 @@ do_copy:
 
 .copy_disk_full_pop:
 	pop	ax			; Clean stack
+	call	.copy_free_partial
 	mov	si, msg_disk_full
 	call	print_string
 	jmp	cmd_loop
 
 .copy_disk_err:
+	call	.copy_free_partial
 	mov	si, msg_disk_err
 	call	print_string
 	jmp	cmd_loop
+
+; Free any destination-FAT clusters allocated so far for an aborted copy.
+; No-op if [copy_first_cl] == 0. Reloads the dest FAT so we're not relying
+; on whatever buffer state was live when the error fired; on a FAT read
+; failure, silently skips the free (at that point the clusters are lost
+; anyway and nothing sane can be done).
+.copy_free_partial:
+	cmp	word [copy_first_cl], 0
+	je	.cfp_done
+	push	ax
+	push	bx
+	mov	al, [copy_dst_drv]
+	mov	[resolved_drive], al
+	call	read_fat
+	jc	.cfp_ret
+	mov	ax, [copy_first_cl]
+.cfp_loop:
+	cmp	ax, 2
+	jb	.cfp_flush
+	cmp	ax, 0xFF8
+	jae	.cfp_flush
+	push	ax
+	call	fat12_next_cluster
+	mov	bx, ax			; next cluster
+	pop	ax			; current cluster
+	push	bx
+	mov	bx, 0			; free
+	call	fat12_write_cluster
+	pop	ax			; advance to next
+	jmp	.cfp_loop
+.cfp_flush:
+	call	write_fat
+	mov	word [copy_first_cl], 0
+.cfp_ret:
+	pop	bx
+	pop	ax
+.cfp_done:
+	ret
 
 ; ============================================================================
 ; cluster_to_chs — Convert cluster number to CHS in CH/CL/DH
