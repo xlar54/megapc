@@ -346,10 +346,15 @@ drv_find:
 	mov	bx, [drv_chain_head]
 	mov	es, [drv_chain_head+2]
 .df_loop:
-	; Check for end of chain
-	cmp	bx, 0xFFFF
+	; End of chain is the sentinel far pointer FFFF:FFFF. Compare both
+	; segment and offset against FFFF before touching memory — the old
+	; code fell through to a word read at [es:bx] which, if bx happened
+	; to be FFFF but es wasn't, would read bogus bytes off the end of
+	; some segment.
+	mov	ax, es
+	cmp	ax, 0xFFFF
 	jne	.df_check
-	cmp	word [es:bx], 0xFFFF
+	cmp	bx, 0xFFFF
 	je	.df_not_found
 .df_check:
 	; Compare name (8 bytes at header+10)
@@ -359,16 +364,11 @@ drv_find:
 	repe	cmpsb
 	pop	si
 	je	.df_found
-	; Next driver
+	; Next driver — loop back; .df_loop handles the end-of-chain test.
 	mov	ax, [es:bx+2]		; Next segment
 	mov	bx, [es:bx]		; Next offset
 	mov	es, ax
-	cmp	bx, 0xFFFF
-	jne	.df_loop
-	; Check if segment is also FFFF
-	mov	ax, es
-	cmp	ax, 0xFFFF
-	jne	.df_loop
+	jmp	.df_loop
 .df_not_found:
 	pop	di
 	pop	cx
@@ -8817,6 +8817,22 @@ int21_handler:
 	push	di
 	push	es
 
+	; AL is the DOS open-mode byte. Only bits 0-2 are the access code
+	; (0=read, 1=write, 2=read/write); bit 3 is reserved, bits 4-6 are
+	; sharing, bit 7 is inheritance. Keep just the access bits so the
+	; stored handle mode can be compared against 1/2 later — otherwise a
+	; caller that also sets sharing or inherit turns AL into, e.g.,
+	; 0x81 (inherit + read), which would bypass the AH=40 write guard
+	; (cmp byte, 1) and let a read-only handle be written to.
+	; Validate the low nibble (access + reserved bit 3) before masking
+	; so 0x08 (reserved bit set, access=0) is rejected as invalid rather
+	; than silently accepted as read-only.
+	push	ax
+	and	al, 0x0F
+	cmp	al, 2
+	pop	ax
+	ja	.i21_3d_bad_access	; access 3-7 or reserved bit 3 set
+	and	al, 0x07
 	mov	[cs:.i21_3d_mode], al	; Save access mode
 
 	; Find a free handle (start at 5)
@@ -9094,13 +9110,31 @@ int21_handler:
 	iret
 
 .i21_3d_no_handle:
-	pop	bx
+	; Reached from the free-handle scan via `jae`, which fires BEFORE the
+	; loop's `push bx` at .i21_3d_find_handle — so only the initial 5
+	; pushes are on the stack here (unlike .i21_3d_not_found which is
+	; entered with an extra handle-number bx pushed by .i21_3d_got_handle).
 	pop	es
 	pop	di
 	pop	si
 	pop	cx
 	pop	bx
 	mov	ax, 4			; Too many open files
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_3d_bad_access:
+	; Reached before anything past the initial 5 pushes, so just unwind
+	; them and return CF=1 / AX=0x0C (invalid access code).
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	ax, 0x000C		; Invalid access code
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
