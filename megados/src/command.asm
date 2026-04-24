@@ -8810,6 +8810,94 @@ int21_handler:
 	pop	bp
 	iret
 
+; ============================================================================
+; .sft_finalize — Flush a file SFT to its directory entry and mark it closed
+; ============================================================================
+; Called when an SFT's refcount has hit zero (from AH=3Eh close OR from
+; AH=46h DUP2 replacing the last reference to a writable SFT). For a
+; writable file SFT, runs the same directory update as AH=3Eh used to do
+; inline. For read-only SFTs, just zeroes the status byte. For device or
+; already-closed SFTs, no-op.
+;
+; Input:  SI = SFT byte offset (index * 16)
+; Preserves every caller register.
+;
+.sft_finalize:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	di
+	push	ds
+	push	es
+
+	mov	al, [cs:file_handles + si]
+	or	al, al
+	jz	.sf_done		; Already closed
+	test	al, 0x80
+	jnz	.sf_done		; Device — leave alone
+	cmp	al, 2
+	jb	.sf_just_close		; Read-only, no dir update
+
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+	mov	al, [cs:file_handles + si + 1]
+	mov	[resolved_drive], al
+	; Word index in sft_* arrays = (SI / 16) * 2
+	mov	cx, si
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1
+	shr	cx, 1
+	shl	cx, 1
+	mov	bx, cx
+	mov	ax, [cs:sft_dir_cluster + bx]
+	mov	[resolved_dir_cluster], ax
+	mov	ax, [cs:sft_dir_entries + bx]
+	mov	[resolved_dir_entries], ax
+	mov	ax, [cs:sft_dir_entry + bx]
+	mov	[cs:.sft_finalize_idx], ax
+	call	read_resolved_dir
+	jc	.sf_just_close
+
+	mov	ax, [cs:.sft_finalize_idx]
+	cmp	ax, [resolved_dir_entries]
+	jae	.sf_just_close
+	; Entry offset = index * 32
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
+	mov	di, dir_buffer
+	add	di, ax
+	cmp	byte [di], 0
+	je	.sf_just_close
+	cmp	byte [di], 0xE5
+	je	.sf_just_close
+
+	mov	ax, [cs:file_handles + si + 2]
+	mov	[di+26], ax
+	mov	ax, [cs:file_handles + si + 12]
+	mov	[di+28], ax
+	mov	ax, [cs:file_handles + si + 14]
+	mov	[di+30], ax
+	call	write_resolved_dir
+
+.sf_just_close:
+	mov	byte [cs:file_handles + si], 0
+.sf_done:
+	pop	es
+	pop	ds
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	ret
+
+.sft_finalize_idx	dw	0
+
 ; --- AH=3E: Close file ---
 ; Input: BX = handle
 .i21_3e:
@@ -8836,77 +8924,16 @@ int21_handler:
 	je	.i21_3e_just_close_noref
 	dec	byte [cs:sft_refcount + si]
 	jnz	.i21_3e_just_close_noref ; Other handles still reference this SFT entry
-	; Refcount = 0: actually close the SFT entry
-	; Convert SFT index to table offset
+
+	; Refcount = 0: finalize the SFT (updates dir if writable, then zeros
+	; the status byte). Helper is also used by AH=46h DUP2 so both paths
+	; persist file size/cluster identically.
 	push	cx
 	mov	cl, 4
 	shl	si, cl
 	pop	cx
+	call	.sft_finalize
 
-	; Check if file was opened for write — update directory with file size
-	cmp	byte [cs:file_handles + si], 2
-	jb	.i21_3e_just_close	; Read-only, no update needed
-
-	; Read the directory where the file was opened, and update the
-	; specific entry we recorded at create/open time (by index, not by
-	; start cluster — multiple empty files would otherwise collide).
-	mov	ax, SHELL_SEG
-	mov	ds, ax
-	mov	al, [cs:file_handles + si + 1]
-	mov	[resolved_drive], al
-	; SI = SFT offset. SFT index = SI / 16. Word index = index * 2.
-	push	cx
-	mov	cx, si
-	shr	cx, 1
-	shr	cx, 1
-	shr	cx, 1
-	shr	cx, 1
-	shl	cx, 1
-	mov	bx, cx
-	pop	cx
-	mov	ax, [cs:sft_dir_cluster + bx]
-	mov	[resolved_dir_cluster], ax
-	mov	ax, [cs:sft_dir_entries + bx]
-	mov	[resolved_dir_entries], ax
-	mov	ax, [cs:sft_dir_entry + bx]
-	mov	[cs:.i21_3e_entry_idx], ax	; survive read_resolved_dir
-	call	read_resolved_dir
-	jc	.i21_3e_not_found
-
-	mov	ax, [cs:.i21_3e_entry_idx]
-	cmp	ax, [resolved_dir_entries]
-	jae	.i21_3e_not_found	; Stale / out-of-range index
-	; Entry offset = index * 32
-	shl	ax, 1
-	shl	ax, 1
-	shl	ax, 1
-	shl	ax, 1
-	shl	ax, 1
-	mov	di, dir_buffer
-	add	di, ax
-	; Skip updating if the entry has been deleted (0xE5) or cleared (0x00)
-	cmp	byte [di], 0
-	je	.i21_3e_not_found
-	cmp	byte [di], 0xE5
-	je	.i21_3e_not_found
-
-	; Update start cluster and size from the SFT. Use the maintained
-	; file-size field (+12/+14), NOT the current file pointer (+8/+10).
-	; Mid-file writes leave the pointer < size; using the pointer would
-	; truncate the directory-recorded size and strand the tail data.
-	mov	ax, [cs:file_handles + si + 2]
-	mov	[di+26], ax
-	mov	ax, [cs:file_handles + si + 12]
-	mov	[di+28], ax
-	mov	ax, [cs:file_handles + si + 14]
-	mov	[di+30], ax
-	call	write_resolved_dir
-	jmp	.i21_3e_just_close
-
-.i21_3e_not_found:
-
-.i21_3e_just_close:
-	mov	byte [cs:file_handles + si], 0	; Mark SFT entry closed
 .i21_3e_just_close_noref:
 	pop	es
 	pop	ds
@@ -8927,8 +8954,6 @@ int21_handler:
 	or	word [bp+6], 0x0001
 	pop	bp
 	iret
-
-.i21_3e_entry_idx	dw	0
 
 ; --- AH=3F: Read from file ---
 ; Input: BX = handle, CX = bytes to read, DS:DX = buffer
@@ -10161,8 +10186,11 @@ int21_handler:
 	cmp	bx, cx
 	je	.i21_46_noop
 	push	es
+	push	si
 	mov	es, [cs:exec_seg]
-	; Get SFT index of source handle
+	; Get SFT index of source handle. A closed source is a real error,
+	; NOT silent success — return CF=1, AX=6 like every other invalid
+	; handle path.
 	mov	al, [es:0x18 + bx]
 	cmp	al, 0xFF
 	je	.i21_46_err_pop
@@ -10178,14 +10206,15 @@ int21_handler:
 	je	.i21_46_target_closed
 	dec	byte [cs:sft_refcount + bx]
 	jnz	.i21_46_target_closed
-	; Refcount hit 0 — mark SFT entry closed (but not devices)
+	; Refcount hit 0 — finalize the old target SFT. sft_finalize runs
+	; the same directory update as AH=3E (flush size/cluster for
+	; writable files) before zeroing the status byte, and skips both
+	; device SFTs and already-closed entries.
 	push	cx
 	mov	cl, 4
 	shl	bx, cl
-	test	byte [cs:file_handles + bx], 0x80
-	jnz	.i21_46_skip_clear	; Don't close device SFTs
-	mov	byte [cs:file_handles + bx], 0
-.i21_46_skip_clear:
+	mov	si, bx
+	call	.sft_finalize
 	pop	cx
 .i21_46_target_closed:
 	pop	bx
@@ -10198,6 +10227,7 @@ int21_handler:
 	mov	bx, ax
 	inc	byte [cs:sft_refcount + bx]
 	pop	bx
+	pop	si
 	pop	es
 	push	bp
 	mov	bp, sp
@@ -10205,7 +10235,9 @@ int21_handler:
 	pop	bp
 	iret
 .i21_46_err_pop:
+	pop	si
 	pop	es
+	jmp	.i21_46_err
 .i21_46_noop:
 	push	bp
 	mov	bp, sp

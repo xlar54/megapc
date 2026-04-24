@@ -10,6 +10,9 @@
 ;   Test 4: AH=40h refuses to write through a read-only handle, and
 ;           AH=3Fh refuses to read from a write-only handle. Both
 ;           must return CF=1, AX=5 (access denied).
+;   Test 5: AH=46h DUP2 must flush the target's old writable SFT to
+;           disk when it drops the last reference, and must return
+;           CF=1 AX=6 when the source handle is already closed.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -32,6 +35,7 @@
 	call	test2
 	call	test3
 	call	test4
+	call	test5
 
 	call	nl
 	mov	si, msg_summary
@@ -40,14 +44,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 4
+	mov	al, 5
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 4
+	mov	al, 5
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -742,6 +746,191 @@ test4:
 	ret
 
 ; ============================================================================
+; Test 5 — DUP2 must finalize the target's old writable SFT AND must
+; reject an already-closed source handle with AX=6.
+; ============================================================================
+test5:
+	mov	si, msg_t5
+	call	pstr
+
+	; Clean slate
+	mov	dx, fn_t5a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t5b
+	mov	ah, 0x41
+	int	0x21
+
+	; --- Part A: DUP2 must flush writable target before replacing it ---
+
+	; Create source B (empty, read-only later)
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t5b
+	int	0x21
+	jc	.t5_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	; Create target A for write, pattern 0xA5 for 100 bytes
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t5a
+	int	0x21
+	jc	.t5_fail_io
+	mov	[t5_a_handle], ax
+
+	; Force DS=ES=CS — INT 21h may have clobbered one or both.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	di, io_buf
+	mov	cx, 100
+	mov	al, 0xA5
+	rep	stosb
+
+	mov	bx, [t5_a_handle]
+	mov	cx, 100
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t5_fail_io
+	cmp	ax, 100
+	jne	.t5_fail_io
+
+	; Open B for read to get a separate SFT
+	mov	ax, 0x3D00
+	mov	dx, fn_t5b
+	int	0x21
+	jc	.t5_fail_io
+	mov	[t5_b_handle], ax
+
+	; DUP2 B onto A — drops A's SFT refcount to 0. That SFT still has
+	; 100 bytes of dirty size/cluster state that MUST hit the directory.
+	mov	bx, [t5_b_handle]
+	mov	cx, [t5_a_handle]
+	mov	ah, 0x46
+	int	0x21
+	jc	.t5_fail_io
+
+	; Close both handles (they now both point at B's SFT; each close
+	; just decrements refcount).
+	mov	bx, [t5_a_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t5_b_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen A.TMP — its directory entry MUST now say size=100 and the
+	; content must be all 0xA5.
+	mov	dx, fn_t5a
+	call	filesize
+	jc	.t5_fail_io
+	or	dx, dx
+	jnz	.t5_fail_flush
+	cmp	ax, 100
+	jne	.t5_fail_flush
+
+	mov	ax, 0x3D00
+	mov	dx, fn_t5a
+	int	0x21
+	jc	.t5_fail_io
+	mov	[t5_a_handle], ax
+
+	; INT 21 calls above may have clobbered DS/ES — reassert before the
+	; byte-verify loop so [si] reads from our segment.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	bx, [t5_a_handle]
+	mov	cx, 100
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	push	cs
+	pop	ds
+	mov	bx, [t5_a_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Verify bytes
+	mov	si, io_buf
+	mov	cx, 100
+.t5_verify:
+	mov	al, [si]
+	cmp	al, 0xA5
+	jne	.t5_fail_flush
+	inc	si
+	loop	.t5_verify
+
+	; --- Part B: DUP2 on closed source must return CF=1, AX=6 ---
+	; BX=5 is typically unused by any open file at this point.
+	mov	bx, 5
+	mov	ah, 0x3E
+	int	0x21			; ensure it's closed (ignore errors)
+
+	mov	bx, 5			; closed source
+	mov	cx, 6			; any valid target index
+	mov	ah, 0x46
+	int	0x21
+	jnc	.t5_fail_closed_src
+	cmp	ax, 6
+	jne	.t5_fail_closed_ax
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	mov	dx, fn_t5a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t5b
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+.t5_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t5_io
+	call	pstr
+	call	nl
+	jmp	.t5_cleanup
+.t5_fail_flush:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t5_flush
+	call	pstr
+	call	nl
+	jmp	.t5_cleanup
+.t5_fail_closed_src:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t5_closed_src
+	call	pstr
+	call	nl
+	jmp	.t5_cleanup
+.t5_fail_closed_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t5_closed_ax
+	call	pstr
+	call	nl
+.t5_cleanup:
+	mov	dx, fn_t5a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t5b
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -868,12 +1057,20 @@ msg_t4_ro_ax	db	'wrong AX for RO-write reject', 0
 msg_t4_wo_read	db	'read through WO handle succeeded', 0
 msg_t4_wo_ax	db	'wrong AX for WO-read reject', 0
 
+msg_t5		db	'T5 DUP2 close semantics: ', 0
+msg_t5_io	db	'io', 0
+msg_t5_flush	db	'DUP2 dropped writable SFT without flush', 0
+msg_t5_closed_src db	'DUP2 with closed source returned success', 0
+msg_t5_closed_ax db	'wrong AX for closed-source reject', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
 fn_t2c		db	'T2C.TMP', 0
 fn_t3		db	'T3.TMP', 0
 fn_t4		db	'T4.TMP', 0
+fn_t5a		db	'T5A.TMP', 0
+fn_t5b		db	'T5B.TMP', 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
@@ -883,6 +1080,8 @@ t1_handle	dw	0
 t2_handle	dw	0
 t3_handle	dw	0
 t4_handle	dw	0
+t5_a_handle	dw	0
+t5_b_handle	dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
 
