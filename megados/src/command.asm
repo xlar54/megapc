@@ -8829,6 +8829,12 @@ int21_handler:
 	jmp	.i21_3f_copy
 
 .i21_3f_next_cluster:
+	; Save the caller's current buffer position BEFORE jumping back to
+	; .i21_3f_read_loop. The read loop reloads DI from .i21_3f_dx on
+	; every cluster pass; without this save, a multi-cluster read would
+	; reset DI to the original buffer start on each cluster transition
+	; and overwrite earlier bytes.
+	mov	[cs:.i21_3f_dx], di
 	; Move to next cluster in chain
 	mov	ax, [cs:file_handles + si + 4]
 	call	fat12_next_cluster

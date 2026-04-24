@@ -87,6 +87,9 @@ nasm_assemble('hdltest.asm', 'HDLTEST.COM')
 nasm_assemble('dostest.asm', 'DOSTEST.COM')
 nasm_assemble('child.asm', 'CHILD.COM')
 nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
+nasm_assemble('disktest.asm', 'DISKTEST.COM')
+nasm_assemble('fdtest.asm', 'FDTEST.COM')
+nasm_assemble('bnd64k.asm', 'BND64K.COM')
 nasm_assemble('edlin.asm', 'EDLIN.COM')
 nasm_assemble('format.asm', 'FORMAT.COM')
 nasm_assemble('chkdsk.asm', 'CHKDSK.COM')
@@ -467,7 +470,9 @@ root_files = ['EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
 # --- Files in TEST subdirectory ---
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
               'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
-              'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'ARGS.COM',
+              'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'DISKTEST.COM',
+              'FDTEST.COM', 'BND64K.COM',
+              'ARGS.COM',
               'BEEP.COM',
               'TESTBAT.BAT', 'TESTBAT2.BAT',
               'HELLO.EXE', 'README.TXT']
