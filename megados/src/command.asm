@@ -16,13 +16,18 @@
 
 	jmp	start_code
 
+MAX_BATCH_SIZE	equ	8192		; Max .BAT file size that fits batch_buffer
+ENV_SIZE	equ	256		; Environment block size (16 paragraphs)
+ENV_MAX_WRITE	equ	ENV_SIZE - 2	; Leave room for final double-null
+
 ; ============================================================================
 ; Buffers — placed at start so they have fixed addresses
 ; ============================================================================
 	align 16
 dir_buffer:	times	(14 * 512) db 0		; 7168 bytes for root directory (up to 1.44MB)
 fat_buffer:	times	(9 * 512) db 0		; 4608 bytes for FAT (up to 1.44MB)
-batch_buffer:	times	(2 * 512) db 0		; 1024 bytes for batch/FCB I/O
+batch_line_silent: db	0			; Per-line '@' echo-off flag
+batch_buffer:	times	MAX_BATCH_SIZE db 0	; Batch-file text (also used for FCB I/O)
 io_buffer:	times	(2 * 512) db 0		; 1024 bytes for handle I/O
 bpb_buffer:	times	512 db 0		; 512 bytes for BPB reads (separate from dir_buffer)
 batch_arg_buf:	times	256 db 0		; Holds %0-%9 strings (null-separated)
@@ -4003,7 +4008,9 @@ do_set:
 	inc	bx
 	jmp	.set_find_end2
 .set_at_end2:
-	; BX = position to write new entry
+	; BX = position to write new entry. Remember it so we can roll back
+	; the partial write if the block overflows.
+	mov	[.set_entry_start], bx
 	; Copy VAR=VALUE, uppercasing the name part
 	mov	si, [.set_arg]
 	mov	byte [.set_in_name], 1
@@ -4013,6 +4020,9 @@ do_set:
 	je	.set_copy_done
 	cmp	al, ' '
 	je	.set_copy_done
+	; Leave 2 bytes for the final double-null terminator.
+	cmp	bx, ENV_MAX_WRITE
+	jae	.set_env_full
 	cmp	al, '='
 	jne	.set_copy_not_eq
 	mov	byte [.set_in_name], 0
@@ -4037,9 +4047,21 @@ do_set:
 	pop	es
 	jmp	cmd_loop
 
+.set_env_full:
+	; Roll back the partial entry — cut the env at the original end
+	; position so we don't leave a truncated VAR=partial string behind.
+	mov	bx, [.set_entry_start]
+	mov	byte [es:bx], 0
+	mov	byte [es:bx+1], 0
+	pop	es
+	mov	si, msg_env_full
+	call	print_string
+	jmp	cmd_loop
+
 .set_arg:	dw	0
 .set_namelen:	dw	0
 .set_in_name:	db	0
+.set_entry_start: dw	0
 
 ; ============================================================================
 ; PROMPT command — set prompt format string
@@ -4121,6 +4143,11 @@ do_prompt:
 	; No argument — use default $P$G
 	mov	si, .prompt_default
 .prompt_has_arg:
+	; Remember start so we can roll back on overflow.
+	mov	[.prompt_entry_start], di
+	; Need 8 bytes for "PROMPT=" + at least one char + final double-null
+	cmp	di, ENV_MAX_WRITE - 7
+	jae	.prompt_env_full
 	; Write "PROMPT="
 	mov	byte [es:di], 'P'
 	mov	byte [es:di+1], 'R'
@@ -4133,16 +4160,31 @@ do_prompt:
 	; Copy value (including spaces, until null)
 .prompt_copy_val:
 	lodsb
+	or	al, al
+	jz	.prompt_copy_done
+	cmp	di, ENV_MAX_WRITE
+	jae	.prompt_env_full
 	mov	[es:di], al
 	inc	di
-	or	al, al
-	jnz	.prompt_copy_val
-	; Double null terminates env
+	jmp	.prompt_copy_val
+.prompt_copy_done:
 	mov	byte [es:di], 0
+	inc	di
+	mov	byte [es:di], 0		; Double null terminates env
 	pop	es
 	jmp	cmd_loop
 
+.prompt_env_full:
+	mov	di, [.prompt_entry_start]
+	mov	byte [es:di], 0
+	mov	byte [es:di+1], 0
+	pop	es
+	mov	si, msg_env_full
+	call	print_string
+	jmp	cmd_loop
+
 .prompt_default: db	'$P$G', 0
+.prompt_entry_start: dw	0
 
 ; ============================================================================
 ; PATH command — display or set executable search path
@@ -4281,6 +4323,11 @@ do_path:
 	inc	di
 	jmp	.path_find_end
 .path_at_end:
+	; Remember start so we can roll back on overflow.
+	mov	[.path_entry_start], di
+	; Need 6 bytes for "PATH=" + at least one char + final double-null
+	cmp	di, ENV_MAX_WRITE - 5
+	jae	.path_env_full
 	; Write PATH=<value>
 	mov	byte [es:di], 'P'
 	mov	byte [es:di+1], 'A'
@@ -4291,6 +4338,10 @@ do_path:
 	; Uppercase the path value
 .path_copy_val:
 	lodsb
+	or	al, al
+	jz	.path_copy_done
+	cmp	di, ENV_MAX_WRITE
+	jae	.path_env_full
 	cmp	al, 'a'
 	jb	.path_no_upper
 	cmp	al, 'z'
@@ -4299,14 +4350,26 @@ do_path:
 .path_no_upper:
 	mov	[es:di], al
 	inc	di
-	or	al, al
-	jnz	.path_copy_val
+	jmp	.path_copy_val
+.path_copy_done:
 	mov	byte [es:di], 0
+	inc	di
+	mov	byte [es:di], 0		; Double null terminates env
 	pop	es
+	jmp	cmd_loop
+
+.path_env_full:
+	mov	di, [.path_entry_start]
+	mov	byte [es:di], 0
+	mov	byte [es:di+1], 0
+	pop	es
+	mov	si, msg_env_full
+	call	print_string
 	jmp	cmd_loop
 
 .path_msg:	db	'PATH=', 0
 .path_no_msg:	db	'No Path', 0
+.path_entry_start: dw	0
 
 ; ============================================================================
 ; DATE command — display current date
@@ -5354,6 +5417,14 @@ run_batch:
 	mov	ax, [si+30]
 	mov	[exec_size+2], ax
 
+	; Reject files that won't fit in batch_buffer. Loading past the end
+	; would stomp io_buffer / bpb_buffer / arg buffers and corrupt the
+	; batch engine's own state.
+	cmp	word [exec_size+2], 0
+	jne	.rb_too_big
+	cmp	word [exec_size], MAX_BATCH_SIZE
+	ja	.rb_too_big
+
 	; Load FAT
 	call	read_fat
 	jc	.rb_not_found
@@ -5363,6 +5434,15 @@ run_batch:
 	mov	ax, [exec_cluster]
 
 .rb_load_cluster:
+	; Bounds check: will this cluster still fit inside batch_buffer?
+	; (Defense in depth — the size check above should already guarantee
+	; it, but a corrupt FAT chain could otherwise run us off the end.)
+	mov	cx, bx
+	sub	cx, batch_buffer
+	add	cx, [geo_bpc]
+	cmp	cx, MAX_BATCH_SIZE
+	ja	.rb_too_big
+
 	push	ax
 	push	bx			; Save buffer pointer
 	mov	cx, SHELL_SEG
@@ -5384,6 +5464,11 @@ run_batch:
 	mov	word [batch_ptr], batch_buffer
 	mov	byte [batch_active], 1
 	mov	byte [batch_echo], 1	; Echo on by default
+	ret
+
+.rb_too_big:
+	mov	si, msg_batch_too_big
+	call	print_string
 	ret
 
 ; ============================================================================
@@ -5426,10 +5511,10 @@ batch_next_line:
 	je	cmd_loop
 
 	; Check for @ prefix — suppress echo for this line
-	mov	byte [batch_buffer - 1], 0  ; temp: this_line_silent flag (reuse byte before buffer)
+	mov	byte [batch_line_silent], 0
 	cmp	byte [si], '@'
 	jne	.bnl_after_at
-	mov	byte [batch_buffer - 1], 1  ; This line is silent
+	mov	byte [batch_line_silent], 1
 	; Strip @ from buffer
 	inc	si
 	mov	di, cmd_buffer
@@ -5487,7 +5572,7 @@ batch_next_line:
 
 .bnl_do_echo_line:
 	; Echo the line if echo is on AND line is not @-prefixed
-	cmp	byte [batch_buffer - 1], 1
+	cmp	byte [batch_line_silent], 1
 	je	.bnl_skip_echo		; @ prefix — don't echo
 	cmp	byte [batch_echo], 0
 	je	.bnl_skip_echo		; Echo off — don't echo
@@ -7066,6 +7151,21 @@ do_exec:
 	pop	bx
 	mov	[exec_seg], ax		; Save allocated segment
 
+	; Verify the file fits in the allocated block. Without this,
+	; oversized programs would scribble past the PSP into adjacent MCBs
+	; or off the 64K segment.
+	call	verify_exec_fits
+	jnc	.exec_size_ok
+	; Too big: free the child block, then restore exec_seg to the parent
+	; PSP so callers (e.g. AH=62h Get PSP) don't see a freed pointer.
+	mov	es, [exec_seg]
+	mov	ah, 0x49
+	int	0x21
+	mov	ax, [exec_parent_psp]
+	mov	[exec_seg], ax
+	jmp	.exec_no_mem
+.exec_size_ok:
+
 	; Create PSP at allocated segment
 	mov	es, ax
 
@@ -7474,6 +7574,60 @@ fat12_next_cluster:
 	pop	dx
 	pop	cx
 	pop	bx
+	ret
+
+; ============================================================================
+; verify_exec_fits — Verify exec_size fits in the block allocated at exec_seg
+; ============================================================================
+; Input:  [exec_seg]       = segment returned by alloc_mem_core
+;         [exec_size] (dd) = file size in bytes
+; Output: CF=0 fits, CF=1 too big for the allocated block
+; Preserves all registers; only flags change.
+;
+verify_exec_fits:
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+	push	es
+	mov	ax, [exec_seg]
+	dec	ax
+	mov	es, ax
+	mov	bx, [es:0x03]		; block size in paragraphs
+	cmp	bx, 0x10
+	jbe	.vef_nofit		; too small even for PSP
+	sub	bx, 0x10		; usable paragraphs above PSP
+
+	; paragraphs_needed = (exec_size + 15) >> 4, 32-bit
+	mov	ax, [exec_size]
+	mov	dx, [exec_size+2]
+	add	ax, 15
+	adc	dx, 0
+	mov	cx, 4
+.vef_shr:
+	shr	dx, 1
+	rcr	ax, 1
+	loop	.vef_shr
+	; DX:AX = paragraphs needed
+	or	dx, dx
+	jnz	.vef_nofit		; needs > 64K paragraphs (>1 MB)
+	cmp	ax, bx
+	ja	.vef_nofit
+
+	pop	es
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	clc
+	ret
+.vef_nofit:
+	pop	es
+	pop	dx
+	pop	cx
+	pop	bx
+	pop	ax
+	stc
 	ret
 
 ; ============================================================================
@@ -8171,27 +8325,21 @@ int21_handler:
 	jmp	.i21_3c_dir_full
 
 .i21_3c_free_found:
-	; Allocate a cluster for the file
-	call	read_fat
-	jc	.i21_3c_err_pop
-	mov	ax, 2
-.i21_3c_find_cl:
-	cmp	ax, [cs:geo_max_clust]	; Max valid cluster
-	ja	.i21_3c_disk_full
-	push	ax
-	call	fat12_read_cluster
-	cmp	ax, 0
-	pop	ax
-	je	.i21_3c_got_cl
-	inc	ax
-	jmp	.i21_3c_find_cl
-.i21_3c_got_cl:
-	mov	[cs:.i21_3c_cluster], ax
-	; Mark cluster as EOF
-	mov	bx, 0xFFF
-	call	fat12_write_cluster
-	call	write_fat
-	jc	.i21_3c_err_pop
+	; Record entry index (for close-time directory update). SI points to
+	; the free slot; (si - dir_buffer) / 32 is the entry's index.
+	mov	ax, si
+	sub	ax, dir_buffer
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	mov	[cs:.i21_3c_entry_idx], ax
+
+	; Create a 0-byte file with no cluster allocated. AH=40h (.i21_40)
+	; handles start_cluster=0 by allocating the first cluster on demand
+	; at first write, so empty .COM/.TXT/etc. don't waste a FAT entry.
+	mov	word [cs:.i21_3c_cluster], 0
 
 	; Create directory entry
 	; SI still points to the free slot
@@ -8210,10 +8358,9 @@ int21_handler:
 	stosw				; Offset 22: write time
 	mov	ax, [cur_fat_date]
 	stosw				; Offset 24: write date
-	mov	ax, [cs:.i21_3c_cluster]
-	mov	[di], ax		; Starting cluster
-	add	di, 2
 	xor	ax, ax
+	mov	[di], ax		; Starting cluster = 0 (unallocated)
+	add	di, 2
 	mov	[di], ax		; File size = 0
 	add	di, 2
 	mov	[di], ax
@@ -8224,12 +8371,58 @@ int21_handler:
 	jmp	.i21_3c_setup_handle
 
 .i21_3c_exists:
-	; File exists — truncate to 0 (reuse its cluster)
+	; Record entry index (for close-time directory update).
+	mov	ax, si
+	sub	ax, dir_buffer
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	mov	[cs:.i21_3c_entry_idx], ax
+
+	; File exists — truncate to 0. Free the existing cluster chain so
+	; its clusters go back to the free pool (otherwise they leak or
+	; get cross-linked with the new content written on top).
 	mov	ax, [si+26]		; Existing start cluster
-	mov	[cs:.i21_3c_cluster], ax
-	; Set file size to 0
-	mov	word [si+28], 0
-	mov	word [si+30], 0
+	or	ax, ax
+	jz	.i21_3c_ex_dir		; Already had no clusters
+
+	push	si			; Preserve dir-entry pointer
+	call	read_fat
+	pop	si
+	jc	.i21_3c_err_pop
+
+	mov	ax, [si+26]
+.i21_3c_ex_free:
+	cmp	ax, 2
+	jb	.i21_3c_ex_freed
+	cmp	ax, 0xFF8
+	jae	.i21_3c_ex_freed
+	push	si
+	push	ax			; Save current
+	call	fat12_next_cluster	; AX = next
+	push	ax			; Save next
+	pop	bx			; BX = next
+	pop	ax			; AX = current
+	push	bx			; Re-save next for continuation
+	mov	bx, 0			; Zero = free
+	call	fat12_write_cluster
+	pop	ax			; AX = next
+	pop	si
+	jmp	.i21_3c_ex_free
+.i21_3c_ex_freed:
+	push	si
+	call	write_fat
+	pop	si
+	jc	.i21_3c_err_pop
+
+.i21_3c_ex_dir:
+	; New file starts with no clusters; AH=40h will allocate on write.
+	mov	word [cs:.i21_3c_cluster], 0
+	mov	word [si+26], 0		; Clear start cluster
+	mov	word [si+28], 0		; Size low
+	mov	word [si+30], 0		; Size high
 	call	write_resolved_dir
 	jc	.i21_3c_err_pop
 
@@ -8265,6 +8458,8 @@ int21_handler:
 	mov	ax, [resolved_dir_entries]
 	mov	[cs:sft_dir_entries + bx], ax
 	mov	word [cs:sft_devinfo + bx], 0	; Disk file
+	mov	ax, [cs:.i21_3c_entry_idx]
+	mov	[cs:sft_dir_entry + bx], ax
 	pop	es
 
 	pop	ds			; Restore caller's DS
@@ -8313,6 +8508,7 @@ int21_handler:
 .i21_3c_handle	dw	0
 .i21_3c_ds	dw	0
 .i21_3c_cluster	dw	0
+.i21_3c_entry_idx dw	0
 
 ; --- AH=3D: Open file ---
 ; Input: DS:DX = ASCIIZ filename, AL = access mode (0=read, 1=write, 2=r/w)
@@ -8425,6 +8621,18 @@ int21_handler:
 	iret
 
 .i21_3d_found:
+	; Record entry index (for close-time directory update).
+	push	ax
+	mov	ax, si
+	sub	ax, dir_buffer
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	shr	ax, 1
+	mov	[cs:.i21_3d_entry_idx], ax
+	pop	ax
+
 	; Fill handle entry
 	pop	bx			; Handle number
 	push	bx
@@ -8471,6 +8679,8 @@ int21_handler:
 	mov	ax, [resolved_dir_entries]
 	mov	[cs:sft_dir_entries + bx], ax
 	mov	word [cs:sft_devinfo + bx], 0	; Disk file
+	mov	ax, [cs:.i21_3d_entry_idx]
+	mov	[cs:sft_dir_entry + bx], ax
 	pop	bx
 	pop	es
 
@@ -8495,6 +8705,7 @@ int21_handler:
 .i21_3d_mode	db	0
 .i21_3d_handle	dw	0
 .i21_3d_ds	dw	0
+.i21_3d_entry_idx dw	0
 .i21_3d_devcon_str	db	'\DEV\CON'
 
 ; Compare DS:SI against '\DEV\CON' (case-insensitive). Returns CF=0 if
@@ -8636,71 +8847,63 @@ int21_handler:
 	cmp	byte [cs:file_handles + si], 2
 	jb	.i21_3e_just_close	; Read-only, no update needed
 
-	; Read the directory to find and update the file entry
+	; Read the directory where the file was opened, and update the
+	; specific entry we recorded at create/open time (by index, not by
+	; start cluster — multiple empty files would otherwise collide).
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	mov	al, [cs:file_handles + si + 1]
 	mov	[resolved_drive], al
-	; Re-read the directory where the file was opened
-	; SI = SFT offset. SFT index = SI / 16
+	; SI = SFT offset. SFT index = SI / 16. Word index = index * 2.
 	push	cx
 	mov	cx, si
 	shr	cx, 1
 	shr	cx, 1
 	shr	cx, 1
-	shr	cx, 1			; CX = SFT index
-	shl	cx, 1			; CX = word index for sft_dir_cluster
+	shr	cx, 1
+	shl	cx, 1
 	mov	bx, cx
+	pop	cx
 	mov	ax, [cs:sft_dir_cluster + bx]
 	mov	[resolved_dir_cluster], ax
 	mov	ax, [cs:sft_dir_entries + bx]
 	mov	[resolved_dir_entries], ax
-	pop	cx
+	mov	ax, [cs:sft_dir_entry + bx]
+	mov	[cs:.i21_3e_entry_idx], ax	; survive read_resolved_dir
 	call	read_resolved_dir
-	jc	.i21_3e_dir_fail
+	jc	.i21_3e_not_found
 
-	; Search for entry with matching start cluster
+	mov	ax, [cs:.i21_3e_entry_idx]
+	cmp	ax, [resolved_dir_entries]
+	jae	.i21_3e_not_found	; Stale / out-of-range index
+	; Entry offset = index * 32
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
+	shl	ax, 1
 	mov	di, dir_buffer
-	mov	cx, [resolved_dir_entries]
-	mov	ax, [cs:file_handles + si + 2]	; Start cluster from SFT
-.i21_3e_search:
+	add	di, ax
+	; Skip updating if the entry has been deleted (0xE5) or cleared (0x00)
 	cmp	byte [di], 0
 	je	.i21_3e_not_found
 	cmp	byte [di], 0xE5
-	je	.i21_3e_next
-	cmp	[di+26], ax
-	je	.i21_3e_found
-	; Also match if dir entry has cluster 0 and file size 0
-	; (file was created empty, cluster allocated during write)
-	; But skip directory entries (. and .. have cluster 0, size 0)
-	test	byte [di+11], 0x10	; Directory attribute?
-	jnz	.i21_3e_next		; Skip directories
-	cmp	word [di+26], 0
-	jne	.i21_3e_next
-	cmp	word [di+28], 0
-	jne	.i21_3e_next
-	cmp	word [di+30], 0
-	jne	.i21_3e_next
-	jmp	.i21_3e_found
-.i21_3e_next:
-	add	di, 32
-	dec	cx
-	jnz	.i21_3e_search
-.i21_3e_not_found:
-	jmp	.i21_3e_just_close
-.i21_3e_dir_fail:
-	jmp	.i21_3e_just_close
+	je	.i21_3e_not_found
 
-.i21_3e_found:
-	; Update start cluster in directory entry (may have been allocated during write)
+	; Update start cluster and size from the SFT. Use the maintained
+	; file-size field (+12/+14), NOT the current file pointer (+8/+10).
+	; Mid-file writes leave the pointer < size; using the pointer would
+	; truncate the directory-recorded size and strand the tail data.
 	mov	ax, [cs:file_handles + si + 2]
 	mov	[di+26], ax
-	; Update file size in directory entry from file pointer
-	mov	ax, [cs:file_handles + si + 8]	; File pointer = actual bytes written
+	mov	ax, [cs:file_handles + si + 12]
 	mov	[di+28], ax
-	mov	ax, [cs:file_handles + si + 10]
+	mov	ax, [cs:file_handles + si + 14]
 	mov	[di+30], ax
 	call	write_resolved_dir
+	jmp	.i21_3e_just_close
+
+.i21_3e_not_found:
 
 .i21_3e_just_close:
 	mov	byte [cs:file_handles + si], 0	; Mark SFT entry closed
@@ -8724,6 +8927,8 @@ int21_handler:
 	or	word [bp+6], 0x0001
 	pop	bp
 	iret
+
+.i21_3e_entry_idx	dw	0
 
 ; --- AH=3F: Read from file ---
 ; Input: BX = handle, CX = bytes to read, DS:DX = buffer
@@ -13856,6 +14061,20 @@ int21_handler:
 
 	mov	[exec_seg], ax
 
+	; Verify the file fits in the allocated block before loading.
+	call	verify_exec_fits
+	jnc	.i21_4b_size_ok
+	; Too big: free the child block and restore exec_seg to the parent
+	; PSP saved at the top of .i21_4b_exec so the caller's view stays
+	; consistent. .i21_4b_no_mem handles the exec_depth--/IRET.
+	mov	es, [exec_seg]
+	mov	ah, 0x49
+	int	0x21
+	mov	ax, [cs:.i21_4b_parent_seg]
+	mov	[exec_seg], ax
+	jmp	.i21_4b_no_mem
+.i21_4b_size_ok:
+
 	; Build PSP (reuse existing PSP setup code inline)
 	mov	es, ax
 
@@ -14998,6 +15217,8 @@ cmd_exist	db	'EXIST', 0
 cmd_errorlevel	db	'ERRORLEVEL', 0
 msg_goto_target	db	'Label not found', 0x0D, 0x0A, 0
 msg_batch_only	db	'Batch only', 0x0D, 0x0A, 0
+msg_batch_too_big db	'Batch file too large', 0x0D, 0x0A, 0
+msg_env_full	db	'Out of environment space', 0x0D, 0x0A, 0
 
 ; ============================================================================
 ; I/O Redirection
@@ -16381,6 +16602,10 @@ sft_devinfo:				; IOCTL device info word per SFT entry
 	dw	0x80C0			; SFT 3: stdaux (ISDEV|BINARY)
 	dw	0xA0C0			; SFT 4: stdprn (ISDEV|BINARY|NULDEV)
 	times (MAX_HANDLES - 5) dw 0	; File handles: 0 = disk file
+sft_dir_entry:				; Index (within the parent dir) of the file's
+	dw	0, 0, 0, 0, 0		; entry — lets close update it directly instead
+	times (MAX_HANDLES - 5) dw 0	; of searching by start_cluster (ambiguous for
+					; multiple empty files).
 file_count:	dw	0
 dir_wide:	db	0
 dir_show_all:	db	0			; 1 = show hidden/system files (/A)
