@@ -2003,6 +2003,12 @@ cursor_set_shape:
         bcc +
         lda #7
 +       sta scratch_d
+        ; If end < start, the range is invalid — leave sprite cleared.
+        ; (Without this check, SBC wraps and the loop writes $FE to all
+        ; 256 bytes past $5F40, trampling int13_handler and beyond.)
+        lda scratch_d
+        cmp scratch_c
+        bcc _css_fill_done      ; end < start → skip fill
         ; Fill rows from start to end (inclusive)
         ; Sprite row = 13 + scan_line, byte offset = row * 3
         lda scratch_c           ; Start scan line
@@ -2027,6 +2033,7 @@ _css_fill:
         inx                     ; Next row (3 bytes per row)
         dey
         bne _css_fill
+_css_fill_done:
         rts
 
 cursor_set_underline:

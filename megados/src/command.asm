@@ -746,6 +746,12 @@ start_init:
 ; Main command loop
 ; ============================================================================
 cmd_loop:
+	; Defensive: clear DF. A child program may have left DF=1, and many
+	; paths below (string ops in save_drive_state, load_drive_state,
+	; various rep movsb buffer copies) assume forward direction. Without
+	; this, those copies run backward and poison cached per-drive state,
+	; producing symptoms like "A:\> prompt but DIR shows drive B".
+	cld
 	; Reset segments
 	mov	ax, SHELL_SEG
 	mov	ds, ax
@@ -7565,6 +7571,11 @@ alloc_mem_core:
 ; Provides basic DOS-compatible services for .COM programs.
 ;
 int21_handler:
+	; Defensive: a guest program may have left DF=1 on the current
+	; instruction. Many INT 21h sub-handlers use rep movsb / lodsb /
+	; stosb assuming forward direction; a backward copy corrupts
+	; FAT/dir buffers, filename construction, and environment lookup.
+	cld
 	cmp	ah, 0x01
 	je	.i21_01
 	cmp	ah, 0x02
