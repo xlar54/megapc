@@ -3513,6 +3513,178 @@ do_cd:
 	jmp	cmd_loop
 
 ; ============================================================================
+; cd_apply_path — Update cur_dir_path/cur_dir_pathlen from a CD-style arg
+; ============================================================================
+; Input:  SI = ASCIIZ path (may start with "X:"; drive letter is skipped)
+; Output: cur_dir_path / cur_dir_pathlen updated in place
+; Preserves: all registers except flags
+; Does NOT touch cur_dir_cluster/entries and does NOT call save_drive_state
+; — that's the caller's responsibility.
+;
+; Handles absolute ('\'-prefixed) paths, relative paths, '.', '..', and
+; uppercases component characters. Matches the parse rules used by do_cd's
+; interactive CD handler.
+;
+cd_apply_path:
+	push	ax
+	push	cx
+	push	si
+	push	di
+
+	; Skip drive letter "X:" prefix
+	cmp	byte [si+1], ':'
+	jne	.cap_no_drv
+	add	si, 2
+.cap_no_drv:
+
+	; Absolute path?
+	cmp	byte [si], '\'
+	jne	.cap_proc
+	inc	si
+	mov	byte [cur_dir_pathlen], 0
+	mov	byte [cur_dir_path], 0
+
+.cap_proc:
+	cmp	byte [si], 0
+	je	.cap_done
+	cmp	byte [si], ' '
+	je	.cap_done
+
+	cmp	byte [si], '.'
+	jne	.cap_comp_name
+	cmp	byte [si+1], '.'
+	jne	.cap_single_dot
+	cmp	byte [si+2], '\'
+	je	.cap_do_dotdot
+	cmp	byte [si+2], 0
+	je	.cap_do_dotdot
+	cmp	byte [si+2], ' '
+	je	.cap_do_dotdot
+	jmp	.cap_comp_name
+
+.cap_single_dot:
+	cmp	byte [si+1], '\'
+	je	.cap_skip_dot
+	cmp	byte [si+1], 0
+	je	.cap_skip_dot_end
+	cmp	byte [si+1], ' '
+	je	.cap_skip_dot_end
+	jmp	.cap_comp_name
+.cap_skip_dot:
+	add	si, 2
+	jmp	.cap_proc
+.cap_skip_dot_end:
+	inc	si
+	jmp	.cap_done
+
+.cap_do_dotdot:
+	cmp	byte [cur_dir_pathlen], 0
+	je	.cap_dd_at_root
+	mov	di, cur_dir_path
+	mov	cl, [cur_dir_pathlen]
+	xor	ch, ch
+	add	di, cx
+	dec	di
+.cap_dd_trim:
+	cmp	di, cur_dir_path
+	jb	.cap_dd_at_root
+	je	.cap_dd_at_root2
+	cmp	byte [di], '\'
+	je	.cap_dd_trim_done
+	dec	di
+	jmp	.cap_dd_trim
+.cap_dd_at_root2:
+	mov	byte [cur_dir_path], 0
+	mov	byte [cur_dir_pathlen], 0
+	jmp	.cap_dd_advance
+.cap_dd_at_root:
+	mov	byte [cur_dir_pathlen], 0
+	mov	byte [cur_dir_path], 0
+	jmp	.cap_dd_advance
+.cap_dd_trim_done:
+	mov	byte [di], 0
+.cap_dd_advance:
+	add	si, 2			; past ".."
+	cmp	byte [si], '\'
+	jne	.cap_dd_recount
+	inc	si
+.cap_dd_recount:
+	push	si
+	mov	si, cur_dir_path
+	xor	cx, cx
+.cap_dd_cnt:
+	cmp	byte [si], 0
+	je	.cap_dd_cnt_done
+	inc	cx
+	inc	si
+	jmp	.cap_dd_cnt
+.cap_dd_cnt_done:
+	mov	[cur_dir_pathlen], cl
+	pop	si
+	jmp	.cap_proc
+
+.cap_comp_name:
+	mov	di, cur_dir_path
+	mov	cl, [cur_dir_pathlen]
+	xor	ch, ch
+	add	di, cx
+	cmp	cx, 0
+	je	.cap_copy
+	mov	byte [di], '\'
+	inc	di
+	inc	cx
+.cap_copy:
+	cmp	cx, 63
+	jae	.cap_done
+	mov	al, [si]
+	cmp	al, 0
+	je	.cap_comp_end
+	cmp	al, ' '
+	je	.cap_comp_end
+	cmp	al, '\'
+	je	.cap_comp_sep
+	cmp	al, 'a'
+	jb	.cap_store
+	cmp	al, 'z'
+	ja	.cap_store
+	sub	al, 0x20
+.cap_store:
+	mov	[di], al
+	inc	si
+	inc	di
+	inc	cx
+	jmp	.cap_copy
+.cap_comp_sep:
+	inc	si			; past '\'
+	mov	byte [di], 0
+	mov	[cur_dir_pathlen], cl
+	jmp	.cap_proc
+.cap_comp_end:
+	mov	byte [di], 0
+	mov	[cur_dir_pathlen], cl
+
+.cap_done:
+	; Recount for safety in case anything short-circuited.
+	push	si
+	mov	si, cur_dir_path
+	xor	cx, cx
+.cap_recount:
+	lodsb
+	or	al, al
+	jz	.cap_recount_done
+	inc	cx
+	jmp	.cap_recount
+.cap_recount_done:
+	mov	[cur_dir_pathlen], cl
+	pop	si
+
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	ret
+
+; ============================================================================
 ; MKDIR — create a new subdirectory
 ; ============================================================================
 do_mkdir:
@@ -5088,6 +5260,15 @@ resolve_path:
 	push	bx
 	push	cx
 	push	dx
+	push	es
+
+	; Force ES=SHELL_SEG for the duration so .rp_no_file's rep stosb
+	; and parse_83_filename's rep stosb both land in exec_fname in our
+	; segment. Callers invoked via INT 21h leave ES = caller's segment,
+	; which would otherwise make the blank-fill silently stomp the
+	; caller's memory and leave exec_fname stale from the previous call.
+	mov	ax, SHELL_SEG
+	mov	es, ax
 
 	; Default to current drive
 	mov	al, [cur_drive]
@@ -5257,6 +5438,7 @@ resolve_path:
 	clc
 
 .rp_done:
+	pop	es
 	pop	dx
 	pop	cx
 	pop	bx
@@ -11148,10 +11330,70 @@ int21_handler:
 	mov	ax, [geo_epc]
 	mov	[resolved_dir_entries], ax
 .i21_3b_set:
+	; Same-drive vs cross-drive: CHDIR("B:\X") while on A must update
+	; drive B's per-drive slot ONLY, not cur_dir_* (which mirrors the
+	; current drive, A). save_drive_state/load_drive_state both key off
+	; cur_drive, so the cross-drive case temporarily repoints cur_drive
+	; to the target, applies the change into cur_* (via load_drive_state
+	; + cluster/path update), persists into the target's slot, and then
+	; restores cur_drive and reloads A's state.
+	mov	al, [resolved_drive]
+	cmp	al, [cur_drive]
+	jne	.i21_3b_cross_drive
+
+	; --- Same-drive CHDIR ---
 	mov	ax, [resolved_dir_cluster]
 	mov	[cur_dir_cluster], ax
 	mov	ax, [resolved_dir_entries]
 	mov	[cur_dir_entries], ax
+	cmp	word [cur_dir_cluster], 0
+	jne	.i21_3b_same_rebuild
+	mov	byte [cur_dir_pathlen], 0
+	mov	byte [cur_dir_path], 0
+	jmp	.i21_3b_same_save
+.i21_3b_same_rebuild:
+	mov	si, cmd_buffer
+	call	cd_apply_path
+.i21_3b_same_save:
+	call	save_drive_state
+	jmp	.i21_3b_ok
+
+	; --- Cross-drive CHDIR: update target drive's slot only ---
+.i21_3b_cross_drive:
+	; Preserve the caller's current drive so we can restore at the end.
+	mov	al, [cur_drive]
+	push	ax
+	; Flush current cur_* into the original drive's slot (no-op if
+	; nothing dirty, but defensive against callers that relied on
+	; cur_dir_* being up to date without an explicit sync).
+	call	save_drive_state
+	; Pivot cur_drive to the target so the save/load helpers touch the
+	; target drive's slot, then pull in that drive's existing state.
+	mov	al, [resolved_drive]
+	mov	[cur_drive], al
+	call	load_drive_state
+	; Overlay the resolved cluster/entries and rebuild the text path.
+	mov	ax, [resolved_dir_cluster]
+	mov	[cur_dir_cluster], ax
+	mov	ax, [resolved_dir_entries]
+	mov	[cur_dir_entries], ax
+	cmp	word [cur_dir_cluster], 0
+	jne	.i21_3b_cross_rebuild
+	mov	byte [cur_dir_pathlen], 0
+	mov	byte [cur_dir_path], 0
+	jmp	.i21_3b_cross_save
+.i21_3b_cross_rebuild:
+	mov	si, cmd_buffer
+	call	cd_apply_path
+.i21_3b_cross_save:
+	; Persist into the target drive's slot (cur_drive currently = target).
+	call	save_drive_state
+	; Restore the original drive and reload its state into cur_*.
+	pop	ax
+	mov	[cur_drive], al
+	call	load_drive_state
+
+.i21_3b_ok:
 	pop	ds
 	pop	es
 	pop	di
@@ -15652,7 +15894,10 @@ search_path:
 	cmp	byte [es:si], 0
 	je	.sp_not_found
 
-	; Build full path: directory + \ + command name
+	; Build full path: directory + \ + command name. Every store into
+	; cmd_buffer is bounds-checked against cmd_buffer+MAX_CMD_LEN to
+	; prevent a long PATH entry + command from trampling exec_fname,
+	; ren_new_fname, the copy_* state, etc. living right after it.
 	mov	di, cmd_buffer
 .sp_copy_dir:
 	mov	al, [es:si]
@@ -15667,6 +15912,8 @@ search_path:
 	ja	.sp_no_upper
 	sub	al, 0x20
 .sp_no_upper:
+	cmp	di, cmd_buffer + MAX_CMD_LEN
+	jae	.sp_dir_overflow
 	mov	[di], al
 	inc	di
 	inc	si
@@ -15674,13 +15921,18 @@ search_path:
 .sp_dir_sep:
 	inc	si
 .sp_dir_done:
-	; Add backslash if not already there
+	; Add backslash if not already there. If we reach here, SI is
+	; either at the env terminator OR already past the current entry's
+	; ';' (via .sp_dir_sep), so any overflow from here on can just
+	; re-enter .sp_next_dir without any extra skipping.
 	cmp	byte [di-1], '\'
 	je	.sp_has_slash
+	cmp	di, cmd_buffer + MAX_CMD_LEN
+	jae	.sp_next_dir
 	mov	byte [di], '\'
 	inc	di
 .sp_has_slash:
-	; Append command name (just name, no args) + command tail
+	; Append command name (just name, no args)
 	push	si
 	push	es
 	push	ds
@@ -15690,6 +15942,8 @@ search_path:
 	lodsb
 	cmp	al, 0
 	je	.sp_cmd_end
+	cmp	di, cmd_buffer + MAX_CMD_LEN
+	jae	.sp_copy_cmd_overflow
 	mov	[di], al
 	inc	di
 	jmp	.sp_copy_cmd
@@ -15697,6 +15951,35 @@ search_path:
 	mov	byte [di], 0
 	pop	es
 	pop	si
+	jmp	.sp_after_build
+
+.sp_copy_cmd_overflow:
+	; SI (on stack) was saved AFTER .sp_copy_dir finished, i.e. already
+	; past the current entry's ';' (or at env terminator). Restoring
+	; and re-entering .sp_next_dir gives the next PATH entry a fair
+	; chance — no additional skip required.
+	pop	es
+	pop	si
+	jmp	.sp_next_dir
+
+.sp_dir_overflow:
+	; Mid-entry overflow: SI is inside the current PATH entry, so we
+	; need to walk forward past this entry's ';' (or hit the env
+	; terminator) before retrying. Otherwise .sp_next_dir would treat
+	; the current entry's tail as the next entry.
+.sp_ov_skip:
+	mov	al, [es:si]
+	cmp	al, 0
+	je	.sp_not_found
+	cmp	al, ';'
+	je	.sp_ov_skip_sep
+	inc	si
+	jmp	.sp_ov_skip
+.sp_ov_skip_sep:
+	inc	si
+	jmp	.sp_next_dir
+
+.sp_after_build:
 
 	; Search the PATH directory for the executable.
 	; cmd_buffer has the full path. Walk directory components,

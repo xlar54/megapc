@@ -13,6 +13,9 @@
 ;   Test 5: AH=46h DUP2 must flush the target's old writable SFT to
 ;           disk when it drops the last reference, and must return
 ;           CF=1 AX=6 when the source handle is already closed.
+;   Test 6: AH=3Bh CHDIR must keep the textual path (cur_dir_path)
+;           in sync with cur_dir_cluster so AH=47h Get-Current-Dir
+;           reports the new location. Runs CHDIR \ then \TEST.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -36,6 +39,7 @@
 	call	test3
 	call	test4
 	call	test5
+	call	test6
 
 	call	nl
 	mov	si, msg_summary
@@ -44,14 +48,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 5
+	mov	al, 6
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 5
+	mov	al, 6
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -952,6 +956,123 @@ test5:
 	ret
 
 ; ============================================================================
+; Test 6 — AH=3Bh CHDIR must keep cur_dir_path in sync with the new
+; cluster so AH=47h Get-Current-Dir reports the right location.
+; Runs root → \TEST round-trip; restores \TEST at the end regardless
+; of pass/fail so subsequent shell commands keep working.
+; ============================================================================
+test6:
+	mov	si, msg_t6
+	call	pstr
+
+	; CHDIR \ (root)
+	push	cs
+	pop	ds
+	mov	ah, 0x3B
+	mov	dx, t6_root
+	int	0x21
+	jc	.t6_fail_chdir_root
+
+	; AH=47h Get-Current-Dir (drive 0 = default, DS:SI = buffer)
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	ah, 0x47
+	mov	dl, 0
+	mov	si, t6_dirbuf
+	int	0x21
+	jc	.t6_fail_getcwd
+	; Expect empty string at root
+	push	cs
+	pop	ds
+	cmp	byte [t6_dirbuf], 0
+	jne	.t6_fail_root_not_empty
+
+	; CHDIR \TEST
+	push	cs
+	pop	ds
+	mov	ah, 0x3B
+	mov	dx, t6_test
+	int	0x21
+	jc	.t6_fail_chdir_test
+
+	; AH=47h again — expect "TEST"
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	ah, 0x47
+	mov	dl, 0
+	mov	si, t6_dirbuf
+	int	0x21
+	jc	.t6_fail_getcwd
+	push	cs
+	pop	ds
+	mov	si, t6_dirbuf
+	mov	di, t6_test_expected
+.t6_cmp:
+	mov	al, [si]
+	cmp	al, [di]
+	jne	.t6_fail_wrong_dir
+	or	al, al
+	jz	.t6_ok
+	inc	si
+	inc	di
+	jmp	.t6_cmp
+
+.t6_ok:
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	ret
+
+.t6_fail_chdir_root:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t6_chdir_root
+	call	pstr
+	call	nl
+	jmp	.t6_restore
+.t6_fail_chdir_test:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t6_chdir_test
+	call	pstr
+	call	nl
+	jmp	.t6_restore
+.t6_fail_getcwd:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t6_getcwd
+	call	pstr
+	call	nl
+	jmp	.t6_restore
+.t6_fail_root_not_empty:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t6_not_root
+	call	pstr
+	call	nl
+	jmp	.t6_restore
+.t6_fail_wrong_dir:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t6_wrong_dir
+	call	pstr
+	call	nl
+.t6_restore:
+	; Best-effort put the shell back in \TEST so the user's prompt
+	; makes sense after a failure.
+	push	cs
+	pop	ds
+	mov	ah, 0x3B
+	mov	dx, t6_test
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -1085,6 +1206,13 @@ msg_t5_closed_src db	'DUP2 with closed source returned success', 0
 msg_t5_closed_ax db	'wrong AX for closed-source reject', 0
 msg_t5_read	db	'AH=3Fh returned short/error', 0
 
+msg_t6		db	'T6 AH=3Bh CHDIR updates textual path: ', 0
+msg_t6_chdir_root db	'CHDIR \ failed', 0
+msg_t6_chdir_test db	'CHDIR \TEST failed', 0
+msg_t6_getcwd	db	'AH=47h failed', 0
+msg_t6_not_root	db	'after CHDIR \ cur_dir_path not empty', 0
+msg_t6_wrong_dir db	'after CHDIR \TEST cur_dir_path != TEST', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -1093,6 +1221,11 @@ fn_t3		db	'T3.TMP', 0
 fn_t4		db	'T4.TMP', 0
 fn_t5a		db	'T5A.TMP', 0
 fn_t5b		db	'T5B.TMP', 0
+
+t6_root		db	'\', 0
+t6_test		db	'\TEST', 0
+t6_test_expected db	'TEST', 0
+t6_dirbuf	times 64 db 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
