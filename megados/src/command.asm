@@ -11662,8 +11662,21 @@ int21_handler:
 ; --- AH=4E: FindFirst ---
 ; Input: DS:DX = ASCIIZ filespec (with wildcards), CX = search attributes
 ; Returns: CF=0 and DTA filled, CF=1 AX=error
-; DTA format: 21 bytes reserved, 1 byte attr, 2 bytes time, 2 bytes date,
-;             4 bytes size, 13 bytes ASCIIZ name
+;
+; DTA layout:
+;   +0      drive that the search is bound to
+;   +1..11  wildcard pattern (11-byte 8.3, ? = any char)
+;   +12     search-attribute mask (low byte of caller's CX)
+;   +13..14 directory cluster at the time of FindFirst
+;   +15..16 directory entry count
+;   +17..18 entry index of last match (FindNext resumes from here + 1)
+;   +19..20 reserved
+;   +21     matched file's attribute byte
+;   +22..23 modified time
+;   +24..25 modified date
+;   +26..29 file size (32-bit)
+;   +30..42 ASCIIZ filename ("NAME.EXT" form, max 13 bytes including NUL)
+;
 .i21_4e:
 	push	bx
 	push	cx
@@ -11671,7 +11684,7 @@ int21_handler:
 	push	di
 	push	es
 	push	ds
-	mov	[cs:.i21_4e_attr], cx	; Save search attributes
+	mov	[cs:.i21_4e_attr], cl	; Save search attributes (byte field)
 	; Copy filespec from caller's DS:DX
 	mov	si, dx
 	push	ds
@@ -11694,82 +11707,146 @@ int21_handler:
 	dec	cx
 	jnz	.i21_4e_copy
 .i21_4e_copied:
-	pop	si
+	pop	si			; cmd_buffer
 	mov	ax, SHELL_SEG
 	mov	ds, ax
-	; Parse as wildcard
-	mov	di, wild_pattern
-	call	parse_wildcard
-	; Resolve directory
-	; For simple case: use current directory
+
+	; Find last separator ('\' or ':') in the filespec so we can split
+	; it into a directory portion and a filename pattern. BX holds the
+	; offset (from cmd_buffer) of the most recent separator we saw, or
+	; 0xFFFF if there isn't one.
+	mov	bx, 0xFFFF
+	mov	di, si
+.i21_4e_find_sep:
+	mov	al, [di]
+	or	al, al
+	jz	.i21_4e_find_done
+	cmp	al, '\'
+	je	.i21_4e_save_sep
+	cmp	al, ':'
+	jne	.i21_4e_find_advance
+.i21_4e_save_sep:
+	mov	bx, di
+	sub	bx, si			; offset within cmd_buffer
+.i21_4e_find_advance:
+	inc	di
+	jmp	.i21_4e_find_sep
+.i21_4e_find_done:
+
+	cmp	bx, 0xFFFF
+	je	.i21_4e_no_dir_part
+
+	; Resolve the directory portion. Temporarily NUL-terminate one
+	; past the separator so resolve_path sees just the dir; on the
+	; success path we restore the byte for parse_wildcard. On failure
+	; cmd_buffer stays truncated (caller doesn't see it). resolve_path
+	; preserves neither DI nor SI, so save DI (the split position)
+	; directly across the call. Pop before the JC so the test reads
+	; resolve_path's CF without an arithmetic op clobbering flags.
+	mov	di, si
+	add	di, bx
+	inc	di			; one past separator
+	mov	al, [di]
+	mov	[cs:.i21_4e_save_byte], al
+	mov	byte [di], 0
+	push	di
+	call	resolve_path
+	pop	di
+	jc	.i21_4e_err
+	mov	al, [cs:.i21_4e_save_byte]
+	mov	[di], al
+	mov	si, di			; SI for parse_wildcard
+	jmp	.i21_4e_have_split
+
+.i21_4e_no_dir_part:
+	; No directory in filespec — search the current directory.
 	mov	al, [cur_drive]
 	mov	[resolved_drive], al
 	mov	ax, [cur_dir_cluster]
 	mov	[resolved_dir_cluster], ax
 	mov	ax, [cur_dir_entries]
 	mov	[resolved_dir_entries], ax
+	; SI still points to cmd_buffer (the filename pattern)
+
+.i21_4e_have_split:
+	; Parse the filename portion as a wildcard.
+	mov	di, wild_pattern
+	call	parse_wildcard
+
+	; Persist the search context into the DTA's reserved area so
+	; FindNext can resume the same directory and pattern even if the
+	; caller CHDIRs in between.
+	mov	es, [cs:dta_seg]
+	mov	di, [cs:dta_off]
+	mov	al, [resolved_drive]
+	mov	[es:di+0], al
+	mov	al, [cs:.i21_4e_attr]
+	mov	[es:di+12], al
+	mov	ax, [resolved_dir_cluster]
+	mov	[es:di+13], ax
+	mov	ax, [resolved_dir_entries]
+	mov	[es:di+15], ax
+	; Copy wildcard pattern to DTA+1..+11
+	push	di
+	add	di, 1
+	mov	si, wild_pattern
+	mov	cx, 11
+.i21_4e_save_wild:
+	mov	al, [si]
+	mov	[es:di], al
+	inc	si
+	inc	di
+	dec	cx
+	jnz	.i21_4e_save_wild
+	pop	di
+
+	; Read the resolved directory and start the search at index 0.
 	call	read_resolved_dir
 	jc	.i21_4e_err
-	; Search for first matching entry
 	mov	si, dir_buffer
 	mov	cx, [resolved_dir_entries]
-	xor	bx, bx			; Entry index
+	xor	bx, bx			; Entry index = 0
+
 .i21_4e_search:
 	mov	al, [si]
 	cmp	al, 0
 	je	.i21_4e_not_found
 	cmp	al, 0xE5
 	je	.i21_4e_next
-	; Check attribute filter
+	; Attribute filter — only include entries whose restrictable
+	; attribute bits (hidden/system/volume/dir = 0x1E) are all set in
+	; the caller's request mask. Read-only and archive are always OK.
 	mov	al, [si+11]
-	test	al, 0x08		; Skip volume labels
+	and	al, 0x1E
+	push	bx
+	mov	bl, [cs:.i21_4e_attr]
+	not	bl
+	and	al, bl
+	pop	bx
 	jnz	.i21_4e_next
 	; Match wildcard
+	push	di
 	mov	di, wild_pattern
 	call	match_wildcard
+	pop	di
 	jc	.i21_4e_next
-	; Found a match — fill DTA
-	; Save search state in DTA reserved area
+
+	; Match — record DTA (search context already saved above).
 	mov	es, [cs:dta_seg]
 	mov	di, [cs:dta_off]
-	; Reserved bytes 0-20: save search state
-	mov	[es:di+0], bl		; Current entry index (low)
-	mov	[es:di+1], bh		; Current entry index (high)
-	; Copy wildcard pattern to DTA for FindNext
-	push	si
-	push	cx
-	mov	si, wild_pattern
-	mov	cx, 11
-	push	di
-	add	di, 2
-.i21_4e_cpwild:
-	mov	al, [si]
-	mov	[es:di], al
-	inc	si
-	inc	di
-	dec	cx
-	jnz	.i21_4e_cpwild
-	pop	di
-	pop	cx
-	pop	si
-	; Attribute at offset 21
+	mov	[es:di+17], bx
 	mov	al, [si+11]
 	mov	[es:di+21], al
-	; Time at offset 22
 	mov	ax, [si+22]
 	mov	[es:di+22], ax
-	; Date at offset 24
 	mov	ax, [si+24]
 	mov	[es:di+24], ax
-	; Size at offset 26 (4 bytes)
 	mov	ax, [si+28]
 	mov	[es:di+26], ax
 	mov	ax, [si+30]
 	mov	[es:di+28], ax
-	; Filename at offset 30 (13 bytes ASCIIZ)
 	push	di
 	add	di, 30
-	; Convert 8.3 to ASCIIZ
 	push	si
 	mov	cx, 8
 .i21_4e_fname:
@@ -11784,7 +11861,7 @@ int21_handler:
 .i21_4e_fname_done:
 	pop	si
 	push	si
-	add	si, 8			; Extension
+	add	si, 8
 	cmp	byte [si], ' '
 	je	.i21_4e_no_ext
 	mov	byte [es:di], '.'
@@ -11800,10 +11877,10 @@ int21_handler:
 	dec	cx
 	jnz	.i21_4e_ext
 .i21_4e_no_ext:
-	mov	byte [es:di], 0		; Null terminate
+	mov	byte [es:di], 0
 	pop	si
 	pop	di
-	; Success
+
 	pop	ds
 	pop	es
 	pop	di
@@ -11836,11 +11913,14 @@ int21_handler:
 	pop	bp
 	iret
 
-.i21_4e_attr:	dw	0
+.i21_4e_attr:		db	0
+.i21_4e_save_byte:	db	0
 
 ; --- AH=4F: FindNext ---
-; Uses DTA from previous FindFirst
-; Returns: CF=0 and DTA updated, CF=1 AX=18 if no more
+; Restores the search context that AH=4Eh stashed in the DTA (drive,
+; dir cluster, dir entries, wildcard, attribute mask, last entry idx)
+; instead of using cur_dir_*, so the search keeps working even if the
+; caller CHDIRs between calls.
 .i21_4f:
 	push	bx
 	push	cx
@@ -11850,71 +11930,87 @@ int21_handler:
 	push	ds
 	mov	ax, SHELL_SEG
 	mov	ds, ax
-	; Read search state from DTA
-	mov	es, [dta_seg]
-	mov	di, [dta_off]
-	mov	bl, [es:di+0]
-	mov	bh, [es:di+1]
-	inc	bx			; Start from next entry
-	; Restore wildcard pattern from DTA
+
+	mov	es, [cs:dta_seg]
+	mov	di, [cs:dta_off]
+
+	; Restore drive
+	mov	al, [es:di+0]
+	mov	[resolved_drive], al
+	; Restore wildcard
 	push	di
-	add	di, 2
+	add	di, 1
 	mov	si, wild_pattern
 	mov	cx, 11
-.i21_4f_restore:
+.i21_4f_load_wild:
 	mov	al, [es:di]
 	mov	[si], al
 	inc	si
 	inc	di
 	dec	cx
-	jnz	.i21_4f_restore
+	jnz	.i21_4f_load_wild
 	pop	di
-	; Re-read directory (save BX — read_resolved_dir clobbers it)
-	push	bx
-	mov	al, [cur_drive]
-	mov	[resolved_drive], al
-	mov	ax, [cur_dir_cluster]
+	; Restore attribute mask
+	mov	al, [es:di+12]
+	mov	[cs:.i21_4e_attr], al
+	; Restore directory cluster + entry count
+	mov	ax, [es:di+13]
 	mov	[resolved_dir_cluster], ax
-	mov	ax, [cur_dir_entries]
+	mov	ax, [es:di+15]
 	mov	[resolved_dir_entries], ax
+	; Resume from saved index + 1
+	mov	bx, [es:di+17]
+	inc	bx
+
+	push	bx
 	call	read_resolved_dir
 	pop	bx
 	jc	.i21_4f_err
+
 	; Restore ES:DI to DTA (read_resolved_dir clobbered ES)
-	mov	es, [dta_seg]
-	mov	di, [dta_off]
-	; Skip to entry BX
-	mov	si, dir_buffer
-	mov	cx, [resolved_dir_entries]
-	; Skip BX entries
+	mov	es, [cs:dta_seg]
+	mov	di, [cs:dta_off]
+
+	; Position SI at entry BX of dir_buffer
 	mov	ax, bx
-	cmp	ax, cx
-	jae	.i21_4f_err		; Past end
+	cmp	ax, [resolved_dir_entries]
+	jae	.i21_4f_err
 	push	bx
 	mov	bx, 32
 	mul	bx
 	pop	bx
+	mov	si, dir_buffer
 	add	si, ax
-	sub	cx, bx			; Remaining entries
+
+	; Remaining entries to scan
+	mov	cx, [resolved_dir_entries]
+	sub	cx, bx
 	or	cx, cx
 	jz	.i21_4f_err
-	; Search from here
+
 .i21_4f_search:
 	mov	al, [si]
 	cmp	al, 0
 	je	.i21_4f_err
 	cmp	al, 0xE5
 	je	.i21_4f_next
-	test	byte [si+11], 0x08
+	; Attribute filter — same rules as FindFirst.
+	mov	al, [si+11]
+	and	al, 0x1E
+	push	bx
+	mov	bl, [cs:.i21_4e_attr]
+	not	bl
+	and	al, bl
+	pop	bx
 	jnz	.i21_4f_next
 	push	di
 	mov	di, wild_pattern
 	call	match_wildcard
 	pop	di
 	jc	.i21_4f_next
-	; Match — update DTA
-	mov	[es:di+0], bl		; Save entry index
-	mov	[es:di+1], bh
+
+	; Match — update DTA's resume index and metadata fields.
+	mov	[es:di+17], bx
 	mov	al, [si+11]
 	mov	[es:di+21], al
 	mov	ax, [si+22]
@@ -11925,7 +12021,6 @@ int21_handler:
 	mov	[es:di+26], ax
 	mov	ax, [si+30]
 	mov	[es:di+28], ax
-	; Convert filename
 	push	di
 	add	di, 30
 	push	si
@@ -11961,7 +12056,7 @@ int21_handler:
 	mov	byte [es:di], 0
 	pop	si
 	pop	di
-	; Success
+
 	pop	ds
 	pop	es
 	pop	di

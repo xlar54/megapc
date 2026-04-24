@@ -16,6 +16,11 @@
 ;   Test 6: AH=3Bh CHDIR must keep the textual path (cur_dir_path)
 ;           in sync with cur_dir_cluster so AH=47h Get-Current-Dir
 ;           reports the new location. Runs CHDIR \ then \TEST.
+;   Test 7: AH=4Eh FindFirst must resolve the directory portion of
+;           a path-qualified filespec, and AH=4Fh FindNext must
+;           continue from the saved search dir even after the caller
+;           CHDIRs. Creates 3 files in \TEST, CHDIRs to root mid-walk,
+;           and asserts all 3 still come back.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -40,6 +45,7 @@
 	call	test4
 	call	test5
 	call	test6
+	call	test7
 
 	call	nl
 	mov	si, msg_summary
@@ -48,14 +54,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 6
+	mov	al, 7
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 6
+	mov	al, 7
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -1073,6 +1079,162 @@ test6:
 	ret
 
 ; ============================================================================
+; Test 7 — AH=4Eh / AH=4Fh: directory-qualified search must work, AND
+; the search must continue against the original directory even after a
+; CHDIR between FindFirst and FindNext.
+; ============================================================================
+test7:
+	mov	si, msg_t7
+	call	pstr
+
+	; Make sure we start clean
+	push	cs
+	pop	ds
+	mov	dx, fn_t7a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t7b
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t7c
+	mov	ah, 0x41
+	int	0x21
+
+	; Create three throwaway files (size doesn't matter — we just need
+	; matching directory entries).
+	push	cs
+	pop	ds
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t7a
+	int	0x21
+	jc	.t7_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t7b
+	int	0x21
+	jc	.t7_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t7c
+	int	0x21
+	jc	.t7_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	; AH=4Eh FindFirst on a path-qualified filespec while we sit in
+	; \TEST. Pattern matches our 3 files plus possibly anything else
+	; that already starts with T7 — that shouldn't exist on a fresh
+	; disk run, but we also count strictly so a stray match would FAIL.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	; Set DTA to a buffer we own
+	mov	ah, 0x1A
+	mov	dx, t7_dta
+	int	0x21
+
+	mov	ah, 0x4E
+	xor	cx, cx			; attribute = 0 (regular files only)
+	mov	dx, t7_pattern
+	int	0x21
+	jc	.t7_fail_findfirst
+	mov	word [t7_count], 1
+
+	; CHDIR to root MID-WALK to prove FindNext doesn't lean on
+	; cur_dir_*. Old code re-read the current directory and would have
+	; found nothing (root has no T7?.TMP).
+	push	cs
+	pop	ds
+	mov	ah, 0x3B
+	mov	dx, t6_root
+	int	0x21
+	jc	.t7_fail_chdir
+
+.t7_loop:
+	push	cs
+	pop	ds
+	mov	ah, 0x4F
+	int	0x21
+	jc	.t7_loop_done
+	inc	word [t7_count]
+	jmp	.t7_loop
+.t7_loop_done:
+	; AX=18 (no more files) is the only acceptable terminator.
+	cmp	ax, 18
+	jne	.t7_fail_findnext
+
+	cmp	word [t7_count], 3
+	jne	.t7_fail_count
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	jmp	.t7_cleanup
+
+.t7_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t7_io
+	call	pstr
+	call	nl
+	jmp	.t7_cleanup
+.t7_fail_findfirst:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t7_findfirst
+	call	pstr
+	call	nl
+	jmp	.t7_cleanup
+.t7_fail_chdir:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t7_chdir
+	call	pstr
+	call	nl
+	jmp	.t7_cleanup
+.t7_fail_findnext:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t7_findnext
+	call	pstr
+	call	nl
+	jmp	.t7_cleanup
+.t7_fail_count:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t7_count
+	call	pstr
+	call	nl
+.t7_cleanup:
+	; Restore current directory to \TEST and remove the test files.
+	push	cs
+	pop	ds
+	mov	ah, 0x3B
+	mov	dx, t6_test
+	int	0x21
+	mov	dx, fn_t7a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t7b
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t7c
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -1213,6 +1375,13 @@ msg_t6_getcwd	db	'AH=47h failed', 0
 msg_t6_not_root	db	'after CHDIR \ cur_dir_path not empty', 0
 msg_t6_wrong_dir db	'after CHDIR \TEST cur_dir_path != TEST', 0
 
+msg_t7		db	'T7 AH=4E/4F path search + post-CHDIR: ', 0
+msg_t7_io	db	'io', 0
+msg_t7_findfirst db	'FindFirst path-qualified failed', 0
+msg_t7_chdir	db	'mid-walk CHDIR failed', 0
+msg_t7_findnext	db	'FindNext returned wrong AX on exhaustion', 0
+msg_t7_count	db	'wrong number of matches', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -1226,6 +1395,13 @@ t6_root		db	'\', 0
 t6_test		db	'\TEST', 0
 t6_test_expected db	'TEST', 0
 t6_dirbuf	times 64 db 0
+
+fn_t7a		db	'T7A.TMP', 0
+fn_t7b		db	'T7B.TMP', 0
+fn_t7c		db	'T7C.TMP', 0
+t7_pattern	db	'\TEST\T7?.TMP', 0
+t7_count	dw	0
+t7_dta		times 43 db 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
