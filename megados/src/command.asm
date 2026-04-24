@@ -4020,6 +4020,67 @@ do_rmdir:
 	jmp	cmd_loop
 
 ; ============================================================================
+; env_backup / env_restore — atomic snapshot of the environment block
+; Used by SET/PROMPT/PATH so that an overflowing new value does not also
+; destroy the previous value (the modify-in-place code path deletes the
+; old variable before it knows the new one fits).
+; Assumes DS = SHELL_SEG on entry. No-ops if env_seg == 0.
+; ============================================================================
+env_backup:
+	push	ax
+	push	cx
+	push	si
+	push	di
+	push	ds
+	push	es
+	mov	ax, [env_seg]
+	or	ax, ax
+	jz	.eb_done
+	mov	ds, ax			; DS:SI = env_seg:0 (src)
+	xor	si, si
+	mov	ax, SHELL_SEG		; ES:DI = SHELL_SEG:env_backup_buf
+	mov	es, ax
+	mov	di, env_backup_buf
+	mov	cx, ENV_SIZE / 2
+	cld
+	rep	movsw
+.eb_done:
+	pop	es
+	pop	ds
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	ret
+
+env_restore:
+	push	ax
+	push	cx
+	push	si
+	push	di
+	push	ds
+	push	es
+	mov	ax, [env_seg]
+	or	ax, ax
+	jz	.er_done
+	mov	es, ax			; ES:DI = env_seg:0 (dst)
+	xor	di, di
+	mov	ax, SHELL_SEG		; DS:SI = SHELL_SEG:env_backup_buf
+	mov	ds, ax
+	mov	si, env_backup_buf
+	mov	cx, ENV_SIZE / 2
+	cld
+	rep	movsw
+.er_done:
+	pop	es
+	pop	ds
+	pop	di
+	pop	si
+	pop	cx
+	pop	ax
+	ret
+
+; ============================================================================
 ; SET — view or set environment variables
 ; ============================================================================
 do_set:
@@ -4139,6 +4200,11 @@ do_set:
 	sub	cx, si			; CX = name length (not including '=')
 	mov	[.set_namelen], cx
 
+	; Snapshot the env so we can roll back atomically if the new value
+	; overflows — otherwise we'd delete the old VAR= without being able
+	; to put it back.
+	call	env_backup
+
 	; Set up ES for env block
 	push	es
 	mov	es, [env_seg]
@@ -4231,9 +4297,8 @@ do_set:
 	inc	bx
 	jmp	.set_find_end2
 .set_at_end2:
-	; BX = position to write new entry. Remember it so we can roll back
-	; the partial write if the block overflows.
-	mov	[.set_entry_start], bx
+	; BX = position to write new entry. env_backup took the pre-command
+	; snapshot, so .set_env_full just rolls back via env_restore.
 	; Copy VAR=VALUE, uppercasing the name part
 	mov	si, [.set_arg]
 	mov	byte [.set_in_name], 1
@@ -4271,11 +4336,9 @@ do_set:
 	jmp	cmd_loop
 
 .set_env_full:
-	; Roll back the partial entry — cut the env at the original end
-	; position so we don't leave a truncated VAR=partial string behind.
-	mov	bx, [.set_entry_start]
-	mov	byte [es:bx], 0
-	mov	byte [es:bx+1], 0
+	; Restore the pre-command snapshot so the old VAR= (and anything
+	; else we shifted out) is back in place.
+	call	env_restore
 	pop	es
 	mov	si, msg_env_full
 	call	print_string
@@ -4284,13 +4347,16 @@ do_set:
 .set_arg:	dw	0
 .set_namelen:	dw	0
 .set_in_name:	db	0
-.set_entry_start: dw	0
 
 ; ============================================================================
 ; PROMPT command — set prompt format string
 ; ============================================================================
 do_prompt:
 	call	skip_spaces
+	; Snapshot env so we can atomically roll back if the new value
+	; overflows — the delete/append below would otherwise leave the
+	; caller with no PROMPT at all.
+	call	env_backup
 	; Remove existing PROMPT= from environment
 	push	es
 	mov	es, [env_seg]
@@ -4366,8 +4432,6 @@ do_prompt:
 	; No argument — use default $P$G
 	mov	si, .prompt_default
 .prompt_has_arg:
-	; Remember start so we can roll back on overflow.
-	mov	[.prompt_entry_start], di
 	; Need 8 bytes for "PROMPT=" + at least one char + final double-null
 	cmp	di, ENV_MAX_WRITE - 7
 	jae	.prompt_env_full
@@ -4398,16 +4462,15 @@ do_prompt:
 	jmp	cmd_loop
 
 .prompt_env_full:
-	mov	di, [.prompt_entry_start]
-	mov	byte [es:di], 0
-	mov	byte [es:di+1], 0
+	; Restore the pre-command snapshot (this both clears our partial
+	; append and resurrects the old PROMPT= we already shifted out).
+	call	env_restore
 	pop	es
 	mov	si, msg_env_full
 	call	print_string
 	jmp	cmd_loop
 
 .prompt_default: db	'$P$G', 0
-.prompt_entry_start: dw	0
 
 ; ============================================================================
 ; PATH command — display or set executable search path
@@ -4474,6 +4537,10 @@ do_path:
 	jmp	cmd_loop
 .path_set:
 	; Set PATH — reuse PROMPT's env manipulation approach
+	; Snapshot env first so an overflowing new PATH doesn't also wipe
+	; out the old one (we delete the old entry below before we know
+	; the new one fits).
+	call	env_backup
 	; Build "PATH=<value>" and insert into env
 	push	es
 	mov	es, [env_seg]
@@ -4546,8 +4613,6 @@ do_path:
 	inc	di
 	jmp	.path_find_end
 .path_at_end:
-	; Remember start so we can roll back on overflow.
-	mov	[.path_entry_start], di
 	; Need 6 bytes for "PATH=" + at least one char + final double-null
 	cmp	di, ENV_MAX_WRITE - 5
 	jae	.path_env_full
@@ -4582,9 +4647,9 @@ do_path:
 	jmp	cmd_loop
 
 .path_env_full:
-	mov	di, [.path_entry_start]
-	mov	byte [es:di], 0
-	mov	byte [es:di+1], 0
+	; Restore the pre-command snapshot (clears our partial append and
+	; brings back the old PATH= we shifted out).
+	call	env_restore
 	pop	es
 	mov	si, msg_env_full
 	call	print_string
@@ -4592,7 +4657,6 @@ do_path:
 
 .path_msg:	db	'PATH=', 0
 .path_no_msg:	db	'No Path', 0
-.path_entry_start: dw	0
 
 ; ============================================================================
 ; DATE command — display current date
@@ -16787,6 +16851,9 @@ exec_parent_sp:	dw	0		; Parent SP for AH=4Bh EXEC return
 exec_depth:	db	0		; Nesting depth (0=shell launched, >0=EXEC launched)
 exec_cmdtail_ptr: dw	0		; Pointer to command tail in cmd_buffer
 env_seg:	dw	0		; Segment of environment block
+; Snapshot of the environment block taken before SET/PROMPT/PATH
+; modifies it, so we can roll back cleanly if the new value overflows.
+env_backup_buf:	times ENV_SIZE db 0
 break_flag:	db	0		; Ctrl-C check flag
 files_limit:	dw	MAX_HANDLES	; runtime JFT size (FILES= in CONFIG.SYS)
 
