@@ -25,6 +25,9 @@
 ;           access mode (so 0x80|read stays read-only and the AH=40h
 ;           write-guard still fires) and reject access codes 3-7 and
 ;           reserved bit 3 with AX=000Ch.
+;   Test 9: AH=3Ch/3Dh/41h must reject directories, volume labels, and
+;           (for creat/delete) read-only files with AX=5. AH=3Dh must
+;           still permit opening a read-only file for read (mode 0).
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -51,6 +54,7 @@
 	call	test6
 	call	test7
 	call	test8
+	call	test9
 
 	call	nl
 	mov	si, msg_summary
@@ -59,14 +63,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 8
+	mov	al, 9
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 8
+	mov	al, 9
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -1465,6 +1469,254 @@ test8:
 	ret
 
 ; ============================================================================
+; Test 9 — AH=3Ch / AH=3Dh / AH=41h must refuse directories, volume
+; labels, and (for creat/delete) read-only files with AX=5. AH=3Dh
+; read-mode against a RO file must still succeed.
+; ============================================================================
+test9:
+	mov	si, msg_t9
+	call	pstr
+
+	push	cs
+	pop	ds
+
+	; Belt-and-braces: if a prior failed run left T9.TMP marked RO or
+	; T9DIR lying around, clear the attribute and remove them so the
+	; fresh setup below works. All no-ops if absent.
+	mov	ax, 0x4301
+	xor	cx, cx
+	mov	dx, fn_t9
+	int	0x21
+	mov	dx, fn_t9
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t9dir
+	mov	ah, 0x3A
+	int	0x21
+
+	; Create a throwaway directory to exercise the dir-reject paths —
+	; using a dedicated name so a test regression can't corrupt \TEST
+	; or its cluster chain.
+	mov	ah, 0x39
+	mov	dx, fn_t9dir
+	int	0x21
+	jc	.t9_fail_io
+
+	; --- Part A: AH=3Dh r/w against T9DIR must fail AX=5.
+	mov	ax, 0x3D02
+	mov	dx, fn_t9dir
+	int	0x21
+	jnc	.t9_fail_a_ok
+	cmp	ax, 5
+	jne	.t9_fail_a_ax
+
+	; --- Part B: AH=41h against T9DIR must fail AX=5 (and T9DIR must
+	; still be there afterwards — verified by RMDIR below on cleanup).
+	mov	dx, fn_t9dir
+	mov	ah, 0x41
+	int	0x21
+	jnc	.t9_fail_b_ok
+	cmp	ax, 5
+	jne	.t9_fail_b_ax
+	; Confirm the directory survived by CHDIR'ing into it.
+	mov	ah, 0x3B
+	mov	dx, fn_t9dir
+	int	0x21
+	jc	.t9_fail_b_gone
+	; Back to root for the rest of the test.
+	mov	ah, 0x3B
+	mov	dx, fn_root
+	int	0x21
+
+	; --- Setup: create T9.TMP, write a few bytes, close, mark RO.
+	push	cs
+	pop	ds
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t9
+	int	0x21
+	jc	.t9_fail_io
+	mov	[t9_handle], ax
+	mov	bx, [t9_handle]
+	mov	cx, 4
+	mov	dx, t4_seed
+	mov	ah, 0x40
+	int	0x21
+	mov	bx, [t9_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	ax, 0x4301		; Set attributes
+	mov	cx, 1			; RO
+	mov	dx, fn_t9
+	int	0x21
+	jc	.t9_fail_chmod
+
+	; --- Part C: AH=41h on a RO file must fail AX=5.
+	mov	dx, fn_t9
+	mov	ah, 0x41
+	int	0x21
+	jnc	.t9_fail_c_ok
+	cmp	ax, 5
+	jne	.t9_fail_c_ax
+
+	; --- Part D: AH=3Ch on an existing RO file must fail AX=5 (would
+	; otherwise truncate it).
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t9
+	int	0x21
+	jnc	.t9_fail_d_ok
+	cmp	ax, 5
+	jne	.t9_fail_d_ax
+
+	; --- Part E: AH=3Dh mode=1 (write) on a RO file must fail AX=5.
+	mov	ax, 0x3D01
+	mov	dx, fn_t9
+	int	0x21
+	jnc	.t9_fail_e_ok
+	cmp	ax, 5
+	jne	.t9_fail_e_ax
+
+	; --- Part F: AH=3Dh mode=0 (read) on a RO file must succeed.
+	mov	ax, 0x3D00
+	mov	dx, fn_t9
+	int	0x21
+	jc	.t9_fail_f_ro_read
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	; PASS — cleanup: clear RO and delete.
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	jmp	.t9_cleanup
+
+.t9_fail_a_ok:
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_a_ok
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_a_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_a_ax
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_b_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_b_ok
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_b_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_b_ax
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_b_gone:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_b_gone
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_io
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_chmod:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_chmod
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_c_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_c_ok
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_c_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_c_ax
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_d_ok:
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_d_ok
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_d_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_d_ax
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_e_ok:
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_e_ok
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_e_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_e_ax
+	call	pstr
+	call	nl
+	jmp	.t9_cleanup
+.t9_fail_f_ro_read:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t9_f_ro_read
+	call	pstr
+	call	nl
+.t9_cleanup:
+	; Clear RO (in case it was set) and remove T9.TMP / T9DIR. All
+	; no-ops if absent.
+	push	cs
+	pop	ds
+	mov	ax, 0x4301
+	xor	cx, cx
+	mov	dx, fn_t9
+	int	0x21
+	mov	dx, fn_t9
+	mov	ah, 0x41
+	int	0x21
+	mov	ah, 0x3A
+	mov	dx, fn_t9dir
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -1625,6 +1877,22 @@ msg_t8_c_ax	db	'wrong AX for reserved-bit reject', 0
 msg_t8_d_ok	db	'open with access code 3 succeeded', 0
 msg_t8_d_ax	db	'wrong AX for invalid-access reject', 0
 
+msg_t9		db	'T9 dir/VOL/RO rejected: ', 0
+msg_t9_io	db	'setup io', 0
+msg_t9_chmod	db	'chmod RO failed', 0
+msg_t9_a_ok	db	'AH=3Dh rw on directory succeeded', 0
+msg_t9_a_ax	db	'wrong AX for AH=3Dh dir reject', 0
+msg_t9_b_ok	db	'AH=41h on directory succeeded', 0
+msg_t9_b_ax	db	'wrong AX for AH=41h dir reject', 0
+msg_t9_b_gone	db	'T9DIR disappeared after rejected DEL', 0
+msg_t9_c_ok	db	'AH=41h on RO file succeeded', 0
+msg_t9_c_ax	db	'wrong AX for AH=41h RO reject', 0
+msg_t9_d_ok	db	'AH=3Ch on RO file succeeded', 0
+msg_t9_d_ax	db	'wrong AX for AH=3Ch RO reject', 0
+msg_t9_e_ok	db	'AH=3Dh write on RO file succeeded', 0
+msg_t9_e_ax	db	'wrong AX for AH=3Dh RO-write reject', 0
+msg_t9_f_ro_read db	'AH=3Dh read on RO file failed', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -1648,6 +1916,10 @@ t7_dta		times 43 db 0
 
 fn_t8		db	'T8.TMP', 0
 
+fn_t9		db	'T9.TMP', 0
+fn_t9dir	db	'T9DIR', 0
+fn_root		db	'\', 0
+
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
 
@@ -1659,6 +1931,7 @@ t4_handle	dw	0
 t5_a_handle	dw	0
 t5_b_handle	dw	0
 t8_handle	dw	0
+t9_handle	dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
 

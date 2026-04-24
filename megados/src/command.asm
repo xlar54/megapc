@@ -8668,6 +8668,13 @@ int21_handler:
 	jmp	.i21_3c_setup_handle
 
 .i21_3c_exists:
+	; Reject RO / VOL / DIR before truncating. creat() destroys whatever
+	; was here, and wiping a directory, volume label, or read-only file
+	; is never what the caller wanted. DOS returns error 5 for all three.
+	; Attr byte: 0x01=RO, 0x08=VOL, 0x10=DIR → mask 0x19.
+	test	byte [si+11], 0x19
+	jnz	.i21_3c_err_pop
+
 	; Record entry index (for close-time directory update).
 	mov	ax, si
 	sub	ax, dir_buffer
@@ -8933,7 +8940,35 @@ int21_handler:
 	pop	bp
 	iret
 
+.i21_3d_access_denied:
+	; Same stack layout as .i21_3d_not_found (entered after .i21_3d_found
+	; which assumes the handle-number bx was pushed at .i21_3d_got_handle).
+	pop	bx
+	mov	ds, [cs:.i21_3d_ds]
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	ax, 5			; Access denied
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
 .i21_3d_found:
+	; Reject VOL / DIR outright, and reject RO when a write-capable mode
+	; was requested. DOS lets you open a RO file for read (mode 0) but
+	; refuses write (mode 1) or read/write (mode 2). Attr byte: 0x01=RO,
+	; 0x08=VOL, 0x10=DIR.
+	test	byte [si+11], 0x18		; VOL | DIR
+	jnz	.i21_3d_access_denied
+	test	byte [si+11], 0x01		; RO
+	jz	.i21_3d_found_ok
+	cmp	byte [cs:.i21_3d_mode], 0
+	jne	.i21_3d_access_denied
+.i21_3d_found_ok:
 	; Record entry index (for close-time directory update).
 	push	ax
 	mov	ax, si
@@ -11582,6 +11617,12 @@ int21_handler:
 .i21_41_not_found:
 	jmp	.i21_41_err
 .i21_41_found:
+	; Reject RO / VOL / DIR before marking deleted. Without this guard
+	; DEL would happily wipe a directory entry or the volume label, and
+	; would silently defeat the read-only bit. Attr byte mask 0x19 =
+	; RO (0x01) | VOL (0x08) | DIR (0x10).
+	test	byte [si+11], 0x19
+	jnz	.i21_41_access_denied
 	; Save cluster, mark deleted
 	mov	ax, [si+26]
 	mov	[exec_cluster], ax
@@ -11627,6 +11668,22 @@ int21_handler:
 	pop	cx
 	pop	bx
 	mov	ax, 2			; File not found
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_41_access_denied:
+	; Same stack layout as .i21_41_err (the initial 6 pushes are still in
+	; place; .i21_41_found is reached before any additional push).
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	ax, 5			; Access denied
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
