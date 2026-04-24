@@ -69,13 +69,21 @@ _irp_kbd:
         lda #$FF
         rts
 _irp_kbd_data:
-        ; Return last keypress scancode
-        ; TODO: implement keyboard buffer
+        ; Port $60 — return scancode of current key in MEGA65 queue
+        lda $D610
+        beq _irp_kbd_none
+        jmp petscii_to_scancode
+_irp_kbd_none:
         lda #$00
         rts
 _irp_kbd_status:
-        ; Keyboard status: bit 0 = data available
-        lda #$00                ; No key available for now
+        ; Port $64 — bit 0 = data available
+        lda $D610
+        beq _irp_kbd_stat_empty
+        lda #$01
+        rts
+_irp_kbd_stat_empty:
+        lda #$00
         rts
 
 _irp_high:
@@ -100,6 +108,46 @@ _irp_retrace:
 
 _irp_cga_other:
         lda #$00
+        rts
+
+; ============================================================================
+; petscii_to_scancode — Translate MEGA65 PETSCII code to PC scancode
+; Input: A = PETSCII code from $D610
+; Output: A = PC make-code scan code
+; ============================================================================
+petscii_to_scancode:
+        cmp #$91
+        beq _p2s_up
+        cmp #$11
+        beq _p2s_down
+        cmp #$9D
+        beq _p2s_left
+        cmp #$1D
+        beq _p2s_right
+        cmp #$0D
+        beq _p2s_return
+        cmp #$14
+        beq _p2s_bs
+        cmp #$7F
+        beq _p2s_bs
+        rts                     ; For other keys, return the byte as-is
+_p2s_up:
+        lda #$48
+        rts
+_p2s_down:
+        lda #$50
+        rts
+_p2s_left:
+        lda #$4B
+        rts
+_p2s_right:
+        lda #$4D
+        rts
+_p2s_return:
+        lda #$1C
+        rts
+_p2s_bs:
+        lda #$0E
         rts
 
 ; ============================================================================
@@ -774,7 +822,19 @@ int16_handler:
         beq _i16_wait_key
         cmp #$01
         beq _i16_check_key
+        cmp #$10                ; Enhanced get key (AT+) — same as AH=00
+        beq _i16_wait_key
+        cmp #$11                ; Enhanced peek (AT+) — same as AH=01
+        beq _i16_check_key
+        cmp #$12                ; Get shift status
+        beq _i16_shift_status
         rts                     ; Unknown function, ignore
+_i16_shift_status:
+        ; No shift/ctrl/alt tracking — report "nothing pressed"
+        lda #$00
+        sta reg_al
+        sta reg_ah
+        rts
 
 _i16_wait_key:
         ; AH=00: Wait for key.
