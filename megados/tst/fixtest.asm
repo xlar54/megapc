@@ -840,17 +840,26 @@ test5:
 	jc	.t5_fail_io
 	mov	[t5_a_handle], ax
 
-	; INT 21 calls above may have clobbered DS/ES — reassert before the
-	; byte-verify loop so [si] reads from our segment.
+	; INT 21 above may have clobbered DS/ES. Reassert before touching
+	; io_buf, then zero it so stale 0xA5 from the earlier write can't
+	; false-pass the verify if AH=3Fh returns short or fails.
 	push	cs
 	pop	ds
 	push	cs
 	pop	es
+	mov	di, io_buf
+	mov	cx, 100
+	xor	al, al
+	rep	stosb
+
 	mov	bx, [t5_a_handle]
 	mov	cx, 100
 	mov	dx, io_buf
 	mov	ah, 0x3F
 	int	0x21
+	jc	.t5_fail_read
+	cmp	ax, 100
+	jne	.t5_fail_read
 	push	cs
 	pop	ds
 	mov	bx, [t5_a_handle]
@@ -919,6 +928,18 @@ test5:
 	mov	si, msg_fail
 	call	pstr
 	mov	si, msg_t5_closed_ax
+	call	pstr
+	call	nl
+	jmp	.t5_cleanup
+.t5_fail_read:
+	push	cs
+	pop	ds
+	mov	bx, [t5_a_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t5_read
 	call	pstr
 	call	nl
 .t5_cleanup:
@@ -1062,6 +1083,7 @@ msg_t5_io	db	'io', 0
 msg_t5_flush	db	'DUP2 dropped writable SFT without flush', 0
 msg_t5_closed_src db	'DUP2 with closed source returned success', 0
 msg_t5_closed_ax db	'wrong AX for closed-source reject', 0
+msg_t5_read	db	'AH=3Fh returned short/error', 0
 
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
