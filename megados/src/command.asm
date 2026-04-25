@@ -12499,27 +12499,59 @@ int21_handler:
 	mov	di, exec_fname
 	mov	cx, 11
 	rep	movsb
-	; Read directory, then refuse if the destination 8.3 name already
-	; exists (otherwise the rename would silently produce two entries
-	; with the same name and DOS lookups would be ambiguous).
+	; Read directory, then locate the source. We do the source-search
+	; first so MISSING -> anything reports AX=2 (file not found) — the
+	; correct DOS error — instead of being short-circuited by the
+	; same-name path or hijacked by the destination-exists check.
 	call	read_resolved_dir
 	jc	.i21_56_err
 
-	; Same-name rename is a no-op success (so the dup check below
-	; doesn't reject it for matching the source).
+	; Find the source 8.3 name. If absent, AX=2.
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_56_search:
+	mov	al, [si]
+	cmp	al, 0
+	je	.i21_56_err
+	cmp	al, 0xE5
+	je	.i21_56_next
+	push	cx
+	push	si
+	mov	di, exec_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_56_found_src
+.i21_56_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_56_search
+	jmp	.i21_56_err
+
+.i21_56_found_src:
+	; Stash source dir-entry pointer for the in-place overwrite below.
+	mov	[cs:.i21_56_src_ptr], si
+
+	; Source exists. Same-name rename is now safely a no-op success
+	; (no dir mutation needed and the dup scan below would otherwise
+	; flag the source itself as a duplicate).
 	mov	si, copy_src_name
 	mov	di, ren_new_fname
 	mov	cx, 11
 	repe	cmpsb
 	je	.i21_56_same
 
-	; Scan the loaded directory for the new name.
+	; Scan for the destination 8.3 name. If anything matches, refuse
+	; — the source can't match here because old != new (we just
+	; ruled that out above) and 8.3 names are unique within a
+	; directory.
 	mov	si, dir_buffer
 	mov	cx, [resolved_dir_entries]
 .i21_56_dup_scan:
 	mov	al, [si]
 	cmp	al, 0
-	je	.i21_56_dup_clear	; end of dir → not present
+	je	.i21_56_dup_clear
 	cmp	al, 0xE5
 	je	.i21_56_dup_next
 	push	cx
@@ -12536,31 +12568,9 @@ int21_handler:
 	jnz	.i21_56_dup_scan
 .i21_56_dup_clear:
 
-	; Now find old name and overwrite its 8.3 in place.
-	mov	si, dir_buffer
-	mov	cx, [resolved_dir_entries]
-.i21_56_search:
-	mov	al, [si]
-	cmp	al, 0
-	je	.i21_56_err
-	cmp	al, 0xE5
-	je	.i21_56_next
-	push	cx
-	push	si
-	mov	di, exec_fname
-	mov	cx, 11
-	repe	cmpsb
-	pop	si
-	pop	cx
-	je	.i21_56_found
-.i21_56_next:
-	add	si, 32
-	dec	cx
-	jnz	.i21_56_search
-	jmp	.i21_56_err
 .i21_56_found:
-	; Overwrite the 8.3 name with new name
-	mov	di, si
+	; Overwrite the source entry's 8.3 with the new name.
+	mov	di, [cs:.i21_56_src_ptr]
 	mov	si, ren_new_fname
 	mov	cx, 11
 	rep	movsb
@@ -12636,6 +12646,7 @@ int21_handler:
 	iret
 .i21_56_new_off:	dw	0
 .i21_56_new_seg:	dw	0
+.i21_56_src_ptr:	dw	0
 
 ; --- AH=57: Get/set file date/time ---
 ; Input: AL=0 get, AL=1 set, BX=handle

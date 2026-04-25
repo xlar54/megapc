@@ -2616,6 +2616,88 @@ test12:
 	int	0x21
 	jc	.t12_fail_c_src_gone
 
+	; --- Part D: rename MISSING -> MISSING must report AX=2 (file not
+	; found), not be silently short-circuited by the same-name path.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12_missing
+	mov	di, fn_t12_missing
+	mov	ah, 0x56
+	int	0x21
+	jnc	.t12_fail_d_ok
+	cmp	ax, 2
+	jne	.t12_fail_d_ax
+
+	; --- Part E: rename MISSING -> EXISTING must also report AX=2,
+	; not AX=5 (the destination-exists check should never fire when
+	; the source isn't there).
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12e
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12_missing
+	mov	di, fn_t12e
+	mov	ah, 0x56
+	int	0x21
+	jnc	.t12_fail_e_ok
+	cmp	ax, 2
+	jne	.t12_fail_e_ax
+
+	; T12E must still be there (rejected rename mustn't touch it).
+	push	cs
+	pop	ds
+	mov	dx, fn_t12e
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_e_dst_gone
+
+	; --- Part F: positive-path rename — A -> B where B doesn't exist
+	; must succeed. Guards against the entire rename pipeline silently
+	; regressing into a no-op or hard-fail.
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12f
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12f
+	mov	di, fn_t12g
+	mov	ah, 0x56
+	int	0x21
+	jc	.t12_fail_f_failed
+
+	; T12F must be gone, T12G must be present.
+	push	cs
+	pop	ds
+	mov	dx, fn_t12f
+	mov	ah, 0x41
+	int	0x21
+	jnc	.t12_fail_f_src_remains
+	cmp	ax, 2
+	jne	.t12_fail_f_src_remains
+	mov	dx, fn_t12g
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_f_dst_missing
+
 	; PASS
 	mov	si, msg_pass
 	call	pstr
@@ -2713,6 +2795,62 @@ test12:
 	mov	si, msg_t12_c_src_gone
 	call	pstr
 	call	nl
+	jmp	.t12_cleanup
+.t12_fail_d_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_d_ok
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_d_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_d_ax
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_e_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_e_ok
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_e_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_e_ax
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_e_dst_gone:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_e_dst_gone
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_f_failed:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_f_failed
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_f_src_remains:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_f_src_remains
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_f_dst_missing:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_f_dst_missing
+	call	pstr
+	call	nl
 .t12_cleanup:
 	push	cs
 	pop	ds
@@ -2726,6 +2864,15 @@ test12:
 	mov	ah, 0x41
 	int	0x21
 	mov	dx, fn_t12d
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12e
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12f
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12g
 	mov	ah, 0x41
 	int	0x21
 	ret
@@ -2944,6 +3091,14 @@ msg_t12_c_ax	db	'wrong AX for \\path reject', 0
 msg_t12_c_ok2	db	'rename to A: returned success', 0
 msg_t12_c_ax2	db	'wrong AX for A: reject', 0
 msg_t12_c_src_gone db	'source disappeared after rejected path rename', 0
+msg_t12_d_ok	db	'rename MISSING -> MISSING returned success', 0
+msg_t12_d_ax	db	'wrong AX for MISSING -> MISSING (want 2)', 0
+msg_t12_e_ok	db	'rename MISSING -> EXISTING returned success', 0
+msg_t12_e_ax	db	'wrong AX for MISSING -> EXISTING (want 2)', 0
+msg_t12_e_dst_gone db	'destination disappeared after rejected MISSING rename', 0
+msg_t12_f_failed db	'positive-path A -> B rename failed', 0
+msg_t12_f_src_remains db 'source still exists after successful rename', 0
+msg_t12_f_dst_missing db 'destination not present after successful rename', 0
 
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
@@ -2978,6 +3133,10 @@ fn_t12a		db	'T12A.TMP', 0
 fn_t12b		db	'T12B.TMP', 0
 fn_t12c		db	'T12C.TMP', 0
 fn_t12d		db	'T12D.TMP', 0
+fn_t12e		db	'T12E.TMP', 0
+fn_t12f		db	'T12F.TMP', 0
+fn_t12g		db	'T12G.TMP', 0
+fn_t12_missing	db	'T12NOPE.TMP', 0
 fn_t12bad_path	db	'\T12X.TMP', 0
 fn_t12bad_drive	db	'A:T12X.TMP', 0
 
