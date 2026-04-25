@@ -9583,10 +9583,127 @@ int21_handler:
 	cmp	byte [cs:file_handles + si], 1
 	je	.i21_40_access_denied
 
-	; CX=0 means truncate file at current position
+	; CX=0 means truncate file at current position. Old code only
+	; updated the SFT size; the FAT chain past the new EOF stayed
+	; allocated (leak), and for truncate-to-zero start_cluster kept
+	; pointing at an orphaned chain.
 	cmp	cx, 0
 	jne	.i21_40_not_trunc
-	; Truncate: set file size = current file pointer
+
+	; Switch to SHELL_SEG for the FAT helpers.
+	push	ds
+	mov	ax, SHELL_SEG
+	mov	ds, ax
+
+	push	si
+	call	read_fat
+	pop	si
+
+	; Compute clusters-to-keep N = ceil(P / bpc). N=0 if P=0.
+	mov	dx, [cs:file_handles + si + 10]
+	mov	ax, [cs:file_handles + si + 8]
+	or	ax, ax
+	jne	.i21_40_t_nonzero
+	or	dx, dx
+	jne	.i21_40_t_nonzero
+	xor	cx, cx
+	jmp	.i21_40_t_have_keep
+.i21_40_t_nonzero:
+	; (P-1)/bpc + 1
+	sub	ax, 1
+	sbb	dx, 0
+	div	word [cs:geo_bpc]
+	inc	ax
+	mov	cx, ax
+.i21_40_t_have_keep:
+	; If the file already has no clusters there's nothing to free.
+	mov	ax, [cs:file_handles + si + 2]
+	or	ax, ax
+	jz	.i21_40_t_done
+
+	cmp	cx, 0
+	je	.i21_40_t_free_chain	; keep 0 clusters → free all from start
+
+	; Walk to the Nth cluster (0-based: N-1 steps from start).
+	dec	cx
+	jcxz	.i21_40_t_at_last_kept
+.i21_40_t_walk:
+	push	cx
+	call	fat12_next_cluster
+	pop	cx
+	cmp	ax, 0xFF8
+	jae	.i21_40_t_done		; chain already shorter than P — extend, no-op
+	dec	cx
+	jnz	.i21_40_t_walk
+.i21_40_t_at_last_kept:
+	; AX = last kept cluster. Pin the SFT to the new EOF before doing
+	; any FAT work — without this, current_cluster keeps whatever the
+	; prior AH=42h set it to (which for a boundary-aligned seek is the
+	; second cluster, and we're about to free it). A follow-up AH=40h
+	; on the same handle would then read/write a freed cluster and
+	; cross-link the FAT.
+	;
+	; pos_in_cluster = P % bpc, except when P lands on a cluster
+	; boundary — then we use bpc, matching AH=42h's past-EOF
+	; convention so the next write trips flush_next + allocate
+	; instead of trampling byte 0 of the last kept cluster.
+	mov	[cs:file_handles + si + 4], ax
+	push	ax
+	mov	dx, [cs:file_handles + si + 10]
+	mov	ax, [cs:file_handles + si + 8]
+	div	word [cs:geo_bpc]	; AX = quot, DX = remainder
+	or	dx, dx
+	jne	.i21_40_t_pos_set
+	mov	dx, [cs:geo_bpc]	; boundary case
+.i21_40_t_pos_set:
+	mov	[cs:file_handles + si + 6], dx
+	pop	ax
+
+	; Grab its successor, mark this one EOF, then fall through to
+	; free the (now-detached) successor chain.
+	push	ax
+	call	fat12_next_cluster
+	mov	bx, ax			; BX = first cluster to free (or EOF)
+	pop	ax
+	push	bx
+	mov	bx, 0xFFF
+	call	fat12_write_cluster
+	pop	ax
+	jmp	.i21_40_t_free_loop
+
+.i21_40_t_free_chain:
+	mov	ax, [cs:file_handles + si + 2]
+.i21_40_t_free_loop:
+	cmp	ax, 2
+	jb	.i21_40_t_free_done
+	cmp	ax, 0xFF8
+	jae	.i21_40_t_free_done
+	push	ax
+	call	fat12_next_cluster
+	mov	bx, ax
+	pop	ax
+	push	bx
+	mov	bx, 0			; 0 = free
+	call	fat12_write_cluster
+	pop	ax
+	jmp	.i21_40_t_free_loop
+.i21_40_t_free_done:
+	call	write_fat
+
+	; If we just truncated to zero, drop the start/current cluster
+	; references too — the dir entry update at AH=3Eh close picks them
+	; up from the SFT.
+	cmp	word [cs:file_handles + si + 8], 0
+	jne	.i21_40_t_done
+	cmp	word [cs:file_handles + si + 10], 0
+	jne	.i21_40_t_done
+	mov	word [cs:file_handles + si + 2], 0
+	mov	word [cs:file_handles + si + 4], 0
+
+.i21_40_t_done:
+	pop	ds
+
+	; Update file size = file pointer (existing behavior, now safe).
 	mov	ax, [cs:file_handles + si + 8]
 	mov	[cs:file_handles + si + 12], ax
 	mov	ax, [cs:file_handles + si + 10]
@@ -10330,7 +10447,8 @@ int21_handler:
 .i21_36:
 	push	si
 	push	di
-	push	ds
+	push	es			; read_fat clobbers ES with SHELL_SEG;
+	push	ds			; preserve caller's ES per INT 21h contract
 	mov	ax, SHELL_SEG
 	mov	ds, ax
 	; Set drive: DL=0 default, DL=1 A:, DL=2 B:
@@ -10368,6 +10486,7 @@ int21_handler:
 	jmp	.i21_36_count
 .i21_36_counted:
 	pop	ds
+	pop	es
 	pop	di
 	pop	si
 	mov	ax, [cs:geo_spc]
@@ -10376,6 +10495,7 @@ int21_handler:
 	iret
 .i21_36_err:
 	pop	ds
+	pop	es
 	pop	di
 	pop	si
 	mov	ax, 0xFFFF		; Error
@@ -15895,6 +16015,13 @@ redir_parse:
 	je	.rp_out_fc_in	; Output then input on same line
 	cmp	al, 0
 	je	.rp_out_fc_done
+	; Buffer is 78 bytes. Stop at 77 written chars so the trailing
+	; null below (and any '<' / space terminator) lands inside the
+	; buffer. We keep consuming SI so the rest of the parser still
+	; sees the closing delimiter; the truncated name will fail to
+	; open at activate time, which is the right user-visible result.
+	cmp	di, redir_out_fname + 77
+	jae	.rp_out_fc
 	mov	[di], al
 	inc	di
 	jmp	.rp_out_fc
@@ -15926,6 +16053,9 @@ redir_parse:
 	je	.rp_in_fc_out
 	cmp	al, 0
 	je	.rp_in_fc_done
+	; Same 78-byte cap as redir_out_fname above.
+	cmp	di, redir_in_fname + 77
+	jae	.rp_in_fc
 	mov	[di], al
 	inc	di
 	jmp	.rp_in_fc

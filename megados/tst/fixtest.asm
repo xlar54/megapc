@@ -32,6 +32,10 @@
 ;            must leave the handle in "need new cluster" state so a
 ;            subsequent AH=40h append lands in a fresh cluster instead
 ;            of overwriting byte 0 of the last existing cluster.
+;   Test 11: AH=40h CX=0 (truncate at current pointer) must free the
+;            FAT clusters past the new EOF and, when truncating to
+;            zero, drop the start cluster too — pre-fix the size
+;            shrank but the chain stayed allocated (leak).
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -60,6 +64,7 @@
 	call	test8
 	call	test9
 	call	test10
+	call	test11
 
 	call	nl
 	mov	si, msg_summary
@@ -68,14 +73,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 10
+	mov	al, 11
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 10
+	mov	al, 11
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -1916,6 +1921,547 @@ test10:
 	ret
 
 ; ============================================================================
+; Test 11 — AH=40h CX=0 truncate must free abandoned FAT clusters and,
+; for truncate-to-zero, also drop the start cluster.
+;
+; Part A: write 3072 bytes (3 clusters), truncate to 0 via AH=40 CX=0,
+;         confirm size = 0 AND free-cluster count returns to baseline
+;         (no leak).
+; Part B: write 3072 bytes again, seek to 1000, AH=40 CX=0, confirm
+;         size = 1000 AND free count == baseline - 1 (one cluster kept).
+; Part C: write 3072 bytes again, seek to 1024 (cluster boundary),
+;         AH=40 CX=0, then immediately append 4 bytes through the same
+;         handle. Pre-fix the SFT's current_cluster still pointed at
+;         the (now freed) second cluster from the seek, and the write
+;         would land in that freed cluster — silent FAT corruption.
+;         Post-fix the write must land in a freshly allocated cluster
+;         and the file size becomes 1028.
+; ============================================================================
+test11:
+	mov	si, msg_t11
+	call	pstr
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es			; rep stosb writes to ES:DI
+
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+
+	; Baseline free-cluster count before any allocation.
+	mov	ah, 0x36
+	mov	dl, 1			; A:
+	int	0x21
+	cmp	ax, 0xFFFF
+	je	.t11_fail_disk
+	mov	[t11_free_baseline], bx
+	; AH=36 used to clobber ES (now fixed). Reset defensively so this
+	; test still works against an older COMMAND.COM if anyone runs it.
+	push	cs
+	pop	es
+
+	; --- Part A: truncate-to-zero ---
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	; Fill io_buf with 'X' so writes touch real cluster contents.
+	mov	di, io_buf
+	mov	cx, 1024
+	mov	al, 'X'
+	rep	stosb
+
+	; Write 3 × 1024 = 3072 bytes.
+	mov	cx, 3
+.t11_a_write:
+	push	cx
+	mov	bx, [t11_handle]
+	mov	cx, 1024
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	pop	cx
+	jc	.t11_fail_a_write
+	cmp	ax, 1024
+	jne	.t11_fail_a_write
+	loop	.t11_a_write
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen r/w, seek to 0, AH=40 CX=0 (truncate).
+	mov	ax, 0x3D02
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	bx, [t11_handle]
+	mov	ax, 0x4200
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t11_fail_io
+
+	mov	bx, [t11_handle]
+	xor	cx, cx			; CX=0 → truncate
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t11_fail_a_trunc
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Verify size = 0.
+	mov	ax, 0x3D00
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+	mov	bx, [t11_handle]
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t11_fail_io
+	or	ax, ax
+	jne	.t11_fail_a_size
+	or	dx, dx
+	jne	.t11_fail_a_size
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Free count must be back to baseline (full reclaim).
+	mov	ah, 0x36
+	mov	dl, 1
+	int	0x21
+	mov	ax, [t11_free_baseline]
+	cmp	bx, ax
+	jb	.t11_fail_a_leak
+	push	cs
+	pop	es			; defensive: AH=36 historically clobbered ES
+
+	; --- Part B: partial truncate ---
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	di, io_buf
+	mov	cx, 1024
+	mov	al, 'Y'
+	rep	stosb
+
+	mov	cx, 3
+.t11_b_write:
+	push	cx
+	mov	bx, [t11_handle]
+	mov	cx, 1024
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	pop	cx
+	jc	.t11_fail_b_write
+	cmp	ax, 1024
+	jne	.t11_fail_b_write
+	loop	.t11_b_write
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen r/w, seek to 1000, AH=40 CX=0 (truncate to 1000).
+	mov	ax, 0x3D02
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	bx, [t11_handle]
+	mov	ax, 0x4200
+	xor	cx, cx
+	mov	dx, 1000
+	int	0x21
+	jc	.t11_fail_io
+
+	mov	bx, [t11_handle]
+	xor	cx, cx
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t11_fail_b_trunc
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Verify size = 1000.
+	mov	ax, 0x3D00
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+	mov	bx, [t11_handle]
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t11_fail_io
+	or	dx, dx
+	jne	.t11_fail_b_size
+	cmp	ax, 1000
+	jne	.t11_fail_b_size
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Free count must be baseline - 1 (just the first cluster kept).
+	mov	ah, 0x36
+	mov	dl, 1
+	int	0x21
+	mov	ax, [t11_free_baseline]
+	sub	ax, bx			; AX = baseline - free_after = clusters used
+	cmp	ax, 1
+	jne	.t11_fail_b_leak
+	push	cs
+	pop	es			; defensive: AH=36 historically clobbered ES
+
+	; --- Part C: post-truncate write at cluster boundary ---
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	di, io_buf
+	mov	cx, 1024
+	mov	al, 'Z'
+	rep	stosb
+
+	mov	cx, 3
+.t11_c_write:
+	push	cx
+	mov	bx, [t11_handle]
+	mov	cx, 1024
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	pop	cx
+	jc	.t11_fail_c_write
+	cmp	ax, 1024
+	jne	.t11_fail_c_write
+	loop	.t11_c_write
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen r/w, seek to 1024 (cluster boundary), truncate, then
+	; APPEND 4 'Q' bytes through the same handle without closing.
+	mov	ax, 0x3D02
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	bx, [t11_handle]
+	mov	ax, 0x4200
+	xor	cx, cx
+	mov	dx, 1024
+	int	0x21
+	jc	.t11_fail_io
+
+	mov	bx, [t11_handle]
+	xor	cx, cx
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t11_fail_c_trunc
+
+	; Append 4 'Q' bytes immediately, same handle.
+	mov	di, io_buf
+	mov	cx, 4
+	mov	al, 'Q'
+	rep	stosb
+
+	mov	bx, [t11_handle]
+	mov	cx, 4
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t11_fail_c_append
+	cmp	ax, 4
+	jne	.t11_fail_c_append
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen RO and verify size = 1028 and bytes 1024..1027 = 'Q'.
+	mov	ax, 0x3D00
+	mov	dx, fn_t11
+	int	0x21
+	jc	.t11_fail_io
+	mov	[t11_handle], ax
+
+	mov	bx, [t11_handle]
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t11_fail_io
+	or	dx, dx
+	jne	.t11_fail_c_size
+	cmp	ax, 1028
+	jne	.t11_fail_c_size
+
+	mov	bx, [t11_handle]
+	mov	ax, 0x4200
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+
+	mov	bx, [t11_handle]
+	mov	cx, 1028
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jc	.t11_fail_io
+	cmp	ax, 1028
+	jne	.t11_fail_c_size
+
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Bytes 0..1023 must be 'Z', bytes 1024..1027 must be 'Q'.
+	mov	si, io_buf
+	xor	cx, cx
+.t11_c_verify:
+	mov	al, [si]
+	cmp	cx, 1024
+	jb	.t11_c_v_orig
+	cmp	al, 'Q'
+	jne	.t11_fail_c_content
+	jmp	.t11_c_v_next
+.t11_c_v_orig:
+	cmp	al, 'Z'
+	jne	.t11_fail_c_content
+.t11_c_v_next:
+	inc	si
+	inc	cx
+	cmp	cx, 1028
+	jb	.t11_c_verify
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+.t11_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_io
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_disk:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_disk
+	call	pstr
+	call	nl
+	ret
+.t11_fail_a_write:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_a_write
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_a_trunc:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_a_trunc
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_a_size:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_a_size
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_a_leak:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_a_leak
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_b_write:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_b_write
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_b_trunc:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_b_trunc
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_b_size:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_b_size
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_b_leak:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_b_leak
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_c_write:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_c_write
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_c_trunc:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_c_trunc
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_c_append:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_c_append
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_c_size:
+	mov	bx, [t11_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_c_size
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t11_fail_c_content:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t11_c_content
+	call	pstr
+	call	nl
+	mov	dx, fn_t11
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -2098,6 +2644,23 @@ msg_t10_seek	db	'seek to EOF returned wrong position', 0
 msg_t10_size	db	'file size after append wrong', 0
 msg_t10_content	db	'content mismatch (byte 0 trampled?)', 0
 
+msg_t11		db	'T11 AH=40h CX=0 truncate frees chain: ', 0
+msg_t11_io	db	'io', 0
+msg_t11_disk	db	'get-free-space failed', 0
+msg_t11_a_write	db	'write 3072 bytes failed', 0
+msg_t11_a_trunc	db	'AH=40 CX=0 truncate-to-zero failed', 0
+msg_t11_a_size	db	'size after truncate-to-zero != 0', 0
+msg_t11_a_leak	db	'truncate-to-zero leaked clusters', 0
+msg_t11_b_write	db	'rewrite 3072 bytes failed', 0
+msg_t11_b_trunc	db	'AH=40 CX=0 partial truncate failed', 0
+msg_t11_b_size	db	'size after partial truncate != 1000', 0
+msg_t11_b_leak	db	'partial truncate kept wrong cluster count', 0
+msg_t11_c_write	db	'part C write 3072 bytes failed', 0
+msg_t11_c_trunc	db	'part C truncate failed', 0
+msg_t11_c_append db	'append after truncate failed', 0
+msg_t11_c_size	db	'size after truncate+append wrong', 0
+msg_t11_c_content db	'content after truncate+append wrong (freed cluster reused?)', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -2126,6 +2689,7 @@ fn_t9dir	db	'T9DIR', 0
 fn_root		db	'\', 0
 
 fn_t10		db	'T10.TMP', 0
+fn_t11		db	'T11.TMP', 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
@@ -2140,6 +2704,8 @@ t5_b_handle	dw	0
 t8_handle	dw	0
 t9_handle	dw	0
 t10_handle	dw	0
+t11_handle	dw	0
+t11_free_baseline dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
 
