@@ -28,6 +28,10 @@
 ;   Test 9: AH=3Ch/3Dh/41h must reject directories, volume labels, and
 ;           (for creat/delete) read-only files with AX=5. AH=3Dh must
 ;           still permit opening a read-only file for read (mode 0).
+;   Test 10: AH=42h seek-to-EOF on a file whose size is a whole cluster
+;            must leave the handle in "need new cluster" state so a
+;            subsequent AH=40h append lands in a fresh cluster instead
+;            of overwriting byte 0 of the last existing cluster.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -55,6 +59,7 @@
 	call	test7
 	call	test8
 	call	test9
+	call	test10
 
 	call	nl
 	mov	si, msg_summary
@@ -63,14 +68,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 9
+	mov	al, 10
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 9
+	mov	al, 10
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -1717,6 +1722,200 @@ test9:
 	ret
 
 ; ============================================================================
+; Test 10 — AH=42h seek-to-EOF + AH=40h must append at a cluster
+; boundary, not overwrite byte 0 of the last existing cluster.
+; ============================================================================
+test10:
+	mov	si, msg_t10
+	call	pstr
+
+	push	cs
+	pop	ds
+
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+
+	; Create file, fill it with 1024 'A' bytes (exactly one cluster).
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t10
+	int	0x21
+	jc	.t10_fail_io
+	mov	[t10_handle], ax
+
+	mov	di, io_buf
+	mov	cx, 1024
+	mov	al, 'A'
+	rep	stosb
+
+	mov	bx, [t10_handle]
+	mov	cx, 1024
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t10_fail_io
+	cmp	ax, 1024
+	jne	.t10_fail_io
+
+	mov	bx, [t10_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen r/w, seek to EOF (method 2, 0 offset). Expect DX:AX = 1024.
+	mov	ax, 0x3D02
+	mov	dx, fn_t10
+	int	0x21
+	jc	.t10_fail_io
+	mov	[t10_handle], ax
+
+	mov	bx, [t10_handle]
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t10_fail_io
+	or	dx, dx
+	jnz	.t10_fail_seek
+	cmp	ax, 1024
+	jne	.t10_fail_seek
+
+	; Append 4 'B' bytes at the cluster boundary.
+	mov	di, io_buf
+	mov	cx, 4
+	mov	al, 'B'
+	rep	stosb
+
+	mov	bx, [t10_handle]
+	mov	cx, 4
+	mov	dx, io_buf
+	mov	ah, 0x40
+	int	0x21
+	jc	.t10_fail_io
+	cmp	ax, 4
+	jne	.t10_fail_io
+
+	mov	bx, [t10_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Reopen read-only; verify size is 1028 and contents are exactly
+	; 1024×'A' then 4×'B'. Pre-fix the first 4 bytes would be 'B' and
+	; size would be 1024 (because bytes 0..3 of the original cluster
+	; got trampled).
+	mov	ax, 0x3D00
+	mov	dx, fn_t10
+	int	0x21
+	jc	.t10_fail_io
+	mov	[t10_handle], ax
+
+	mov	bx, [t10_handle]
+	mov	ax, 0x4202
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+	jc	.t10_fail_io
+	or	dx, dx
+	jnz	.t10_fail_size
+	cmp	ax, 1028
+	jne	.t10_fail_size
+
+	mov	bx, [t10_handle]
+	mov	ax, 0x4200
+	xor	cx, cx
+	xor	dx, dx
+	int	0x21
+
+	mov	bx, [t10_handle]
+	mov	cx, 1028
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jc	.t10_fail_io
+	cmp	ax, 1028
+	jne	.t10_fail_size
+
+	mov	bx, [t10_handle]
+	mov	ah, 0x3E
+	int	0x21
+
+	; Byte 0 must still be 'A'; byte 1024 must be 'B'.
+	mov	si, io_buf
+	xor	cx, cx
+.t10_verify:
+	mov	al, [si]
+	cmp	cx, 1024
+	jb	.t10_v_orig
+	cmp	al, 'B'
+	jne	.t10_content
+	jmp	.t10_v_next
+.t10_v_orig:
+	cmp	al, 'A'
+	jne	.t10_content
+.t10_v_next:
+	inc	si
+	inc	cx
+	cmp	cx, 1028
+	jb	.t10_verify
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+.t10_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t10_io
+	call	pstr
+	call	nl
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t10_fail_seek:
+	mov	bx, [t10_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t10_seek
+	call	pstr
+	call	nl
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t10_fail_size:
+	mov	bx, [t10_handle]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t10_size
+	call	pstr
+	call	nl
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t10_content:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t10_content
+	call	pstr
+	call	nl
+	mov	dx, fn_t10
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -1893,6 +2092,12 @@ msg_t9_e_ok	db	'AH=3Dh write on RO file succeeded', 0
 msg_t9_e_ax	db	'wrong AX for AH=3Dh RO-write reject', 0
 msg_t9_f_ro_read db	'AH=3Dh read on RO file failed', 0
 
+msg_t10		db	'T10 seek-EOF append at cluster bound: ', 0
+msg_t10_io	db	'io', 0
+msg_t10_seek	db	'seek to EOF returned wrong position', 0
+msg_t10_size	db	'file size after append wrong', 0
+msg_t10_content	db	'content mismatch (byte 0 trampled?)', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -1920,6 +2125,8 @@ fn_t9		db	'T9.TMP', 0
 fn_t9dir	db	'T9DIR', 0
 fn_root		db	'\', 0
 
+fn_t10		db	'T10.TMP', 0
+
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
 
@@ -1932,6 +2139,7 @@ t5_a_handle	dw	0
 t5_b_handle	dw	0
 t8_handle	dw	0
 t9_handle	dw	0
+t10_handle	dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
 

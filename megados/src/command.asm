@@ -9917,10 +9917,27 @@ int21_handler:
 	pop	ds
 	pop	cx
 	cmp	ax, 0xFF8
-	jae	.i21_42_positioned	; Hit end of chain
+	jae	.i21_42_past_eof	; Seek position is past existing chain
 	mov	[cs:file_handles + si + 4], ax
 	dec	cx
 	jnz	.i21_42_skip
+	jmp	.i21_42_positioned
+
+.i21_42_past_eof:
+	; The requested position lies past the last allocated cluster —
+	; happens when the file is a whole multiple of the cluster size
+	; (or beyond) and the caller seeks to EOF / past-EOF. Leave the
+	; current cluster pointing at the last existing cluster (so the
+	; later FAT-link "previous → new" step in AH=40 still has a valid
+	; previous to chain from), but bump pos-in-cluster to one full
+	; cluster. That makes AH=40's copy loop trip its existing
+	; flush_next path on the very first byte: it'll write the unchanged
+	; tail cluster back, allocate a fresh cluster, link it correctly,
+	; and start writing at offset 0 of the new cluster — instead of
+	; reading the last real cluster back and overwriting its first
+	; bytes (silent data corruption).
+	mov	ax, [cs:geo_bpc]
+	mov	[cs:file_handles + si + 6], ax
 
 .i21_42_positioned:
 	pop	dx
