@@ -12464,6 +12464,28 @@ int21_handler:
 .i21_56_new_done:
 	pop	si
 	pop	ds
+	; Reject path-qualified destinations (\ or :). parse_83_filename
+	; below treats \ as a terminator, so "\DIR\NEW.TMP" would bail on
+	; the first byte and leave exec_fname as 11 spaces — the rename
+	; would then overwrite the source entry's name with blanks. We
+	; don't support cross-dir or cross-drive rename, so refuse early
+	; with AX=3 (path not found) instead of silently corrupting.
+	push	si
+.i21_56_dst_scan:
+	mov	al, [si]
+	or	al, al
+	jz	.i21_56_dst_ok
+	cmp	al, '\'
+	je	.i21_56_dst_bad
+	cmp	al, ':'
+	je	.i21_56_dst_bad
+	inc	si
+	jmp	.i21_56_dst_scan
+.i21_56_dst_bad:
+	pop	si
+	jmp	.i21_56_path_err
+.i21_56_dst_ok:
+	pop	si
 	; Parse new name into exec_fname
 	mov	di, exec_fname
 	call	parse_83_filename
@@ -12579,6 +12601,21 @@ int21_handler:
 	pop	cx
 	pop	bx
 	mov	ax, 5			; Access denied
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+.i21_56_path_err:
+	; Destination contained \ or : — we don't support cross-dir or
+	; cross-drive rename. Same stack layout as .i21_56_err.
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	ax, 3			; Path not found
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001

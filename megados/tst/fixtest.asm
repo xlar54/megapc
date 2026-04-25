@@ -2570,6 +2570,52 @@ test12:
 	int	0x21
 	jc	.t12_fail_b_lost
 
+	; --- Part C: path-qualified destination must be rejected ---
+	; Pre-fix parse_83_filename bailed on the first '\' and left the
+	; new-name buffer all-spaces, so the rename overwrote the source
+	; entry's name with blanks.
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12d
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12d
+	mov	di, fn_t12bad_path
+	mov	ah, 0x56
+	int	0x21
+	jnc	.t12_fail_c_ok
+	cmp	ax, 3
+	jne	.t12_fail_c_ax
+
+	; Drive-qualified destination must also be rejected.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12d
+	mov	di, fn_t12bad_drive
+	mov	ah, 0x56
+	int	0x21
+	jnc	.t12_fail_c_ok2
+	cmp	ax, 3
+	jne	.t12_fail_c_ax2
+
+	; T12D must still be there (source untouched by rejected renames).
+	push	cs
+	pop	ds
+	mov	dx, fn_t12d
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_c_src_gone
+
 	; PASS
 	mov	si, msg_pass
 	call	pstr
@@ -2632,6 +2678,41 @@ test12:
 	mov	si, msg_t12_b_lost
 	call	pstr
 	call	nl
+	jmp	.t12_cleanup
+.t12_fail_c_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_c_ok
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_c_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_c_ax
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_c_ok2:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_c_ok2
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_c_ax2:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_c_ax2
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_c_src_gone:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_c_src_gone
+	call	pstr
+	call	nl
 .t12_cleanup:
 	push	cs
 	pop	ds
@@ -2642,6 +2723,9 @@ test12:
 	mov	ah, 0x41
 	int	0x21
 	mov	dx, fn_t12c
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12d
 	mov	ah, 0x41
 	int	0x21
 	ret
@@ -2855,6 +2939,11 @@ msg_t12_a_dst_gone db	'destination disappeared after rejected rename', 0
 msg_t12_a_duplicate db	'duplicate dir entry left behind', 0
 msg_t12_b_same_failed db 'same-name rename was rejected', 0
 msg_t12_b_lost	db	'file disappeared after same-name rename', 0
+msg_t12_c_ok	db	'rename to \\path returned success', 0
+msg_t12_c_ax	db	'wrong AX for \\path reject', 0
+msg_t12_c_ok2	db	'rename to A: returned success', 0
+msg_t12_c_ax2	db	'wrong AX for A: reject', 0
+msg_t12_c_src_gone db	'source disappeared after rejected path rename', 0
 
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
@@ -2888,6 +2977,9 @@ fn_t11		db	'T11.TMP', 0
 fn_t12a		db	'T12A.TMP', 0
 fn_t12b		db	'T12B.TMP', 0
 fn_t12c		db	'T12C.TMP', 0
+fn_t12d		db	'T12D.TMP', 0
+fn_t12bad_path	db	'\T12X.TMP', 0
+fn_t12bad_drive	db	'A:T12X.TMP', 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
