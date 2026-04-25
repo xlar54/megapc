@@ -12393,6 +12393,18 @@ int21_handler:
 	; Save new name pointer (ES:DI from caller)
 	mov	[cs:.i21_56_new_off], di
 	mov	[cs:.i21_56_new_seg], es
+	; Force ES = SHELL_SEG for the rest of the handler. Internal saves
+	; (copy_src_name, ren_new_fname), parse_83_filename's rep stosb,
+	; the search-loop repe cmpsb, and the in-place dir-entry
+	; overwrite all assume ES:DI lives in our segment. Without this,
+	; a caller invoking AH=56h from a .COM (whose ES is its own PSP)
+	; silently writes those internal saves into the caller's address
+	; space, which left ren_new_fname blank and made the search loop
+	; match exec_fname against the new name instead of the old. The
+	; caller's ES is preserved on the stack and via .i21_56_new_seg
+	; for the new-name copy, which reads explicitly from there.
+	mov	ax, SHELL_SEG
+	mov	es, ax
 	; Copy old filename from caller's DS:DX
 	mov	si, dx
 	push	ds
@@ -12425,8 +12437,10 @@ int21_handler:
 	mov	di, copy_src_name
 	mov	cx, 11
 	rep	movsb
-	; Parse new name
-	mov	es, [.i21_56_new_seg]
+	; Parse new name. The copy below uses lodsb (DS:SI) plus a DS-swap
+	; trick for writes, so it doesn't need ES — and we must keep ES at
+	; SHELL_SEG (set on entry) for the upcoming parse_83_filename rep
+	; stosb and the search/dup-check loops.
 	mov	si, [.i21_56_new_off]
 	; Copy new name to cmd_buffer
 	push	ds
@@ -12463,9 +12477,44 @@ int21_handler:
 	mov	di, exec_fname
 	mov	cx, 11
 	rep	movsb
-	; Read directory, find old name, rename it
+	; Read directory, then refuse if the destination 8.3 name already
+	; exists (otherwise the rename would silently produce two entries
+	; with the same name and DOS lookups would be ambiguous).
 	call	read_resolved_dir
 	jc	.i21_56_err
+
+	; Same-name rename is a no-op success (so the dup check below
+	; doesn't reject it for matching the source).
+	mov	si, copy_src_name
+	mov	di, ren_new_fname
+	mov	cx, 11
+	repe	cmpsb
+	je	.i21_56_same
+
+	; Scan the loaded directory for the new name.
+	mov	si, dir_buffer
+	mov	cx, [resolved_dir_entries]
+.i21_56_dup_scan:
+	mov	al, [si]
+	cmp	al, 0
+	je	.i21_56_dup_clear	; end of dir → not present
+	cmp	al, 0xE5
+	je	.i21_56_dup_next
+	push	cx
+	push	si
+	mov	di, ren_new_fname
+	mov	cx, 11
+	repe	cmpsb
+	pop	si
+	pop	cx
+	je	.i21_56_dup_exists
+.i21_56_dup_next:
+	add	si, 32
+	dec	cx
+	jnz	.i21_56_dup_scan
+.i21_56_dup_clear:
+
+	; Now find old name and overwrite its 8.3 in place.
 	mov	si, dir_buffer
 	mov	cx, [resolved_dir_entries]
 .i21_56_search:
@@ -12517,6 +12566,35 @@ int21_handler:
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+.i21_56_dup_exists:
+	; Destination 8.3 name already exists in the target directory.
+	; Same stack layout as .i21_56_err (still inside the initial
+	; 6 pushes; no extra push between .i21_56 entry and here).
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	mov	ax, 5			; Access denied
+	push	bp
+	mov	bp, sp
+	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+.i21_56_same:
+	; old == new — DOS treats this as a successful no-op rename.
+	pop	ds
+	pop	es
+	pop	di
+	pop	si
+	pop	cx
+	pop	bx
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
 .i21_56_new_off:	dw	0

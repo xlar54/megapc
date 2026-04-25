@@ -36,6 +36,10 @@
 ;            FAT clusters past the new EOF and, when truncating to
 ;            zero, drop the start cluster too — pre-fix the size
 ;            shrank but the chain stayed allocated (leak).
+;   Test 12: AH=56h rename must reject a destination that already
+;            exists with AX=5 (otherwise it produces two dir entries
+;            with the same 8.3 name); a same-name rename is a no-op
+;            success.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -65,6 +69,7 @@
 	call	test9
 	call	test10
 	call	test11
+	call	test12
 
 	call	nl
 	mov	si, msg_summary
@@ -73,14 +78,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 11
+	mov	al, 12
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 11
+	mov	al, 12
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -2462,6 +2467,186 @@ test11:
 	ret
 
 ; ============================================================================
+; Test 12 — AH=56h rename must reject a duplicate destination, leave
+; the source intact, and treat same-name rename as a no-op success.
+; ============================================================================
+test12:
+	mov	si, msg_t12
+	call	pstr
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+
+	; Clean any leftover from a prior run.
+	mov	dx, fn_t12a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12b
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12c
+	mov	ah, 0x41
+	int	0x21
+
+	; --- Part A: rename to existing destination must fail ---
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12a
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12b
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	; AH=56h: DS:DX = old, ES:DI = new
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12a
+	mov	di, fn_t12b
+	mov	ah, 0x56
+	int	0x21
+	jnc	.t12_fail_a_ok
+	cmp	ax, 5
+	jne	.t12_fail_a_ax
+
+	; --- Verify source survived: AH=41 delete T12A must succeed.
+	push	cs
+	pop	ds
+	mov	dx, fn_t12a
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_a_src_gone
+
+	; --- Verify exactly one T12B exists: first delete OK, second NOT.
+	mov	dx, fn_t12b
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_a_dst_gone
+	mov	dx, fn_t12b
+	mov	ah, 0x41
+	int	0x21
+	jnc	.t12_fail_a_duplicate
+	cmp	ax, 2
+	jne	.t12_fail_a_duplicate
+
+	; --- Part B: same-name rename is a no-op success ---
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t12c
+	int	0x21
+	jc	.t12_fail_io
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	mov	dx, fn_t12c
+	mov	di, fn_t12c
+	mov	ah, 0x56
+	int	0x21
+	jc	.t12_fail_b_same_failed
+
+	; T12C must still be there afterwards (delete must succeed).
+	push	cs
+	pop	ds
+	mov	dx, fn_t12c
+	mov	ah, 0x41
+	int	0x21
+	jc	.t12_fail_b_lost
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	ret
+
+.t12_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_io
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_a_ok:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_a_ok
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_a_ax:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_a_ax
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_a_src_gone:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_a_src_gone
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_a_dst_gone:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_a_dst_gone
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_a_duplicate:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_a_duplicate
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_b_same_failed:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_b_same_failed
+	call	pstr
+	call	nl
+	jmp	.t12_cleanup
+.t12_fail_b_lost:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t12_b_lost
+	call	pstr
+	call	nl
+.t12_cleanup:
+	push	cs
+	pop	ds
+	mov	dx, fn_t12a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12b
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t12c
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -2661,6 +2846,16 @@ msg_t11_c_append db	'append after truncate failed', 0
 msg_t11_c_size	db	'size after truncate+append wrong', 0
 msg_t11_c_content db	'content after truncate+append wrong (freed cluster reused?)', 0
 
+msg_t12		db	'T12 AH=56h rename guards dest: ', 0
+msg_t12_io	db	'setup io', 0
+msg_t12_a_ok	db	'rename to existing dst returned success', 0
+msg_t12_a_ax	db	'wrong AX for duplicate-dst reject', 0
+msg_t12_a_src_gone db	'source disappeared after rejected rename', 0
+msg_t12_a_dst_gone db	'destination disappeared after rejected rename', 0
+msg_t12_a_duplicate db	'duplicate dir entry left behind', 0
+msg_t12_b_same_failed db 'same-name rename was rejected', 0
+msg_t12_b_lost	db	'file disappeared after same-name rename', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -2690,6 +2885,9 @@ fn_root		db	'\', 0
 
 fn_t10		db	'T10.TMP', 0
 fn_t11		db	'T11.TMP', 0
+fn_t12a		db	'T12A.TMP', 0
+fn_t12b		db	'T12B.TMP', 0
+fn_t12c		db	'T12C.TMP', 0
 
 t2_data		db	'HELLO'
 t4_seed		db	'SEED'
