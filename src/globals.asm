@@ -282,11 +282,12 @@ disp_color_hi   = $8FD7
 
 ; io.asm scroll/scratch:
 io_line_count   = $8FD8         ; Saved line count for scroll
-io_crtc_reg     = $8FD9         ; CRTC selected register (also 'screen code')
-io_save_a       = $8FDA         ; Generic save A
-io_save_b       = $8FDB         ; Generic save B
+io_crtc_reg     = $8FD9         ; CRTC selected register latch ($3D4 write)
+io_save_a       = $8FDA         ; Generic save A (also CRTC reg 0E: cursor hi)
+io_save_b       = $8FDB         ; Generic save B (also CRTC reg 0F: cursor lo)
 io_save_c       = $8FDC
 io_save_d       = $8FDD
+io_int10_char   = $8FDE         ; Scratch char for INT 10h AH=09/0A loops
 
 ; --- Disk INT 13h active geometry ($8FE0-$8FE4) ---
 i13_cur_spt     = $8FE0

@@ -88,22 +88,52 @@ _irp_kbd_stat_empty:
 
 _irp_high:
 _irp_cga_range:
-        ; Port $3DA: CGA status register
+        ; Only ports in $03xx are handled here.
         lda temp32+1
         cmp #$03
         bne _irp_cga_other
         lda temp32
-        cmp #$DA
+        cmp #$DA                ; CGA status ($3DA)
         beq _irp_retrace
-        ; Port $3BA: MDA status register (same behavior as $3DA)
-        cmp #$BA
+        cmp #$BA                ; MDA status ($3BA)
         beq _irp_retrace
+        cmp #$D4                ; CGA CRTC index latch ($3D4)
+        beq _irp_crtc_index
+        cmp #$B4                ; MDA CRTC index latch ($3B4)
+        beq _irp_crtc_index
+        cmp #$D5                ; CGA CRTC data ($3D5)
+        beq _irp_crtc_data
+        cmp #$B5                ; MDA CRTC data ($3B5)
+        beq _irp_crtc_data
         bra _irp_cga_other
 
 _irp_retrace:
         ; Toggle bit 0 (hsync) and bit 3 (vsync) for timing loops
         lda inst_counter
         and #$09                ; Bits 0 and 3 toggle
+        rts
+
+_irp_crtc_index:
+        ; Read back the most recently written CRTC index.
+        lda io_crtc_reg
+        rts
+
+_irp_crtc_data:
+        ; Return the value of the currently selected CRTC register.
+        ; We only track 0E (cursor address hi) and 0F (cursor address
+        ; lo); other registers aren't modeled, so report 0 for them.
+        lda io_crtc_reg
+        cmp #$0E
+        beq _irp_crtc_cursor_hi
+        cmp #$0F
+        beq _irp_crtc_cursor_lo
+        lda #$00
+        rts
+_irp_crtc_cursor_hi:
+        lda io_save_a
+        rts
+_irp_crtc_cursor_lo:
+        lda io_save_b
         rts
 
 _irp_cga_other:
@@ -618,7 +648,10 @@ _i10_read_char_attr:
 _i10_write_char_attr:
         ; AH=09: Write char+attr at cursor, CX times, no cursor advance
         lda reg_al
-        sta io_crtc_reg               ; Save screen code
+        sta io_int10_char             ; Save screen code (NOT io_crtc_reg —
+                                      ; that's the CRTC index latch and a
+                                      ; guest-driven IN AL,$3D5 needs to
+                                      ; see whatever index was written)
         lda scr_row
         pha
         lda scr_col
@@ -644,7 +677,7 @@ _i10wa_loop:
         sta [temp_ptr2],z
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda io_crtc_reg
+        lda io_int10_char
         ldz #0
         sta [temp_ptr],z
         inc scr_col
@@ -666,7 +699,7 @@ _i10wa_restore:
 _i10_write_char_only:
         ; AH=0A: Write char only at cursor, CX times, preserve existing attr
         lda reg_al
-        sta io_crtc_reg               ; Save screen code
+        sta io_int10_char             ; Save screen code (see AH=09 note above)
         lda scr_row
         pha
         lda scr_col
@@ -690,7 +723,7 @@ _i10wo_loop:
         ; Do NOT write attribute — preserve existing byte at z=1
         ; Write to MEGA65 screen
         jsr calc_scr_ptr
-        lda io_crtc_reg
+        lda io_int10_char
         ldz #0
         sta [temp_ptr],z
         inc scr_col
