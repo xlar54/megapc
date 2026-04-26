@@ -46,8 +46,23 @@ main_loop:
         ; and every IP-modifying opcode handler calls update_opcode_ptr
         ; explicitly. This entry point seeds it for the first instruction.
         jsr update_opcode_ptr
+        ; Arm the service-poll throttle so the first instruction polls.
+        lda #1
+        sta ml_poll_ctr
 
 ml_next:
+        ; --- Service-poll throttle ---
+        ; Reading $D610 (keyboard) and $D7FA (frame counter) every
+        ; emulated instruction burns ~18 cycles on probes that almost
+        ; never act. Decrement a small counter and skip both polls
+        ; until it underflows. ML_POLL_PERIOD is well below either
+        ; the human TAB-response window or the 50/60 Hz frame
+        ; interval, so latency stays imperceptible.
+        dec ml_poll_ctr
+        bne _ml_no_tick                 ; throttled — skip polls + tick block
+        lda #ML_POLL_PERIOD
+        sta ml_poll_ctr
+
         ; --- Check for TAB key (return to menu) ---
         lda $D610
         cmp #$09                ; TAB key

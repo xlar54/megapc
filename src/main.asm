@@ -101,6 +101,13 @@ FLOPPY_A_ATTIC  = $8100000      ; Floppy A image — 2MB slot ($8100000-$82FFFFF
 FLOPPY_B_ATTIC  = $8300000      ; Floppy B image — 2MB slot ($8300000-$84FFFFF)
 SCREEN_SAVE_ATTIC = $8500000    ; Screen save area in attic (for TAB menu)
 
+; --- Service-poll throttle ---
+; ml_next polls $D610 (keyboard) and $D7FA (frame counter) only every
+; ML_POLL_PERIOD emulated instructions instead of every one. Keep
+; well below the 50/60 Hz frame interval so timer-tick latency is
+; imperceptible; TAB response stays well within human reaction time.
+ML_POLL_PERIOD  = 16
+
 ; --- Cache constants ---
 CACHE_LINES     = 4             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line

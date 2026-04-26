@@ -122,6 +122,7 @@ inst_counter    = $A0
 tick_counter    = $A2
 unimpl_count    = $A4
 unimpl_last     = $A5
+ml_poll_ctr     = $A6           ; ml_next service-poll throttle countdown
 
 ; --- Scratch ($B0-$BF) ---
 scratch_a       = $B0
