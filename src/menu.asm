@@ -840,12 +840,13 @@ menu_tab_handler:
         jsr cache_flush_all
         jsr cache_invalidate_all
 
-        ; Save ZP state (KERNAL IRQs trash $90-$FA)
-        ; Save all of ZP $00-$FF to $8F00 area (non-ZP RAM)
+        ; Save ZP state (KERNAL IRQs trash $90-$FA).
+        ; MENU_ZP_SAVE must live above the assembled binary or we'll
+        ; scribble over our own code/tables and crash on resume.
         ldx #0
 _tab_save_zp:
         lda $00,x
-        sta $7F00,x             ; Save to $7F00-$7FFF
+        sta MENU_ZP_SAVE,x
         inx
         bne _tab_save_zp
 

@@ -349,3 +349,36 @@ parity_tbl:
         .byte   0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0
         .byte   0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0
         .byte   1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1
+
+; ============================================================================
+; prefix_kind_tbl — maps opcode byte to prefix-kind index
+; ============================================================================
+; 0 = not a prefix (the overwhelmingly common case — straight to decode)
+; 1 = ES override ($26)    5 = LOCK ($F0, treated as NOP)
+; 2 = CS override ($2E)    6 = REPNZ ($F2)
+; 3 = SS override ($36)    7 = REPZ ($F3)
+; 4 = DS override ($3E)
+;
+; Replaces a 7-deep cmp+beq ladder in the decode hot path.
+prefix_kind_tbl:
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 00-0F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 10-1F
+        .byte   0, 0, 0, 0, 0, 0, 1, 0,  0, 0, 0, 0, 0, 0, 2, 0  ; 20-2F  ($26=ES,$2E=CS)
+        .byte   0, 0, 0, 0, 0, 0, 3, 0,  0, 0, 0, 0, 0, 0, 4, 0  ; 30-3F  ($36=SS,$3E=DS)
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 40-4F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 50-5F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 60-6F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 70-7F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 80-8F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; 90-9F
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; A0-AF
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; B0-BF
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; C0-CF
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; D0-DF
+        .byte   0, 0, 0, 0, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; E0-EF
+        .byte   5, 0, 6, 7, 0, 0, 0, 0,  0, 0, 0, 0, 0, 0, 0, 0  ; F0-FF  (LOCK,REPNZ,REPZ)
+
+; The dispatch table (_prefix_dispatch_tbl) lives in decode.asm
+; alongside the _ml_seg_* / _ml_rep_* / _ml_decode labels it
+; references — those are inside ml_next's scope in 64tass and not
+; visible from here.

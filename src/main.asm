@@ -108,6 +108,16 @@ SCREEN_SAVE_ATTIC = $8500000    ; Screen save area in attic (for TAB menu)
 ; imperceptible; TAB response stays well within human reaction time.
 ML_POLL_PERIOD  = 16
 
+; --- Menu ZP save area ---
+; menu_tab_handler saves all 256 bytes of ZP here before showing the
+; menu (KERNAL clobbers ZP $90-$FA). Must NOT overlap the assembled
+; emulator binary. Was at $7F00 originally; the binary has since
+; grown past that (now ends near $7FED), and ZP-save was scribbling
+; over the prefix tables — visible as a crash to monitor on resume
+; from the menu. $8000 gives ~3.5KB of headroom before FAT writer
+; state at $8E00.
+MENU_ZP_SAVE    = $8000
+
 ; --- Cache constants ---
 CACHE_LINES     = 4             ; Number of cache lines
 CACHE_LINE_SZ   = 256           ; Bytes per cache line
@@ -561,10 +571,10 @@ resume_emulation:
         ; Disable IRQs FIRST to stop KERNAL from trashing ZP
         sei
 
-        ; Restore ZP state from $7F00
+        ; Restore ZP state from MENU_ZP_SAVE (mirrors menu_tab_handler).
         ldx #0
 _resume_restore_zp:
-        lda $7F00,x
+        lda MENU_ZP_SAVE,x
         sta $00,x
         inx
         bne _resume_restore_zp

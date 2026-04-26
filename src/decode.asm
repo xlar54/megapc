@@ -458,25 +458,19 @@ _ml_ptr_done:
         sta raw_opcode
 
 
-        ; --- Handle prefix bytes ---
-        ; Segment overrides: 26=ES, 2E=CS, 36=SS, 3E=DS
-        cmp #$26
-        beq _ml_seg_es
-        cmp #$2E
-        beq _ml_seg_cs
-        cmp #$36
-        beq _ml_seg_ss
-        cmp #$3E
-        beq _ml_seg_ds
-        ; REP prefixes: F2=REPNZ, F3=REPZ
-        cmp #$F2
-        beq _ml_rep_nz
-        cmp #$F3
-        beq _ml_rep_z
-        ; LOCK prefix: F0 — treat as NOP
-        cmp #$F0
-        beq ml_next
-        bra _ml_decode
+        ; --- Handle prefix bytes via lookup table ---
+        ; The old cmp ladder cost ~45 cycles on every non-prefix
+        ; opcode (7 cmp+beq pairs). prefix_kind_tbl maps each opcode
+        ; byte to 0 (not a prefix — common case, fast path) or to a
+        ; 1..7 prefix-kind index that we dispatch through
+        ; prefix_dispatch_tbl. Reduces the prefix gate to ~9 cycles
+        ; in the common case.
+        tax
+        lda prefix_kind_tbl,x
+        beq _ml_decode
+        asl
+        tax
+        jmp (_prefix_dispatch_tbl,x)
 
 _ml_seg_es:
         lda #1
@@ -515,6 +509,27 @@ _ml_rep_z:
         lda #0                  ; REPZ mode
         sta rep_mode
         bra ml_next
+
+; ============================================================================
+; _prefix_dispatch_tbl — jump table indexed by prefix kind (×2 for word)
+; ============================================================================
+; Entry 0 is unused — the beq after the prefix_kind_tbl lookup
+; short-circuits non-prefix opcodes straight to _ml_decode.
+; Entries 1..7 match the prefix_kind_tbl indices defined in tables.asm.
+;
+; The label is underscore-prefixed so 64tass keeps it inside the
+; ml_next scope alongside the _ml_seg_* / _ml_rep_* / _ml_decode
+; labels it references — a non-underscore label here would open a
+; new scope and orphan everything below it.
+_prefix_dispatch_tbl:
+        .word   _ml_decode      ; 0 (unreachable)
+        .word   _ml_seg_es      ; 1 = ES
+        .word   _ml_seg_cs      ; 2 = CS
+        .word   _ml_seg_ss      ; 3 = SS
+        .word   _ml_seg_ds      ; 4 = DS
+        .word   ml_next         ; 5 = LOCK (no state, just refetch)
+        .word   _ml_rep_nz      ; 6 = REPNZ
+        .word   _ml_rep_z       ; 7 = REPZ
 
 ; --- Decode the opcode ---
 _ml_decode:

@@ -225,6 +225,44 @@ Drop per-instruction update_opcode_ptr from ml_next (af19f05)
   console), Multiplan, full FIXTEST suite (T1..T15), and
   DEBUG-T single-step through MOV/INC sequence — all green.
 
+Replace prefix cmp ladder with a lookup table
+  After fetch_byte, ml_next did 7 cmp+beq pairs to detect segment
+  overrides ($26/$2E/$36/$3E), REP* ($F2/$F3), and LOCK ($F0).
+  ~45 cycles burned on every non-prefix opcode (the common case).
+
+  Replaced with a 256-byte prefix_kind_tbl in tables.asm: 0 for
+  non-prefix (fast-path beq to _ml_decode), 1..7 for the seven
+  prefixes; jmp through _prefix_dispatch_tbl in decode.asm picks
+  the handler. Common case is now ~9 cycles (tax + lda abs,x +
+  beq). ~36 cycles per non-prefix instruction reclaimed.
+
+  Subtle 64tass scope detail: _prefix_dispatch_tbl had to live
+  in decode.asm (the prefix-handler labels are underscore-
+  prefixed and file-scoped) AND its label had to be underscore-
+  prefixed itself (a non-underscore label opens a new scope and
+  orphans every later _ml_* label).
+
+  Bonus latent-bug fix surfaced by this change: adding ~272
+  bytes of static tables pushed the assembled binary from
+  $7E26 to $7FED. menu_tab_handler had been saving ZP $00-$FF
+  to $7F00-$7FFF, which now overlapped the binary tail —
+  resume_emulation crashed because ZP-save was scribbling over
+  the new prefix tables. Moved the save area to a new
+  MENU_ZP_SAVE = $8000 with ~3.5KB of headroom and a comment
+  explaining why, so the next binary-growth doesn't trip it.
+
+  Combined with the earlier speedups in this section, the
+  decode hot path now runs ~125+ cycles lighter per emulated
+  instruction than before the sweep started:
+    -  ~70 from update_opcode_ptr removal
+    -  ~36 from prefix table
+    -   ~9 from poll throttle
+    -   ~8 from sti_shadow_flag removal
+
+  Tested: same gauntlet (DOS, GWBASIC, EDIT, Multiplan,
+  FIXTEST, DEBUG-T) plus TAB → T (toggle fast console) → R
+  (resume) cycle which is what flushed out the binary overlap.
+
 Throttle ml_next service polls (b893542)
   ml_next was reading $D610 (keyboard) and $D7FA (frame counter)
   on every emulated instruction — ~18 cycles burned on probes
