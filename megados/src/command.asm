@@ -8537,6 +8537,11 @@ int21_handler:
 .i21_3c_find_handle:
 	cmp	bx, [cs:files_limit]
 	jae	.i21_3c_no_handle
+	; The slot at index bx must be free in BOTH the SFT table AND the
+	; JFT — a live AH=45h DUP alias leaves file_handles[bx] empty
+	; while JFT[bx] points at someone else's SFT, and claiming such a
+	; slot would overwrite the alias, strand refcount on the original
+	; SFT, and never finalize its dirty data.
 	mov	ax, bx
 	push	bx
 	push	cx
@@ -8545,7 +8550,13 @@ int21_handler:
 	cmp	byte [cs:file_handles + bx], 0
 	pop	cx
 	pop	bx
+	jne	.i21_3c_skip_handle
+	push	es
+	mov	es, [cs:exec_seg]
+	cmp	byte [es:0x18 + bx], 0xFF
+	pop	es
 	je	.i21_3c_got_handle
+.i21_3c_skip_handle:
 	inc	bx
 	jmp	.i21_3c_find_handle
 .i21_3c_got_handle:
@@ -8842,7 +8853,8 @@ int21_handler:
 	and	al, 0x07
 	mov	[cs:.i21_3d_mode], al	; Save access mode
 
-	; Find a free handle (start at 5)
+	; Find a free handle (start at 5). Both the SFT slot and the JFT
+	; entry at index bx must be free; see AH=3Ch find loop comment.
 	mov	bx, 5
 .i21_3d_find_handle:
 	cmp	bx, [cs:files_limit]
@@ -8851,9 +8863,15 @@ int21_handler:
 	push	bx
 	mov	cl, 4			; * 16 = FH_SIZE
 	shl	bx, cl
-	cmp	byte [cs:file_handles + bx], 0	; Closed?
+	cmp	byte [cs:file_handles + bx], 0	; SFT closed?
 	pop	bx
+	jne	.i21_3d_skip_handle
+	push	es
+	mov	es, [cs:exec_seg]
+	cmp	byte [es:0x18 + bx], 0xFF	; JFT free (no DUP alias)?
+	pop	es
 	je	.i21_3d_got_handle
+.i21_3d_skip_handle:
 	inc	bx
 	jmp	.i21_3d_find_handle
 

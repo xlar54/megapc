@@ -40,6 +40,11 @@
 ;            exists with AX=5 (otherwise it produces two dir entries
 ;            with the same 8.3 name); a same-name rename is a no-op
 ;            success.
+;   Test 13: AH=3C/3D must not reuse a handle whose JFT entry is a
+;            live AH=45h DUP alias — the SFT slot for that handle is
+;            empty but JFT[bx] points at someone else's SFT, so a
+;            naive scan would overwrite the alias and strand refcount
+;            on the original SFT.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -70,6 +75,7 @@
 	call	test10
 	call	test11
 	call	test12
+	call	test13
 
 	call	nl
 	mov	si, msg_summary
@@ -78,14 +84,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 12
+	mov	al, 13
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 12
+	mov	al, 13
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -2878,6 +2884,338 @@ test12:
 	ret
 
 ; ============================================================================
+; Test 13 — AH=45h DUP alias must not be silently overwritten by a
+; later AH=3D/3C open. Open T13A, DUP it, then open T13B; the open
+; must skip the dup-aliased handle (SFT empty but JFT in use) and
+; return a different handle number. Verify the dup alias and the
+; new handle still address their respective files.
+; ============================================================================
+test13:
+	mov	si, msg_t13
+	call	pstr
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+
+	mov	dx, fn_t13a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t13b
+	mov	ah, 0x41
+	int	0x21
+
+	; Create T13A with one byte 'A' so we can verify reads later.
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t13a
+	int	0x21
+	jc	.t13_fail_io
+	mov	bx, ax
+	push	bx
+	mov	cx, 1
+	mov	dx, t13_a_seed
+	mov	ah, 0x40
+	int	0x21
+	pop	bx
+	mov	ah, 0x3E
+	int	0x21
+
+	; Create T13B with one byte 'B'.
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t13b
+	int	0x21
+	jc	.t13_fail_io
+	mov	bx, ax
+	push	bx
+	mov	cx, 1
+	mov	dx, t13_b_seed
+	mov	ah, 0x40
+	int	0x21
+	pop	bx
+	mov	ah, 0x3E
+	int	0x21
+
+	; Open T13A for read.
+	mov	ax, 0x3D00
+	mov	dx, fn_t13a
+	int	0x21
+	jc	.t13_fail_io
+	mov	[t13_h_a], ax
+
+	; DUP it.
+	mov	bx, [t13_h_a]
+	mov	ah, 0x45
+	int	0x21
+	jc	.t13_fail_dup
+	mov	[t13_h_dup], ax
+
+	; Open T13B for read. Must NOT collide with the dup alias.
+	mov	ax, 0x3D00
+	mov	dx, fn_t13b
+	int	0x21
+	jc	.t13_fail_io
+	mov	[t13_h_b], ax
+
+	mov	ax, [t13_h_b]
+	cmp	ax, [t13_h_dup]
+	je	.t13_fail_collision
+
+	; Read through the dup handle — it must still see T13A's 'A'.
+	mov	bx, [t13_h_dup]
+	mov	cx, 1
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jc	.t13_fail_dup_read
+	cmp	ax, 1
+	jne	.t13_fail_dup_read
+	cmp	byte [io_buf], 'A'
+	jne	.t13_fail_dup_content
+
+	; Read through the new handle — it must see T13B's 'B'.
+	mov	bx, [t13_h_b]
+	mov	cx, 1
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jc	.t13_fail_b_read
+	cmp	ax, 1
+	jne	.t13_fail_b_read
+	cmp	byte [io_buf], 'B'
+	jne	.t13_fail_b_content
+
+	; Close the AH=3D side. Keep the dup alias open for Part B.
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+
+	; --- Part B: same guard via the AH=3Ch create path ---
+	; Make sure the create target doesn't already exist, then create
+	; via AH=3Ch and assert the returned handle != dup-aliased handle.
+	push	cs
+	pop	ds
+	mov	dx, fn_t13c
+	mov	ah, 0x41
+	int	0x21
+
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t13c
+	int	0x21
+	jc	.t13_fail_b_io
+	mov	[t13_h_b], ax
+
+	cmp	ax, [t13_h_dup]
+	je	.t13_fail_b_collision
+
+	; Dup alias must still point at T13A — re-read first byte.
+	mov	bx, [t13_h_dup]
+	xor	cx, cx
+	xor	dx, dx
+	mov	ax, 0x4200
+	int	0x21
+	mov	bx, [t13_h_dup]
+	mov	cx, 1
+	mov	dx, io_buf
+	mov	ah, 0x3F
+	int	0x21
+	jc	.t13_fail_b_dup_read
+	cmp	ax, 1
+	jne	.t13_fail_b_dup_read
+	cmp	byte [io_buf], 'A'
+	jne	.t13_fail_b_dup_content
+
+	; Close everything.
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	jmp	.t13_cleanup
+
+.t13_fail_io:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_io
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_dup:
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_dup
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_collision:
+	; Close everything still open.
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_collision
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_dup_read:
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_dup_read
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_dup_content:
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_dup_content
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_read:
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_read
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_content:
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_content
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_io:
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_io
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_collision:
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_collision
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_dup_read:
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_dup_read
+	call	pstr
+	call	nl
+	jmp	.t13_cleanup
+.t13_fail_b_dup_content:
+	mov	bx, [t13_h_b]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_dup]
+	mov	ah, 0x3E
+	int	0x21
+	mov	bx, [t13_h_a]
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t13_b_dup_content
+	call	pstr
+	call	nl
+.t13_cleanup:
+	push	cs
+	pop	ds
+	mov	dx, fn_t13a
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t13b
+	mov	ah, 0x41
+	int	0x21
+	mov	dx, fn_t13c
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -3100,6 +3438,19 @@ msg_t12_f_failed db	'positive-path A -> B rename failed', 0
 msg_t12_f_src_remains db 'source still exists after successful rename', 0
 msg_t12_f_dst_missing db 'destination not present after successful rename', 0
 
+msg_t13		db	'T13 DUP alias not overwritten by open: ', 0
+msg_t13_io	db	'setup io', 0
+msg_t13_dup	db	'AH=45 DUP failed', 0
+msg_t13_collision db	'open(B) returned the dup-aliased handle', 0
+msg_t13_dup_read db	'read through dup handle failed', 0
+msg_t13_dup_content db	'dup handle no longer points at T13A', 0
+msg_t13_b_read	db	'read through new handle failed', 0
+msg_t13_b_content db	'new handle no longer points at T13B', 0
+msg_t13_b_io	db	'AH=3C create T13C failed', 0
+msg_t13_b_collision db	'AH=3C create returned the dup-aliased handle', 0
+msg_t13_b_dup_read db	're-read through dup handle after AH=3C failed', 0
+msg_t13_b_dup_content db 'dup handle clobbered by AH=3C create', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -3137,6 +3488,12 @@ fn_t12e		db	'T12E.TMP', 0
 fn_t12f		db	'T12F.TMP', 0
 fn_t12g		db	'T12G.TMP', 0
 fn_t12_missing	db	'T12NOPE.TMP', 0
+
+fn_t13a		db	'T13A.TMP', 0
+fn_t13b		db	'T13B.TMP', 0
+fn_t13c		db	'T13C.TMP', 0
+t13_a_seed	db	'A'
+t13_b_seed	db	'B'
 fn_t12bad_path	db	'\T12X.TMP', 0
 fn_t12bad_drive	db	'A:T12X.TMP', 0
 
@@ -3154,6 +3511,9 @@ t8_handle	dw	0
 t9_handle	dw	0
 t10_handle	dw	0
 t11_handle	dw	0
+t13_h_a		dw	0
+t13_h_dup	dw	0
+t13_h_b		dw	0
 t11_free_baseline dw	0
 t3_free_before	dw	0
 t3_free_populated dw	0
