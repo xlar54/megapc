@@ -237,6 +237,8 @@ do_sw_interrupt:
         lda #0
         sta flag_if
         sta flag_tf
+        sta trap_flag_var       ; INT clears TF before handler execution; don't
+                                ; single-step into the handler from stale TF.
 
         ; Push CS
         lda reg_cs
