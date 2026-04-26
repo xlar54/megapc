@@ -10667,10 +10667,12 @@ int21_handler:
 	mov	al, [es:0x18 + bx]	; AL = SFT index of source handle
 	cmp	al, 0xFF
 	je	.i21_45_no_handle
-	; Find a free JFT slot (handle 5+)
+	; Find a free JFT slot (handle 5+). Honor the runtime files_limit
+	; from CONFIG.SYS FILES= — using MAX_HANDLES would let DUP create
+	; a handle other I/O calls would later reject as out-of-range.
 	mov	di, 5
 .i21_45_find:
-	cmp	di, MAX_HANDLES
+	cmp	di, [cs:files_limit]
 	jae	.i21_45_no_handle
 	cmp	byte [es:0x18 + di], 0xFF  ; Free slot?
 	je	.i21_45_got
@@ -10711,7 +10713,7 @@ int21_handler:
 .i21_46:
 	cmp	bx, [cs:files_limit]
 	jae	.i21_46_err
-	cmp	cx, MAX_HANDLES
+	cmp	cx, [cs:files_limit]	; honor runtime files_limit, not MAX_HANDLES
 	jae	.i21_46_err
 	; DUP2 with same handle = no-op success
 	cmp	bx, cx
