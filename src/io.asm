@@ -1980,29 +1980,32 @@ cursor_update:
         ;   $D000      = X bits 7..0
         ;   $D010 bit0 = X bit 8
         ;   $D05F bit0 = X bit 9   (MEGA65 H640 sprite mode)
+        ;
+        ; scr_col maxes at 79, so scr_col*8 fits in 10 bits — no need
+        ; to fire up the 32-bit hardware multiplier here, three asl/rol
+        ; pairs give the same answer with fewer cycles and without
+        ; tying up $D770-$D779 mid-routine.
 
         lda scr_col
-        sta $D770               ; Multiplier A byte 0
+        sta scratch_a
         lda #0
-        sta $D771               ; Multiplier A byte 1
-        sta $D772               ; Multiplier A byte 2
-        sta $D773               ; Multiplier A byte 3
-
-        lda #8
-        sta $D774               ; Multiplier B byte 0
-        lda #0
-        sta $D775               ; Multiplier B byte 1
-        sta $D776               ; Multiplier B byte 2
-        sta $D777               ; Multiplier B byte 3
+        sta scratch_b
+        asl scratch_a
+        rol scratch_b
+        asl scratch_a
+        rol scratch_b
+        asl scratch_a
+        rol scratch_b
+        ; scratch_b:scratch_a = scr_col * 8
 
         clc
-        lda $D778               ; product low
+        lda scratch_a
         adc #CURSOR_X_OFS
         sta $D000               ; sprite 0 X low
 
-        lda $D779               ; product high + carry from offset add
+        lda scratch_b
         adc #0
-        sta scratch_a           ; save X bits 15..8
+        sta scratch_a           ; save X bits 15..8 (consumed below)
 
         ; ---- X bit 8 -> $D010 bit 0 ----
         lda $D010
