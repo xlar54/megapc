@@ -53,6 +53,10 @@
 ;            DUP2's a file SFT onto handle 1 and exits without
 ;            closing — pre-fix the file size in the dir entry
 ;            stayed 0 because sft_finalize never ran.
+;   Test 16: DIV/IDIV must fire INT 0 on quotient overflow (not
+;            just on divide-by-zero). Installs a custom INT 0
+;            handler and exercises both unsigned and signed
+;            overflow plus the signed-IDIV $80 boundary case.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -86,6 +90,7 @@
 	call	test13
 	call	test14
 	call	test15
+	call	test16
 
 	call	nl
 	mov	si, msg_summary
@@ -94,14 +99,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 15
+	mov	al, 16
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 15
+	mov	al, 16
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -3471,6 +3476,176 @@ test15:
 	ret
 
 ; ============================================================================
+; Test 16 — DIV/IDIV must fire INT 0 on quotient overflow
+;
+; Real 8086 fires INT 0 on:
+;   - divide by zero
+;   - quotient too large to fit in destination (AL or AX)
+;
+; Hooks INT 0 to a flag-setter, runs five DIV/IDIV scenarios, asserts
+; the flag fired (or didn't) for each case, restores INT 0 on the way
+; out via the saved vector regardless of pass/fail.
+; ============================================================================
+test16:
+	mov	si, msg_t16
+	call	pstr
+
+	push	cs
+	pop	ds
+
+	; Save current INT 0 vector via AH=35.
+	mov	ax, 0x3500
+	int	0x21
+	push	cs
+	pop	ds
+	mov	[t16_orig_off], bx
+	mov	[t16_orig_seg], es
+
+	; Install our INT 0 handler.
+	push	cs
+	pop	ds
+	mov	ax, 0x2500
+	mov	dx, t16_int0_handler
+	int	0x21
+
+	push	cs
+	pop	ds
+
+	; --- Case 1: byte DIV with quotient overflow ($FFFF / 1 → $FFFF, doesn't fit AL)
+	mov	byte [t16_div0_flag], 0
+	mov	ax, 0xFFFF
+	mov	bl, 1
+	div	bl
+	cmp	byte [t16_div0_flag], 1
+	jne	.t16_fail_c1
+
+	; --- Case 2: byte DIV no overflow ($00FF / 2 → 127, fits)
+	mov	byte [t16_div0_flag], 0
+	mov	ax, 0x00FF
+	mov	bl, 2
+	div	bl
+	cmp	byte [t16_div0_flag], 0
+	jne	.t16_fail_c2_fired
+	cmp	al, 127
+	jne	.t16_fail_c2_quot
+	cmp	ah, 1
+	jne	.t16_fail_c2_rem
+
+	; --- Case 3: word DIV with overflow ($00010000 / 1 → $10000, doesn't fit AX)
+	mov	byte [t16_div0_flag], 0
+	mov	dx, 1
+	mov	ax, 0
+	mov	bx, 1
+	div	bx
+	cmp	byte [t16_div0_flag], 1
+	jne	.t16_fail_c3
+
+	; --- Case 4: byte IDIV with positive overflow (128 / 1 → +128, > +127 max)
+	mov	byte [t16_div0_flag], 0
+	mov	ax, 128
+	mov	bl, 1
+	idiv	bl
+	cmp	byte [t16_div0_flag], 1
+	jne	.t16_fail_c4
+
+	; --- Case 5: byte IDIV at the exact $80 / -128 boundary (-128 / 1 → -128 = $80, fits)
+	mov	byte [t16_div0_flag], 0
+	mov	ax, 0xFF80		; -128 sign-extended in AX
+	mov	bl, 1
+	idiv	bl
+	cmp	byte [t16_div0_flag], 0
+	jne	.t16_fail_c5_fired
+	cmp	al, 0x80		; -128 result
+	jne	.t16_fail_c5_quot
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	jmp	.t16_cleanup
+
+.t16_fail_c1:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c1
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c2_fired:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c2_fired
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c2_quot:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c2_quot
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c2_rem:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c2_rem
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c3:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c3
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c4:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c4
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c5_fired:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c5_fired
+	call	pstr
+	call	nl
+	jmp	.t16_cleanup
+.t16_fail_c5_quot:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t16_c5_quot
+	call	pstr
+	call	nl
+.t16_cleanup:
+	; Restore the original INT 0 vector (AH=25 with DS:DX = saved seg:off).
+	push	cs
+	pop	ds
+	push	ds
+	mov	dx, [t16_orig_off]
+	mov	ax, [t16_orig_seg]
+	mov	ds, ax
+	mov	ax, 0x2500
+	int	0x21
+	pop	ds
+	ret
+
+; INT 0 handler: just sets a flag. CS-relative storage so the handler
+; doesn't need to touch DS state on a possibly-fragile call site.
+t16_int0_handler:
+	push	ax
+	push	ds
+	push	cs
+	pop	ds
+	mov	byte [t16_div0_flag], 1
+	pop	ds
+	pop	ax
+	iret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -3720,6 +3895,16 @@ msg_t15_exec	db	'EXEC T15CHLD failed', 0
 msg_t15_size_call db	'AH=3D/42 on T15.TMP failed', 0
 msg_t15_size	db	'T15.TMP size != 4 (sft_finalize skipped?)', 0
 
+msg_t16		db	'T16 DIV/IDIV overflow fires INT 0: ', 0
+msg_t16_c1	db	'unsigned byte DIV $FFFF/1 missed INT 0', 0
+msg_t16_c2_fired db	'unsigned byte DIV $FF/2 spurious INT 0', 0
+msg_t16_c2_quot	db	'unsigned byte DIV quotient wrong', 0
+msg_t16_c2_rem	db	'unsigned byte DIV remainder wrong', 0
+msg_t16_c3	db	'unsigned word DIV $10000/1 missed INT 0', 0
+msg_t16_c4	db	'signed byte IDIV +128/1 missed INT 0', 0
+msg_t16_c5_fired db	'signed byte IDIV -128/1 spurious INT 0', 0
+msg_t16_c5_quot	db	'signed byte IDIV -128 quotient wrong', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -3772,6 +3957,10 @@ fn_t15_child	db	'T15CHLD.COM', 0
 fn_t15_tmp	db	'T15.TMP', 0
 t15_cmdtail	db	0, 0x0D			; empty cmd tail (length=0, CR)
 t15_exec_pb	times 14 db 0
+
+t16_div0_flag	db	0
+t16_orig_off	dw	0
+t16_orig_seg	dw	0
 fn_t12bad_path	db	'\T12X.TMP', 0
 fn_t12bad_drive	db	'A:T12X.TMP', 0
 
