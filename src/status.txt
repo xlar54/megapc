@@ -182,13 +182,48 @@ cursor_update: drop the 32-bit multiplier for scr_col*8 (bded72d)
   reads. Roughly cycle-neutral but frees the multiplier and
   reads cleaner.
 
-Remove dead sti_shadow_flag store (this commit)
+Remove dead sti_shadow_flag store
   decode.asm:53 saved raw_opcode into sti_shadow_flag every
   emulated instruction. grep shows zero readers — the actual
   STI/MOV-SS/POP-SS shadow runs through irq_inhibit. Removing
   the lda+sta saves 8 cycles per emulated 8086 instruction in
   the hottest path in the emulator. The variable definition in
   globals.asm was also cleaned up so $8F00 is freed.
+
+Drop per-instruction update_opcode_ptr from ml_next (af19f05)
+  ml_next was unconditionally calling update_opcode_ptr on
+  every non-attic emulated instruction (~70 cycles for 8-bit
+  adds + region classification + jsr/rts overhead). fetch_byte
+  already keeps opcode_ptr in lockstep with reg_ip via inline
+  increment + bank-boundary resync + IP-wrap resync, and every
+  IP/CS-modifying opcode handler explicitly calls
+  update_opcode_ptr (or compute_cs_base + update_opcode_ptr)
+  before returning. The per-instruction recompute was pure
+  waste in the hottest path in the emulator.
+
+  Audit covered every reg_ip / reg_cs writer in opcodes.asm
+  and decode.asm: Jcc, JMP near/short/far, CALL near/far,
+  indirect JMP/CALL via FF group, RET/RETF, IRET, LOOP /
+  LOOPZ / LOOPNZ / JCXZ, REP retry rewind, INT* (via
+  do_sw_interrupt which itself does both calls). All have
+  explicit update_opcode_ptr.
+
+  Three changes:
+    - main_loop seeds opcode_ptr after compute_*_base so the
+      first instruction (boot or resume from menu) has a
+      correct pointer.
+    - _ml_exit_code_cache calls update_opcode_ptr because
+      opcode_ptr was pointing into CODE_CACHE_BUF before the
+      transition and needs to be recomputed for bank 4 access.
+    - _ml_normal_ptr drops its unconditional update_opcode_ptr
+      + cs_in_attic-reentry block. ~70 cycles per non-attic
+      instruction reclaimed — the biggest single emulator-side
+      speedup available without restructuring the dispatch
+      loop.
+
+  Tested: DOS prompt, GWBASIC, EDIT.COM (fast and slow
+  console), Multiplan, full FIXTEST suite (T1..T15), and
+  DEBUG-T single-step through MOV/INC sequence — all green.
 
 FIXTEST coverage
 -----------------
