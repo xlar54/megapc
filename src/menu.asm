@@ -827,6 +827,19 @@ menu_tab_handler:
         ; Hide sprite cursor before saving screen
         jsr cursor_hide
 
+        ; Flush + invalidate the data cache BEFORE saving ZP. Cache
+        ; backing store at $9200-$95FF and the cache tags/dirty bits
+        ; in ZP $90-$9C are both fair game for KERNAL while the menu
+        ; is up. If we leave dirty lines marked dirty, resume_emulation
+        ; restores those tags and the next eviction will flush
+        ; whatever bytes the menu/KERNAL left in $9200 back to attic
+        ; — silently corrupting guest RAM. Flushing first persists
+        ; the real data to attic; invalidating then ensures the
+        ; restored tags say "nothing cached" so no stale flush fires
+        ; on resume.
+        jsr cache_flush_all
+        jsr cache_invalidate_all
+
         ; Save ZP state (KERNAL IRQs trash $90-$FA)
         ; Save all of ZP $00-$FF to $8F00 area (non-ZP RAM)
         ldx #0
