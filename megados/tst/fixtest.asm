@@ -48,6 +48,11 @@
 ;   Test 14: AH=3C/39 must reject empty or path-only inputs that
 ;            resolve_path leaves with an all-spaces exec_fname,
 ;            otherwise they'd create blank 8.3 directory entries.
+;   Test 15: term_common (AH=4Ch / INT 20h) must close ALL of the
+;            child's JFT entries, not just 5+. EXECs T15CHLD which
+;            DUP2's a file SFT onto handle 1 and exits without
+;            closing — pre-fix the file size in the dir entry
+;            stayed 0 because sft_finalize never ran.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -80,6 +85,7 @@
 	call	test12
 	call	test13
 	call	test14
+	call	test15
 
 	call	nl
 	mov	si, msg_summary
@@ -88,14 +94,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 14
+	mov	al, 15
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 14
+	mov	al, 15
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -3321,6 +3327,150 @@ test14:
 	ret
 
 ; ============================================================================
+; Test 15 — term_common must close child JFT entries 0..MAX, not
+; just 5+. EXEC T15CHLD which DUP2's a file SFT onto stdout and
+; exits without explicit close. Verify T15.TMP's dir-entry size
+; reflects the 4 bytes the child wrote — pre-fix it stayed 0
+; because sft_finalize never ran (refcount stranded at 1 by the
+; uncleaned JFT[1] alias).
+; ============================================================================
+test15:
+	mov	si, msg_t15
+	call	pstr
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+
+	; T15CHLD.COM lives in \TEST. Earlier tests can leave us at root
+	; (T7/T9 CHDIR \ mid-walk and don't restore), and AH=4B only
+	; searches the current directory.
+	mov	ah, 0x3B
+	mov	dx, t6_test		; '\TEST'
+	int	0x21
+	jc	.t15_fail_chdir
+	push	cs
+	pop	ds
+
+	mov	dx, fn_t15_tmp
+	mov	ah, 0x41
+	int	0x21
+
+	; .COM programs are launched with all available memory allocated
+	; to their PSP. AH=4B needs free memory to give the child, so we
+	; shrink ourselves first via AH=4A. 0x1000 paragraphs (64KB) is
+	; plenty for FIXTEST and keeps SS:SP near FFFE intact.
+	push	cs
+	pop	es
+	mov	bx, 0x1000
+	mov	ah, 0x4A
+	int	0x21
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	jc	.t15_fail_resize
+
+	; Build EXEC parameter block.
+	mov	word [t15_exec_pb], 0			; env = inherit
+	mov	word [t15_exec_pb+2], t15_cmdtail	; cmd tail off
+	mov	word [t15_exec_pb+4], cs		; cmd tail seg
+	mov	word [t15_exec_pb+6], 0x005C		; FCB1 = PSP default
+	mov	word [t15_exec_pb+8], cs
+	mov	word [t15_exec_pb+10], 0x006C		; FCB2
+	mov	word [t15_exec_pb+12], cs
+
+	mov	ax, 0x4B00
+	mov	dx, fn_t15_child
+	mov	bx, t15_exec_pb
+	push	cs
+	pop	es
+	int	0x21
+
+	; Reset DS/ES BEFORE checking CF — AH=4B leaves DS = SHELL_SEG
+	; on both success and failure, so any error message printed via
+	; pstr would otherwise come out as garbage.
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+	jc	.t15_fail_exec
+
+	; Open T15.TMP read-only and seek to end to read the dir-entry
+	; size. Pre-fix this is 0 (sft_finalize skipped); post-fix it's 4.
+	mov	dx, fn_t15_tmp
+	call	filesize
+	jc	.t15_fail_size_call
+	or	dx, dx
+	jne	.t15_fail_size
+	cmp	ax, 4
+	jne	.t15_fail_size
+
+	; Cleanup
+	mov	dx, fn_t15_tmp
+	mov	ah, 0x41
+	int	0x21
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	ret
+
+.t15_fail_chdir:
+	push	cs
+	pop	ds
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t15_chdir
+	call	pstr
+	call	nl
+	ret
+.t15_fail_resize:
+	push	cs
+	pop	ds
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t15_resize
+	call	pstr
+	call	nl
+	ret
+.t15_fail_exec:
+	push	cs
+	pop	ds
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t15_exec
+	call	pstr
+	call	nl
+	mov	dx, fn_t15_tmp
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t15_fail_size_call:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t15_size_call
+	call	pstr
+	call	nl
+	mov	dx, fn_t15_tmp
+	mov	ah, 0x41
+	int	0x21
+	ret
+.t15_fail_size:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t15_size
+	call	pstr
+	call	nl
+	mov	dx, fn_t15_tmp
+	mov	ah, 0x41
+	int	0x21
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -3563,6 +3713,13 @@ msg_t14_39_empty db	'AH=39 "" returned success', 0
 msg_t14_39_root db	'AH=39 "\\" returned success', 0
 msg_t14_real	db	'sane AH=3C create regressed', 0
 
+msg_t15		db	'T15 child term closes std handles: ', 0
+msg_t15_chdir	db	'CHDIR \TEST failed', 0
+msg_t15_resize	db	'AH=4A shrink failed', 0
+msg_t15_exec	db	'EXEC T15CHLD failed', 0
+msg_t15_size_call db	'AH=3D/42 on T15.TMP failed', 0
+msg_t15_size	db	'T15.TMP size != 4 (sft_finalize skipped?)', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -3610,6 +3767,11 @@ t13_b_seed	db	'B'
 fn_t14_empty	db	0
 fn_t14_root	db	'\', 0
 fn_t14_real	db	'T14.TMP', 0
+
+fn_t15_child	db	'T15CHLD.COM', 0
+fn_t15_tmp	db	'T15.TMP', 0
+t15_cmdtail	db	0, 0x0D			; empty cmd tail (length=0, CR)
+t15_exec_pb	times 14 db 0
 fn_t12bad_path	db	'\T12X.TMP', 0
 fn_t12bad_drive	db	'A:T12X.TMP', 0
 

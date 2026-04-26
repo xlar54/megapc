@@ -7534,10 +7534,14 @@ do_exec:
 	mov	cx, MAX_HANDLES
 	rep	movsb
 	pop	ds
-	; Increment refcounts for inherited FILE handles (5+)
-	; Device handles 0-4 are permanent and don't need refcounting
+	; Increment refcounts for ALL inherited handles, including the
+	; standard 0..4 device aliases. term_common closes the child's
+	; JFT[0..MAX] on exit (so a DUP2 onto stdin/stdout/stderr can't
+	; leak), so the inherit side has to match — otherwise the close
+	; decrements refcount[SFT 0..4] below where the parent left it
+	; and stdout breaks once the child returns.
 	push	bx
-	mov	bx, 5
+	mov	bx, 0
 .inherit_refcount:
 	cmp	bx, [cs:files_limit]
 	jae	.inherit_done
@@ -15034,9 +15038,14 @@ int21_handler:
 	mov	cx, MAX_HANDLES
 	rep	movsb
 	pop	ds
-	; Increment refcounts for inherited FILE handles (5+)
+	; Increment refcounts for ALL inherited handles, including the
+	; standard 0..4 device aliases. term_common closes the child's
+	; JFT[0..MAX] on exit, so the inherit side has to match (same as
+	; the shell-launched path) — otherwise the child's exit
+	; decrements refcount[SFT 0..4] below the parent's working level
+	; and the parent's stdout breaks once it regains control.
 	push	bx
-	mov	bx, 5
+	mov	bx, 0
 .i21_4b_inherit_ref:
 	cmp	bx, [cs:files_limit]
 	jae	.i21_4b_inherit_done
@@ -15346,12 +15355,19 @@ term_common:
 	sti
 	mov	ds, ax
 
-	; Close file handles opened by the child (walk child's JFT)
-	; Only close handles 5+ that the child has open
+	; Close every JFT entry the child still has open. We must walk
+	; from handle 0, not 5 — a child can DUP2 a file SFT onto stdin/
+	; stdout/stderr (handles 0..2) for redirection and exit without
+	; closing it explicitly. Skipping 0..4 here would leak that
+	; reference and the file would never be finalized.
+	;
+	; Closing the inherited standard handles is also correct: their
+	; refcount on the underlying CON SFT was bumped at child launch,
+	; and AH=3Eh decrements it back to where the shell left it.
 	push	bx
 	push	es
 	mov	es, [cs:exec_seg]
-	mov	bx, 5
+	mov	bx, 0
 .term_close:
 	cmp	bx, [cs:files_limit]
 	jae	.term_closed

@@ -86,6 +86,7 @@ nasm_assemble('trace21.asm', 'TRACE21.COM')
 nasm_assemble('hdltest.asm', 'HDLTEST.COM')
 nasm_assemble('dostest.asm', 'DOSTEST.COM')
 nasm_assemble('child.asm', 'CHILD.COM')
+nasm_assemble('t15chld.asm', 'T15CHLD.COM')
 nasm_assemble('fcbtest.asm', 'FCBTEST.COM')
 nasm_assemble('disktest.asm', 'DISKTEST.COM')
 nasm_assemble('fdtest.asm', 'FDTEST.COM')
@@ -473,7 +474,7 @@ root_files = ['EDIT.COM', 'EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
               'DIRTEST.COM', 'EXETEST.COM', 'TRACE21.COM', 'HDLTEST.COM',
               'DOSTEST.COM', 'CHILD.COM', 'FCBTEST.COM', 'DISKTEST.COM',
-              'FDTEST.COM', 'BND64K.COM', 'FIXTEST.COM',
+              'FDTEST.COM', 'BND64K.COM', 'FIXTEST.COM', 'T15CHLD.COM',
               'ARGS.COM',
               'BEEP.COM',
               'TESTBAT.BAT', 'TESTBAT2.BAT',
