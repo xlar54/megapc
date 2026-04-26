@@ -1265,6 +1265,43 @@ _lds_mb_nibble  .byte 0
 save_floppy_drive:
         pha                     ; Save drive number
 
+        ; Repopulate floppy_fname_page from this drive's stored name
+        ; before handing it to Hyppo / the FAT writer. The page buffer
+        ; is shared with menu_read_filename, so the most recent mount/
+        ; prompt on either drive can leave a stale or wrong name here —
+        ; e.g. mount A=D1.IMG, mount B=D2.IMG, then save A would have
+        ; written A's contents to D2.IMG and clobbered drive B's image
+        ; on disk.
+        cmp #0
+        bne _sfd_copy_b
+        ldx #0
+-       lda drive_a_fname,x
+        sta floppy_fname_page,x
+        beq _sfd_name_done
+        inx
+        cpx #16
+        bne -
+        bra _sfd_name_done
+_sfd_copy_b:
+        ldx #0
+-       lda drive_b_fname,x
+        sta floppy_fname_page,x
+        beq _sfd_name_done
+        inx
+        cpx #16
+        bne -
+_sfd_name_done:
+        lda #0
+        sta floppy_fname_page+16        ; defensive null at +16
+        ; Refuse to save when the per-drive name slot is empty (drive
+        ; never mounted or already unmounted) — Hyppo setname on a
+        ; zero-length name silently does nothing and we'd then operate
+        ; on whatever filename was previously set.
+        lda floppy_fname_page
+        bne _sfd_have_name
+        jmp _sfd_fail
+_sfd_have_name:
+
         ; Step 1: Set filename via Hyppo setname
         ldy #>floppy_fname_page
         lda #$2E                ; hyppo_setname
