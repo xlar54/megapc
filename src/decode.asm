@@ -50,10 +50,6 @@ ml_next:
         jmp menu_tab_handler    ; Save screen and show menu
 _ml_no_tab:
 
-        ; --- Save previous raw_opcode to fixed RAM ---
-        lda raw_opcode
-        sta sti_shadow_flag
-
         ; (trace/debug code removed)
 
         ; --- Real-time timer tick using MEGA65 frame counter ---

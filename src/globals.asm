@@ -183,7 +183,9 @@ fat_chain_allocated     = $8E68
 ; KERNAL does NOT touch this range, so safe from CHROUT/IRQ corruption.
 
 ; --- Decoder/IRQ shadow state ($8F00-$8F1F) ---
-sti_shadow_flag = $8F00         ; STI shadow (1 instruction inhibit) - decode.asm
+; (real STI/MOV-SS/POP-SS shadow lives in irq_inhibit at $8F1B; the old
+; sti_shadow_flag at $8F00 was dead — write-only, never read. $8F00 is
+; now free for future use.)
 div_by_zero_count = $8F14       ; Count of divide-by-zero / INT 0 - opcodes.asm
 last_frame_ctr  = $8F15         ; Last BIOS frame counter value - decode/io
 sub_frame_ctr   = $8F16         ; Sub-frame counter for INT 8 timing - decode/io

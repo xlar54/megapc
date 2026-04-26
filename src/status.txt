@@ -1,6 +1,216 @@
 MEGA8086 Emulator — Status
 ===========================
-Last updated: 2026-04-20
+Last updated: 2026-04-26
+
+RECENT CHANGES (2026-04-24 .. 2026-04-26 — ChatGPT-driven bug-find sweep)
+==========================================================================
+
+Long collaborative session focused on hardening MegaDOS (COMMAND.COM)
+against subtle correctness bugs flagged by ChatGPT review. Each fix
+was paired with a FIXTEST regression where practical; tests now go
+from T1..T15. A few emulator-side issues were also caught.
+
+COMMAND.COM / MegaDOS DOS handler fixes
+----------------------------------------
+
+SET / PROMPT / PATH atomic env updates (af37075)
+  Old code deleted the existing variable before proving the new
+  value fit, so an oversized new value left the user with neither.
+  Now snapshot the env block at command entry and restore it from
+  the overflow path. New env_backup_buf (ENV_SIZE) + env_backup /
+  env_restore helpers.
+
+AH=3Dh open: mask sharing/inherit bits (e7fc3e2)
+  AL is the full DOS open-mode byte (access bits 0-2, sharing 4-6,
+  inherit bit 7). Storing the raw byte made e.g. 0x80|read land as
+  0x81, which then sailed past AH=40h's exact `cmp byte, 1`
+  read-only guard. Validate low nibble (access + reserved bit 3)
+  before masking. Also fixed a long-standing pop-imbalance in
+  .i21_3d_no_handle (popped 6 vs 5 pushes — would have eaten the
+  IRET frame's IP if FILES= ever exhausted).
+  Test: T8.
+
+AH=3Ch/3Dh/41h refuse directories, VOL labels, RO files (c1a68b1)
+  AH=3Ch silently truncated whatever the name pointed at; AH=3Dh
+  opened directories/volume label as files and ignored RO bit on
+  write/rw opens; AH=41h would unlink directory entries (and free
+  the cluster chain). Each handler now checks the attribute byte
+  and rejects with AX=5. AH=3Dh still permits RO files for read.
+  Test: T9.
+
+AH=42h seek: don't trample last cluster on seek-to-EOF (afd710d)
+  When the FAT-chain skip walk hit EOF before finishing, the
+  handle was left at "current = last real cluster, pos_in_cluster
+  = 0". A subsequent AH=40h append on a file whose size was a whole
+  multiple of the cluster size then read that last cluster back
+  and overwrote its first bytes. Fix: leave current at last real,
+  bump pos_in_cluster to bpc — the existing AH=40h flush_next /
+  allocate-new-cluster path takes over correctly.
+  Test: T10.
+
+AH=40h CX=0 truncate frees the chain (6a7580a)
+  Old code only updated the SFT size; FAT clusters past the new
+  EOF stayed allocated (leak), and truncate-to-zero left
+  start_cluster pointing at an orphaned chain. New path computes
+  ceil(P/bpc) clusters to keep, marks the last as EOF, frees the
+  successor chain, and on truncate-to-zero clears start/current
+  cluster. For partial truncate, current_cluster is repinned to
+  the last kept cluster + pos_in_cluster recomputed (using bpc on
+  a boundary, matching AH=42h's past-EOF convention) so a follow-up
+  write doesn't trample a freed cluster.
+  Same commit also fixed AH=36h (get free space) clobbering ES
+  with SHELL_SEG and not restoring it (broke any post-AH=36h
+  rep stosb in the caller's segment), and capped the redir_*_fname
+  78-byte buffers in the parser so a long redirection target can't
+  overflow.
+  Test: T11 (three parts: truncate-to-zero, partial truncate, and
+  truncate-then-append-on-same-handle).
+
+AH=56h rename, three rounds of fixes:
+  • Reject duplicate destinations (7c2d64f) — old code searched
+    for the source 8.3 and overwrote it in place without ever
+    checking whether the new name already existed. Two entries
+    with the same 8.3 = ambiguous lookups. Same commit also
+    cleaned up a latent ES bug: handler used ES:DI for internal
+    rep movsb / parse_83_filename rep stosb but ES was the
+    caller's segment. Worked from the shell prompt (ES = SHELL_SEG)
+    but silently scribbled into the caller's PSP from a .COM. Pin
+    ES = SHELL_SEG once at handler entry; remove the stray
+    `mov es, [.i21_56_new_seg]` that was undoing the fix.
+  • Reject path-qualified destinations (05631e7) — parse_83_filename
+    bails on the first '\\', so "\\DIR\\NEW.TMP" or "A:NEW.TMP" left
+    exec_fname all-spaces and the rename overwrote the source
+    entry's name with blanks. Scan for '\\' or ':' before parsing;
+    return AX=3 on hit.
+  • Search source before same-name / dup checks (f5c12f8) — pre-fix
+    MISSING -> MISSING returned success (same-name short-circuit
+    fired without verifying the source existed) and MISSING ->
+    EXISTING returned AX=5 instead of AX=2. Reorder: source-search
+    first, stash dir-entry pointer, then same-name + dup checks.
+  Test: T12 (six parts — A: dup reject, B: same-name no-op, C:
+  path-qualified reject, D: missing→missing, E: missing→existing,
+  F: positive-path success).
+
+AH=3C/3D skip handles whose JFT slot is a live DUP alias (1b82f01)
+  Architecture: handle == SFT index. AH=45h DUP creates a JFT
+  alias (e.g. JFT[6] = 5) without allocating SFT slot 6, leaving
+  it empty. AH=3C/3D's free-handle scan checked only file_handles
+  (the SFT slot) so the next open could claim handle 6, overwrite
+  JFT[6], and strand refcount on SFT 5 — stranded SFT, dirty data
+  never finalized. Now require BOTH the SFT slot AND JFT[bx] to be
+  free.
+  Test: T13 (two parts — AH=3D path and AH=3C path).
+
+AH=3C/39 refuse empty / path-only inputs (f8dd9bc)
+  resolve_path returns CF=0 with exec_fname all-spaces when input
+  is empty or ends in '\\'. Both create paths went on to write a
+  blank 8.3 directory entry. Add a `cmp byte [exec_fname], ' '`
+  guard after resolve_path. AH=5B inherits the fix (delegates to
+  AH=3C). Other resolve_path callers (CHDIR, FindFirst, etc.) keep
+  the old behavior because they need the directory-only resolution.
+  Test: T14.
+
+term_common: close child JFT[0..MAX] + inherit symmetry (3346236)
+  Children could DUP2 a file SFT onto stdin/stdout/stderr and exit
+  without closing — term_common only walked handles 5..MAX so the
+  alias leaked, sft_finalize never ran, dir entry stayed at size 0.
+  Fixed term to close 0..MAX. The matching change had to be made
+  in BOTH inherit-refcount paths (the shell-launched setup AND the
+  AH=4Bh-specific setup) to bump refcount[SFT 0..4] symmetrically;
+  otherwise the new term decrements would underflow std-handle
+  refcounts past the parent's working level and stdout would
+  produce garbage on return. (Diagnosed live during T15
+  development — required matching exec_inherit on both sides.)
+  Test: T15 + T15CHLD.COM (a 50-byte child that DUP2s file→stdout
+  and exits without close; T15 EXECs it and asserts the file dir
+  entry shows size 4, not 0). T15 also illustrates two non-obvious
+  test-side requirements: (a) a .COM exec'ing another .COM must
+  call AH=4Ah to shrink its MCB first since shell-launched .COMs
+  own all available memory, and (b) AH=4B leaves DS=SHELL_SEG on
+  both success and failure, so callers must reset DS *before*
+  checking CF if they print error messages.
+
+AH=45/46 honor runtime files_limit (6f81e66)
+  Both DUP loops scanned/validated against MAX_HANDLES instead of
+  [cs:files_limit], so a CONFIG.SYS FILES= setting below
+  MAX_HANDLES could yield handles other I/O calls reject as
+  invalid. One-line fixes in each. (No test — the bug is only
+  observable when FILES= < MAX_HANDLES, and stock CONFIG.SYS has
+  FILES=20 == MAX_HANDLES.)
+
+Emulator-side fixes
+-------------------
+
+io.asm: CRTC index/data port reads (3f7690c)
+  Reads of $3D4/$3D5 and $3B4/$3B5 fell through to _irp_cga_other
+  and unconditionally returned 0. Guests doing OUT 3D4,X / IN AL,
+  3D5h to read back cursor or save/restore CRTC state saw zeros.
+  Now $3D4/$3B4 reads return the io_crtc_reg latch; $3D5/$3B5
+  reads return io_save_a/io_save_b for registers 0Eh/0Fh, 0 for
+  others.
+  Also stopped overloading io_crtc_reg as a screen-code scratch
+  in INT 10h AH=09/0A — added io_int10_char so an INT 10h call
+  between a guest's OUT 3D4 and OUT/IN 3D5 can't clobber the
+  index latch.
+
+save_floppy_drive: load filename from per-drive slot (9d172df)
+  floppy_fname_page is shared with menu_read_filename, so the
+  most recent mount/prompt could leave a stale name there. Saving
+  drive A after mounting B would write A's contents to B's image
+  file. Repopulate from drive_a_fname / drive_b_fname based on
+  the drive arg before calling Hyppo setname; refuse outright if
+  the per-drive slot is empty (Hyppo setname on zero-length
+  silently no-ops, which would have made the save operate on
+  whatever filename was previously set).
+
+menu_tab_handler: flush + invalidate data cache before menu (0202ac5)
+  Cache backing store ($9200-$95FF) and the cache tags / dirty
+  bits in ZP $90-$9C are both fair game for KERNAL while the menu
+  is up. The TAB handler saved ZP without flushing or invalidating,
+  so on resume the saved cache tags still claimed lines were dirty
+  and the next eviction would DMA whatever bytes the menu/KERNAL
+  left in $9200 back to attic — silently corrupting guest RAM.
+  Fix: cache_flush_all then cache_invalidate_all before saving ZP.
+  Cost is paid once per menu entry, invisible to normal emulation.
+
+Performance / cleanup
+---------------------
+
+cursor_update: drop the 32-bit multiplier for scr_col*8 (bded72d)
+  scr_col tops out at 79 so scr_col*8 fits in 10 bits — three
+  asl/rol pairs replace 8 multiplier setup writes + 2 result
+  reads. Roughly cycle-neutral but frees the multiplier and
+  reads cleaner.
+
+Remove dead sti_shadow_flag store (this commit)
+  decode.asm:53 saved raw_opcode into sti_shadow_flag every
+  emulated instruction. grep shows zero readers — the actual
+  STI/MOV-SS/POP-SS shadow runs through irq_inhibit. Removing
+  the lda+sta saves 8 cycles per emulated 8086 instruction in
+  the hottest path in the emulator. The variable definition in
+  globals.asm was also cleaned up so $8F00 is freed.
+
+FIXTEST coverage
+-----------------
+
+Grew from 7 tests to 15 (T1..T15) plus a tiny child program
+(T15CHLD.COM) for term_common coverage. Most tests added in this
+sweep also exercise edge cases the bug originally hid behind
+(e.g. T11 includes truncate-then-append on the same handle to
+catch the post-truncate SFT-state bug; T12 includes both reject
+and positive-path renames; T13 covers both AH=3C and AH=3D
+handle scans).
+
+Notable test-infrastructure lessons:
+  - INT 21h handlers should preserve ES per the DOS contract;
+    several didn't (notably AH=36h, AH=56h's pre-fix variant).
+    Tests that use stosb after INT 21h calls now defensively
+    push cs / pop es to stay robust against handlers that don't
+    follow the contract.
+  - .COM tests that EXEC a child must AH=4A-shrink first.
+
+(Status of older sections preserved below for history.)
+
 
 RECENT CHANGES (2026-04-20, part 3 — DEBUG deep polish)
 =========================================================
