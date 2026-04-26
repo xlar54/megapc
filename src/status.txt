@@ -225,6 +225,27 @@ Drop per-instruction update_opcode_ptr from ml_next (af19f05)
   console), Multiplan, full FIXTEST suite (T1..T15), and
   DEBUG-T single-step through MOV/INC sequence — all green.
 
+Throttle ml_next service polls (b893542)
+  ml_next was reading $D610 (keyboard) and $D7FA (frame counter)
+  on every emulated instruction — ~18 cycles burned on probes
+  that almost never act (TAB on user keypress; frame counter
+  changes at 50/60 Hz, useful tick at 18.2 Hz).
+
+  Add ml_poll_ctr (ZP $A6) — decrement every instruction, fire
+  the polls only when it underflows. ML_POLL_PERIOD constant in
+  main.asm (=16) sets the cadence; well below the human TAB-
+  response window and the 20 ms frame interval, so latency stays
+  imperceptible.
+
+  Cycle math: was 18/inst, now ~9.4/inst at PERIOD=16. Net save
+  ~8-9 cycles per emulated instruction. Combined with the
+  update_opcode_ptr removal and the sti_shadow_flag deletion,
+  the ml_next/decode hot path now runs ~85+ cycles lighter per
+  instruction than before this sweep.
+
+  Tested: same gauntlet as above — TAB still feels instant, no
+  observable timer drift.
+
 FIXTEST coverage
 -----------------
 
