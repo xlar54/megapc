@@ -8590,6 +8590,12 @@ int21_handler:
 	mov	si, cmd_buffer
 	call	resolve_path
 	jc	.i21_3c_err_pop
+	; resolve_path returns CF=0 with exec_fname filled with spaces when
+	; the input is empty or ends in '\' (no filename component). That's
+	; valid for CHDIR/findfirst-style callers but creating a directory
+	; entry for it would produce an all-spaces 8.3 name — refuse here.
+	cmp	byte [exec_fname], ' '
+	je	.i21_3c_err_pop
 
 	; Read resolved directory
 	call	read_resolved_dir
@@ -11221,6 +11227,11 @@ int21_handler:
 	; Use resolve_path + mkdir logic
 	call	resolve_path
 	jc	.i21_39_err
+	; resolve_path leaves exec_fname as 11 spaces when the input has no
+	; filename component (e.g. "\" or "\TEST\"). Don't let mkdir create
+	; an all-spaces directory entry from that.
+	cmp	byte [exec_fname], ' '
+	je	.i21_39_err
 	call	read_resolved_dir
 	jc	.i21_39_err
 	; Check duplicate

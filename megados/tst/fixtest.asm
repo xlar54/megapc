@@ -45,6 +45,9 @@
 ;            empty but JFT[bx] points at someone else's SFT, so a
 ;            naive scan would overwrite the alias and strand refcount
 ;            on the original SFT.
+;   Test 14: AH=3C/39 must reject empty or path-only inputs that
+;            resolve_path leaves with an all-spaces exec_fname,
+;            otherwise they'd create blank 8.3 directory entries.
 ;
 ; All test files live on drive A in the current directory. Each test
 ; prints PASS or FAIL with a short tag; summary line at the end.
@@ -76,6 +79,7 @@
 	call	test11
 	call	test12
 	call	test13
+	call	test14
 
 	call	nl
 	mov	si, msg_summary
@@ -84,14 +88,14 @@
 	call	pdec
 	mov	si, msg_slash
 	call	pstr
-	mov	al, 13
+	mov	al, 14
 	xor	ah, ah
 	call	pdec
 	mov	si, msg_passed
 	call	pstr
 	call	nl
 
-	mov	al, 13
+	mov	al, 14
 	sub	al, [pass_count]
 	mov	ah, 0x4C
 	int	0x21
@@ -3216,6 +3220,107 @@ test13:
 	ret
 
 ; ============================================================================
+; Test 14 — AH=3C / AH=39 must reject paths where resolve_path leaves
+; exec_fname all-spaces (empty input or trailing-slash path), so they
+; can't create blank-named directory entries.
+; ============================================================================
+test14:
+	mov	si, msg_t14
+	call	pstr
+
+	push	cs
+	pop	ds
+	push	cs
+	pop	es
+
+	; --- AH=3C with empty filename
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t14_empty
+	int	0x21
+	jnc	.t14_fail_3c_empty
+	; --- AH=3C with root path "\"
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t14_root
+	int	0x21
+	jnc	.t14_fail_3c_root
+	; --- AH=39 with empty filename
+	mov	ah, 0x39
+	mov	dx, fn_t14_empty
+	int	0x21
+	jnc	.t14_fail_39_empty
+	; --- AH=39 with root path "\"
+	mov	ah, 0x39
+	mov	dx, fn_t14_root
+	int	0x21
+	jnc	.t14_fail_39_root
+
+	; Sanity: a real create with a sane name still works (proves we
+	; didn't break the happy path).
+	mov	ah, 0x3C
+	xor	cx, cx
+	mov	dx, fn_t14_real
+	int	0x21
+	jc	.t14_fail_real
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	dx, fn_t14_real
+	mov	ah, 0x41
+	int	0x21
+
+	; PASS
+	mov	si, msg_pass
+	call	pstr
+	call	nl
+	inc	word [pass_count]
+	ret
+
+.t14_fail_3c_empty:
+	; If a handle was actually returned, close + delete it.
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t14_3c_empty
+	call	pstr
+	call	nl
+	ret
+.t14_fail_3c_root:
+	mov	bx, ax
+	mov	ah, 0x3E
+	int	0x21
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t14_3c_root
+	call	pstr
+	call	nl
+	ret
+.t14_fail_39_empty:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t14_39_empty
+	call	pstr
+	call	nl
+	ret
+.t14_fail_39_root:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t14_39_root
+	call	pstr
+	call	nl
+	ret
+.t14_fail_real:
+	mov	si, msg_fail
+	call	pstr
+	mov	si, msg_t14_real
+	call	pstr
+	call	nl
+	ret
+
+; ============================================================================
 ; filesize — open file, seek to end, return size in DX:AX, close
 ; Input:  DX = filename ptr
 ; Output: DX:AX = file size, CF=0 success
@@ -3451,6 +3556,13 @@ msg_t13_b_collision db	'AH=3C create returned the dup-aliased handle', 0
 msg_t13_b_dup_read db	're-read through dup handle after AH=3C failed', 0
 msg_t13_b_dup_content db 'dup handle clobbered by AH=3C create', 0
 
+msg_t14		db	'T14 empty/path-only create rejected: ', 0
+msg_t14_3c_empty db	'AH=3C "" returned success', 0
+msg_t14_3c_root db	'AH=3C "\\" returned success', 0
+msg_t14_39_empty db	'AH=39 "" returned success', 0
+msg_t14_39_root db	'AH=39 "\\" returned success', 0
+msg_t14_real	db	'sane AH=3C create regressed', 0
+
 fn_t1		db	'T1.TMP', 0
 fn_t2a		db	'T2A.TMP', 0
 fn_t2b		db	'T2B.TMP', 0
@@ -3494,6 +3606,10 @@ fn_t13b		db	'T13B.TMP', 0
 fn_t13c		db	'T13C.TMP', 0
 t13_a_seed	db	'A'
 t13_b_seed	db	'B'
+
+fn_t14_empty	db	0
+fn_t14_root	db	'\', 0
+fn_t14_real	db	'T14.TMP', 0
 fn_t12bad_path	db	'\T12X.TMP', 0
 fn_t12bad_drive	db	'A:T12X.TMP', 0
 
