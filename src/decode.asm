@@ -40,6 +40,12 @@ main_loop:
         jsr compute_cs_base
         jsr compute_ss_base
         jsr compute_ds_base
+        ; Initialize opcode_ptr from current CS:IP. ml_next no longer
+        ; recomputes it on every instruction; instead, fetch_byte keeps
+        ; it in sync inline (with bank-boundary resync via update_opcode_ptr)
+        ; and every IP-modifying opcode handler calls update_opcode_ptr
+        ; explicitly. This entry point seeds it for the first instruction.
+        jsr update_opcode_ptr
 
 ml_next:
         ; --- Check for TAB key (return to menu) ---
@@ -389,19 +395,26 @@ _ml_code_hit:
         bra _ml_ptr_done
 
 _ml_exit_code_cache:
-        ; Linear addr < $10000 — switch back to direct bank 4 access
+        ; Linear addr < $10000 — switch back to direct bank 4 access.
+        ; opcode_ptr currently points into CODE_CACHE_BUF, so we have to
+        ; recompute it for bank 4. (The normal sequential path doesn't
+        ; need this — fetch_byte keeps opcode_ptr in sync inline.)
         lda #0
         sta cs_in_attic
-        ; Fall through to normal path
+        jsr update_opcode_ptr
 
 _ml_normal_ptr:
-        ; --- Normal: update opcode_ptr from full linear CS:IP ---
-        ; update_opcode_ptr now classifies by full linear address
-        ; and may set cs_in_attic=1 if we crossed into attic range.
-        ; If so, re-enter main loop to use code cache path.
-        jsr update_opcode_ptr
-        lda cs_in_attic
-        bne ml_next             ; Switched to attic — re-enter for code cache
+        ; opcode_ptr is already correct here:
+        ;   - On main_loop entry, the entry-side update_opcode_ptr ran.
+        ;   - On normal sequential execution, fetch_byte advances
+        ;     opcode_ptr in lockstep with reg_ip, calling
+        ;     update_opcode_ptr itself on bank-boundary or IP wrap.
+        ;   - Every IP/CS-modifying opcode handler (Jcc, JMP, CALL,
+        ;     RET, IRET, INT, LOOP, etc.) calls update_opcode_ptr
+        ;     before returning to opcode_done.
+        ; So the per-instruction recompute that used to live here was
+        ; pure waste — ~70 cycles burned per emulated instruction in
+        ; the hot path. Removed.
 
 _ml_ptr_done:
 
