@@ -1064,6 +1064,47 @@ KNOWN BUGS
   call. May slow console output noticeably. Could throttle to
   check every Nth character if performance is an issue.
 
+WIP branch: ansi-correct
+=========================
+
+Minimal one-line architectural fix: route INT 21h AH=06 through DOS
+instead of intercepting it for "speed" with con_write_char.
+
+Why: real MS-DOS routes AH=06 through the CON device chain, exactly
+like AH=02/09/40. When ANSI.SYS replaces CON, real ANSI.SYS sees the
+bytes from AH=06 and interprets ESC sequences. Programs like Zork
+emit their output via AH=06 and rely on this. Master's fast intercept
+silently dropped Zork into "ANSI sequences print as text" mode.
+Confirmed by user comparison against MS-DOS 3.3 + ANSI.SYS: Zork I
+renders correctly there with full 80-col text wrap and a status line.
+
+What's NOT changed (deliberately, to match real DOS):
+  - INT 10h AH=0E (BIOS teletype) still goes to BIOS and writes
+    directly to vidbuf. Real ANSI.SYS doesn't see INT 10h calls
+    either; programs that emit ANSI through INT 10h have always
+    rendered as text on real DOS too.
+  - INT 29h still hits the emulator's con_write_char fast path.
+    Real DOS typically installs a tiny INT 29h stub that calls
+    AH=02 — could be added later for parity, but isn't strictly
+    needed since most programs use AH=02/06/09/40 directly.
+  - Default CON driver in COMMAND.COM still uses INT 10h AH=0E
+    per char. No recursion concern because we no longer intercept
+    INT 10h AH=0E.
+
+GW-BASIC PRINT CHR\$(27);... still won't trigger ANSI.SYS — same
+behavior as on real MS-DOS. GW-BASIC bypasses ANSI.SYS by design
+(direct vidbuf or BIOS path that doesn't reach the DOS device chain).
+Not a fixable architectural issue; matches real-DOS observed behavior.
+
+Compared to the earlier `ansi-route-through-dos` branch:
+  - That branch over-engineered by also routing INT 10h AH=0E
+    through DOS (which real DOS doesn't do), forcing a SHELL_SEG
+    recursion guard in the emulator and a default-CON rewrite.
+  - This branch is a single-file 8-line diff (opcodes.asm). The
+    minimum that matches real DOS behavior.
+
+Status: builds clean, ready for Zork retest.
+
 TODO
 =====
 

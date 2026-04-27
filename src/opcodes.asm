@@ -2828,12 +2828,14 @@ _ii_continue:
         jmp opcode_done
 
 _ii_int21:
-        ; Only intercept AH=06 (direct console I/O output) for speed.
-        ; AH=02 and AH=09 must go through DOS handler for I/O redirection.
-        lda reg_ah
-        cmp #$06
-        beq _ii_int21_ah06
-        ; All other INT 21h functions: let DOS handle via IVT
+        ; All INT 21h functions go through DOS via IVT — including AH=06.
+        ;
+        ; Real MS-DOS routes AH=06 (direct console I/O) through the CON
+        ; device chain just like AH=02/09/40, which means a loaded
+        ; ANSI.SYS sees AH=06 output and interprets ESC sequences in it.
+        ; Programs like Zork and BBS clients depend on this. The previous
+        ; "fast path" that called con_write_char directly bypassed
+        ; ANSI.SYS, breaking those programs.
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
