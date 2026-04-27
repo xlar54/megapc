@@ -490,8 +490,7 @@ root_files = ['EDIT.COM', 'EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
               'DEBUG.COM',
               'ANSI.SYS', 'TESTDRV.SYS', 'CONFIG.SYS',
               'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT',
-              'A1TEST.COM', 'TRC21.COM', 'TRC.COM', 'TRCDUMP.COM',
-              'TRC10.COM', 'TRC10D.COM', 'ANSITEST.COM']
+              'A1TEST.COM']
 
 # Auto-discover .BAS files in target/ and add to root
 for fname in sorted(os.listdir(TARGET_DIR)):
@@ -505,6 +504,8 @@ test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
               'FDTEST.COM', 'BND64K.COM', 'FIXTEST.COM', 'T15CHLD.COM',
               'ARGS.COM',
               'BEEP.COM',
+              'TRC.COM', 'TRC21.COM', 'TRCDUMP.COM',
+              'TRC10.COM', 'TRC10D.COM', 'ANSITEST.COM',
               'TESTBAT.BAT', 'TESTBAT2.BAT',
               'HELLO.EXE', 'README.TXT']
 
