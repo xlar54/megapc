@@ -1104,7 +1104,23 @@ int10:
 	je	int10_get_vm
 	cmp	ah, 0x13 ; Write string
 	je	int10_write_string
+	cmp	ah, 0x12 ; EGA/VGA alternate select
+	je	int10_alt_select
 
+	iret
+
+  int10_alt_select:
+	; AH=12, BL=10: Get EGA configuration
+	;   Returns BH=0 (color), BL=3 (256K video memory),
+	;           CH=0 (no feature bits), CL=9 (switch settings = colour 80x25)
+	; All other BL values: leave registers untouched and return.
+	cmp	bl, 0x10
+	jne	int10_alt_select_done
+	mov	bh, 0
+	mov	bl, 3
+	mov	ch, 0
+	mov	cl, 9
+  int10_alt_select_done:
 	iret
 
   int10_set_vm:
@@ -3636,9 +3652,9 @@ num_hd		db	0
 		dd	0
 kbbuf_start_ptr	dw	0x001e
 kbbuf_end_ptr	dw	0x003e
-vid_rows	db	25         ; at 40:84
-		db	0
-		db	0
+vid_rows	db	24         ; at 40:84 — rows MINUS ONE per PC BIOS spec
+		db	16         ; 40:85 — char height (scan lines per char), 16 for VGA-ish
+		db	0          ; 40:86
 vidmode_opt	db	0 ; 0x70
 		db	0 ; 0x89
 		db	0 ; 0x51

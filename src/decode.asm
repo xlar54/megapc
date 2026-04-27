@@ -178,12 +178,10 @@ _ml_no_refresh:
         bne +
         inc tick_counter+1
 +
-        ; --- One-time BDA repair after DOS boot ---
+        ; --- One-time BDA repair (run on FIRST tick — Zork & friends may
+        ;     query screen dimensions before the old 8-tick delay elapsed) ---
         lda bda_repair_done               ; BDA repair done flag
         bne _ml_tick_done
-        lda tick_counter+1
-        cmp #$08                ; Wait for enough ticks after boot
-        bcc _ml_tick_done
         lda #1
         sta bda_repair_done               ; Mark done — only run once
         ; Equipment word at 40:10
@@ -201,10 +199,25 @@ _ml_no_refresh:
         lda #VIDEO_MODE
         ldz #0
         sta [temp_ptr],z
-        ; Columns at 40:4A
+        ; Columns at 40:4A (word — also clear high byte explicitly)
         lda #$4A
         sta temp_ptr
         lda #80
+        ldz #0
+        sta [temp_ptr],z
+        lda #0
+        ldz #1
+        sta [temp_ptr],z
+        ; Rows-minus-one at 40:84
+        lda #$84
+        sta temp_ptr
+        lda #24
+        ldz #0
+        sta [temp_ptr],z
+        ; Char height (scan lines/char) at 40:85
+        lda #$85
+        sta temp_ptr
+        lda #16
         ldz #0
         sta [temp_ptr],z
         ; Memory size at 40:13

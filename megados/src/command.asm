@@ -5178,7 +5178,34 @@ load_drive_bpb:
 	ret
 
 .ldb_defaults:
-	; Reset to 360K defaults
+	; No valid BPB (DOS 1.x style floppy). Read FAT sector 1 byte 0 —
+	; that's the media descriptor, which uniquely identifies the layout.
+	push	es
+	mov	ax, SHELL_SEG
+	mov	es, ax
+	mov	bx, bpb_buffer
+	mov	ah, 0x02
+	mov	al, 1
+	mov	ch, 0
+	mov	cl, 2			; LBA 1 = C=0,H=0,S=2
+	mov	dh, 0
+	mov	dl, [resolved_drive]
+	int	0x13
+	pop	es
+	jc	.ldb_set_360		; FAT read failed — assume 360K
+	mov	al, [bpb_buffer]	; media descriptor
+	cmp	al, 0xFC
+	je	.ldb_set_180
+	cmp	al, 0xFE
+	je	.ldb_set_160
+	cmp	al, 0xFF
+	je	.ldb_set_320
+	cmp	al, 0xF9
+	je	.ldb_set_720
+	cmp	al, 0xF0
+	je	.ldb_set_144
+	; Unknown media → fall through to 360K
+.ldb_set_360:
 	mov	word [geo_spt], 9
 	mov	word [geo_heads], 2
 	mov	word [geo_spc], 2
@@ -5194,6 +5221,97 @@ load_drive_bpb:
 	mov	word [geo_epc], 32
 	mov	word [geo_total_clust], 354
 	mov	word [geo_max_clust], 355
+	jmp	.ldb_def_done
+.ldb_set_180:
+	; 180K SS DD 5.25" — DOS 1.x: 1 head, 40 cyl, 9 SPT, SPC=1, 1 SPF, 64 root entries
+	mov	word [geo_spt], 9
+	mov	word [geo_heads], 1
+	mov	word [geo_spc], 1
+	mov	word [geo_root_sec], 3
+	mov	word [geo_root_secs], 4
+	mov	word [geo_data_start], 7
+	mov	word [geo_total], 360
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 1
+	mov	word [geo_rootents], 64
+	mov	word [geo_bpc], 512
+	mov	byte [geo_media], 0xFC
+	mov	word [geo_epc], 16
+	mov	word [geo_total_clust], 353
+	mov	word [geo_max_clust], 354
+	jmp	.ldb_def_done
+.ldb_set_160:
+	; 160K SS DD 5.25" — 1 head, 40 cyl, 8 SPT, SPC=1, 1 SPF, 64 root entries
+	mov	word [geo_spt], 8
+	mov	word [geo_heads], 1
+	mov	word [geo_spc], 1
+	mov	word [geo_root_sec], 3
+	mov	word [geo_root_secs], 4
+	mov	word [geo_data_start], 7
+	mov	word [geo_total], 320
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 1
+	mov	word [geo_rootents], 64
+	mov	word [geo_bpc], 512
+	mov	byte [geo_media], 0xFE
+	mov	word [geo_epc], 16
+	mov	word [geo_total_clust], 313
+	mov	word [geo_max_clust], 314
+	jmp	.ldb_def_done
+.ldb_set_320:
+	; 320K DS DD 5.25" — 2 heads, 40 cyl, 8 SPT, SPC=2, 1 SPF, 112 root entries
+	mov	word [geo_spt], 8
+	mov	word [geo_heads], 2
+	mov	word [geo_spc], 2
+	mov	word [geo_root_sec], 3
+	mov	word [geo_root_secs], 7
+	mov	word [geo_data_start], 10
+	mov	word [geo_total], 640
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 1
+	mov	word [geo_rootents], 112
+	mov	word [geo_bpc], 1024
+	mov	byte [geo_media], 0xFF
+	mov	word [geo_epc], 32
+	mov	word [geo_total_clust], 315
+	mov	word [geo_max_clust], 316
+	jmp	.ldb_def_done
+.ldb_set_720:
+	; 720K DS DD 3.5" — 2 heads, 80 cyl, 9 SPT, SPC=2, 3 SPF, 112 root entries
+	mov	word [geo_spt], 9
+	mov	word [geo_heads], 2
+	mov	word [geo_spc], 2
+	mov	word [geo_root_sec], 7
+	mov	word [geo_root_secs], 7
+	mov	word [geo_data_start], 14
+	mov	word [geo_total], 1440
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 3
+	mov	word [geo_rootents], 112
+	mov	word [geo_bpc], 1024
+	mov	byte [geo_media], 0xF9
+	mov	word [geo_epc], 32
+	mov	word [geo_total_clust], 713
+	mov	word [geo_max_clust], 714
+	jmp	.ldb_def_done
+.ldb_set_144:
+	; 1.44MB DS HD 3.5" — 2 heads, 80 cyl, 18 SPT, SPC=1, 9 SPF, 224 root entries
+	mov	word [geo_spt], 18
+	mov	word [geo_heads], 2
+	mov	word [geo_spc], 1
+	mov	word [geo_root_sec], 19
+	mov	word [geo_root_secs], 14
+	mov	word [geo_data_start], 33
+	mov	word [geo_total], 2880
+	mov	word [geo_fat_sec], 1
+	mov	word [geo_spf], 9
+	mov	word [geo_rootents], 224
+	mov	word [geo_bpc], 512
+	mov	byte [geo_media], 0xF0
+	mov	word [geo_epc], 16
+	mov	word [geo_total_clust], 2847
+	mov	word [geo_max_clust], 2848
+.ldb_def_done:
 	mov	al, [resolved_drive]
 	mov	[geo_active_drv], al
 	pop	ds
@@ -10543,11 +10661,31 @@ int21_handler:
 	je	.i21_44_output_ready
 	cmp	al, 8
 	je	.i21_44_removable
+	cmp	al, 2
+	je	.i21_44_zero_ok
+	cmp	al, 3
+	je	.i21_44_zero_ok
+	cmp	al, 4
+	je	.i21_44_zero_ok
+	cmp	al, 5
+	je	.i21_44_zero_ok
 	; Other subfunctions — return error
 	mov	ax, 1
 	push	bp
 	mov	bp, sp
 	or	word [bp+6], 0x0001
+	pop	bp
+	iret
+
+.i21_44_zero_ok:
+	; Generic IOCTL read/write control data on character/block devices.
+	; Programs (e.g. Zork-era Infocom interpreters) probe these on stdout
+	; to decide between fast direct-video and slow dumb-terminal paths.
+	; Return success with 0 bytes transferred, leaving CF clear.
+	xor	ax, ax
+	push	bp
+	mov	bp, sp
+	and	word [bp+6], 0xFFFE
 	pop	bp
 	iret
 
