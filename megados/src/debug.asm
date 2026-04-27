@@ -1,6 +1,6 @@
 ; DEBUG.COM - MegaDOS memory debugger (first-pass DEBUG clone)
 ; Supported commands:
-;   A addr ...           Assemble a limited instruction set
+;   A addr ...           Assemble register/no-memory instruction forms
 ;   C start end dest    Compare memory
 ;   D [addr] [end]      Dump memory
 ;   E addr bytes...     Enter hex bytes
@@ -812,13 +812,14 @@ cmd_regs:
 	je	.flag_edit
 	; Not "F<ws>" — fall through (probably FL)
 .parse_reg_ptr_call:
+	mov	[reg_name_ptr], si
 	call	parse_reg_ptr
 	jc	cmd_error
 	mov	[reg_ptr], bx
 	mov	[reg_size], al
 	call	skip_delims
 	cmp	byte [si], 0
-	je	.show_all
+	je	.edit_one
 	call	parse_hex_word
 	jc	cmd_error
 	mov	bx, [reg_ptr]
@@ -837,6 +838,52 @@ cmd_regs:
 	jne	cmd_error
 
 .show_all:
+	call	show_target_regs
+	jmp	main_loop
+
+.edit_one:
+	mov	bx, [reg_name_ptr]
+	mov	al, [bx]
+	call	to_upper
+	call	putc
+	mov	al, [bx + 1]
+	call	to_upper
+	call	putc
+	mov	al, ' '
+	call	putc
+	mov	bx, [reg_ptr]
+	cmp	byte [reg_size], 1
+	jne	.cr_edit_word
+	mov	al, [bx]
+	call	print_hex8
+	jmp	.cr_edit_prompt
+.cr_edit_word:
+	mov	ax, [bx]
+	call	print_hex16
+.cr_edit_prompt:
+	call	crlf
+	mov	al, ':'
+	call	putc
+	call	read_command
+	mov	si, cmd_text
+	call	skip_delims
+	cmp	byte [si], 0
+	je	main_loop
+	call	parse_hex_word
+	jc	cmd_error
+	mov	bx, [reg_ptr]
+	cmp	byte [reg_size], 1
+	jne	.cr_edit_store_word
+	or	ah, ah
+	jne	cmd_error
+	mov	[bx], al
+	jmp	.cr_edit_done
+.cr_edit_store_word:
+	mov	[bx], ax
+.cr_edit_done:
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	cmd_error
 	call	show_target_regs
 	jmp	main_loop
 
@@ -919,6 +966,22 @@ cmd_unassemble:
 	call	skip_delims
 	cmp	byte [si], 0
 	je	.u_default_end
+	; "L count" syntax: u_end_off = work_start + count - 1
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.u_end_addr
+	inc	si
+	call	skip_delims
+	call	parse_hex_word
+	jc	cmd_error
+	or	ax, ax
+	jz	cmd_error			; L 0 invalid
+	dec	ax
+	add	ax, [work_start]
+	mov	[u_end_off], ax
+	jmp	.u_run
+.u_end_addr:
 	; Parse second argument as inclusive end address (classic DEBUG syntax).
 	call	parse_hex_word
 	jc	cmd_error
@@ -1282,6 +1345,22 @@ cmd_dump:
 	cmp	byte [si], 0
 	je	.dump_default_end
 
+	; "L count" syntax: work_end = work_start + count - 1
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.dump_end_addr
+	inc	si
+	call	skip_delims
+	call	parse_hex_word
+	jc	cmd_error
+	or	ax, ax
+	jz	cmd_error
+	dec	ax
+	add	ax, [work_start]
+	mov	[work_end], ax
+	jmp	.dump_do
+.dump_end_addr:
 	call	parse_addr
 	jc	cmd_error
 	cmp	dx, [work_seg]
@@ -2718,6 +2797,23 @@ parse_range:
 	mov	[work_seg], dx
 	mov	[work_start], ax
 	call	skip_delims
+	; "L count" syntax: work_end = work_start + count - 1
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.pr_end_addr
+	inc	si
+	call	skip_delims
+	call	parse_hex_word
+	jc	.pr_fail
+	or	ax, ax
+	jz	.pr_fail			; L 0 invalid
+	dec	ax
+	add	ax, [work_start]
+	mov	[work_end], ax
+	clc
+	ret
+.pr_end_addr:
 	call	parse_addr
 	jc	.pr_fail
 	cmp	dx, [work_seg]
@@ -3034,6 +3130,17 @@ skip_delims:
 	inc	si
 	jmp	.sd_loop
 
+skip_spaces:
+.ss_loop:
+	cmp	byte [si], ' '
+	je	.ss_step
+	cmp	byte [si], 9
+	je	.ss_step
+	ret
+.ss_step:
+	inc	si
+	jmp	.ss_loop
+
 hex_value:
 	call	to_upper
 	cmp	al, '0'
@@ -3223,6 +3330,57 @@ disasm_current:
 	mov	al, ' '
 	call	putc
 
+	mov	byte [disasm_seg_override], 0
+	mov	byte [disasm_rep_prefix], 0
+	mov	cx, 4				; consume up to 4 prefix bytes
+.du_pfx_loop:
+	mov	al, [es:bx]
+	cmp	al, 0x26
+	je	.du_pfx_seg
+	cmp	al, 0x2E
+	je	.du_pfx_seg
+	cmp	al, 0x36
+	je	.du_pfx_seg
+	cmp	al, 0x3E
+	je	.du_pfx_seg
+	cmp	al, 0xF0
+	je	.du_pfx_lockrep
+	cmp	al, 0xF2
+	je	.du_pfx_lockrep
+	cmp	al, 0xF3
+	je	.du_pfx_lockrep
+	jmp	.du_pfx_done
+.du_pfx_seg:
+	mov	[disasm_seg_override], al
+	inc	bx
+	loop	.du_pfx_loop
+	jmp	.du_pfx_done
+.du_pfx_lockrep:
+	mov	[disasm_rep_prefix], al
+	inc	bx
+	loop	.du_pfx_loop
+.du_pfx_done:
+	; Print LOCK/REP/REPNE mnemonic (with trailing space) if present
+	mov	al, [disasm_rep_prefix]
+	or	al, al
+	jz	.du_no_rep_pfx
+	cmp	al, 0xF0
+	je	.du_print_lock
+	cmp	al, 0xF2
+	je	.du_print_repne
+	mov	si, str_rep
+	jmp	.du_print_pfx
+.du_print_lock:
+	mov	si, str_lock
+	jmp	.du_print_pfx
+.du_print_repne:
+	mov	si, str_repne
+.du_print_pfx:
+	call	print_str
+	mov	al, ' '
+	call	putc
+.du_no_rep_pfx:
+
 	mov	al, [es:bx]
 	mov	[opcode_byte], al
 	cmp	al, 0x90
@@ -3247,6 +3405,156 @@ disasm_current:
 	je	.du_jmp_far
 	cmp	al, 0x9A
 	je	.du_call_far
+	cmp	al, 0x70
+	jb	.du_after_jcc
+	cmp	al, 0x7F
+	jbe	.du_jcc_short
+.du_after_jcc:
+	cmp	al, 0xE0
+	jb	.du_after_loop_jcxz
+	cmp	al, 0xE3
+	jbe	.du_loop_short
+.du_after_loop_jcxz:
+	cmp	al, 0x06
+	je	.du_push_seg
+	cmp	al, 0x0E
+	je	.du_push_seg
+	cmp	al, 0x16
+	je	.du_push_seg
+	cmp	al, 0x1E
+	je	.du_push_seg
+	cmp	al, 0x07
+	je	.du_pop_seg
+	cmp	al, 0x17
+	je	.du_pop_seg
+	cmp	al, 0x1F
+	je	.du_pop_seg
+	cmp	al, 0x27
+	je	.du_daa
+	cmp	al, 0x2F
+	je	.du_das
+	cmp	al, 0x37
+	je	.du_aaa
+	cmp	al, 0x3F
+	je	.du_aas
+	cmp	al, 0x98
+	je	.du_cbw
+	cmp	al, 0x99
+	je	.du_cwd
+	cmp	al, 0x9B
+	je	.du_wait
+	cmp	al, 0x9C
+	je	.du_pushf
+	cmp	al, 0x9D
+	je	.du_popf
+	cmp	al, 0x9E
+	je	.du_sahf
+	cmp	al, 0x9F
+	je	.du_lahf
+	; A4-A7 = MOVS/CMPS, AA-AF = STOS/LODS/SCAS. A8/A9 are TEST acc,imm
+	; (handled later) and must NOT fall into the string-op range.
+	cmp	al, 0xA4
+	jb	.du_after_string_ops
+	cmp	al, 0xA7
+	jbe	.du_string_op
+	cmp	al, 0xAA
+	jb	.du_after_string_ops
+	cmp	al, 0xAF
+	jbe	.du_string_op
+.du_after_string_ops:
+	cmp	al, 0xCE
+	je	.du_into
+	cmp	al, 0xC2
+	je	.du_ret_imm
+	cmp	al, 0xCA
+	je	.du_retf_imm
+	cmp	al, 0xD4
+	je	.du_aam
+	cmp	al, 0xD5
+	je	.du_aad
+	cmp	al, 0xE4
+	jb	.du_after_io
+	cmp	al, 0xE7
+	jbe	.du_inout_imm
+	cmp	al, 0xEC
+	jb	.du_after_io
+	cmp	al, 0xEF
+	jbe	.du_inout_dx
+.du_after_io:
+	cmp	al, 0xF0
+	je	.du_lock
+	cmp	al, 0xF2
+	je	.du_repne
+	cmp	al, 0xF3
+	je	.du_rep
+	cmp	al, 0xF4
+	je	.du_hlt
+	cmp	al, 0xF5
+	je	.du_cmc
+	cmp	al, 0xF8
+	je	.du_clc
+	cmp	al, 0xF9
+	je	.du_stc
+	cmp	al, 0xFA
+	je	.du_cli
+	cmp	al, 0xFB
+	je	.du_sti
+	cmp	al, 0xFC
+	je	.du_cld
+	cmp	al, 0xFD
+	je	.du_std
+	cmp	al, 0x8D
+	je	.du_lea
+	cmp	al, 0xC4
+	je	.du_les
+	cmp	al, 0xC5
+	je	.du_lds
+	cmp	al, 0x86
+	je	.du_xchg_rm
+	cmp	al, 0x87
+	je	.du_xchg_rm
+	cmp	al, 0x8C
+	je	.du_mov_seg_rm
+	cmp	al, 0x8E
+	je	.du_mov_seg_rm
+	cmp	al, 0x84
+	je	.du_test_rm
+	cmp	al, 0x85
+	je	.du_test_rm
+	cmp	al, 0xA8
+	je	.du_test_al
+	cmp	al, 0xA9
+	je	.du_test_ax
+	cmp	al, 0xC6
+	je	.du_mov_rm_imm8
+	cmp	al, 0xC7
+	je	.du_mov_rm_imm16
+	cmp	al, 0x8F
+	je	.du_pop_rm
+	cmp	al, 0xA0
+	je	.du_mov_al_mem
+	cmp	al, 0xA1
+	je	.du_mov_ax_mem
+	cmp	al, 0xA2
+	je	.du_mov_mem_al
+	cmp	al, 0xA3
+	je	.du_mov_mem_ax
+	cmp	al, 0xF6
+	je	.du_f6f7
+	cmp	al, 0xF7
+	je	.du_f6f7
+	cmp	al, 0xD0
+	jb	.du_after_shift
+	cmp	al, 0xD3
+	jbe	.du_shift_rm
+	cmp	al, 0xD7
+	je	.du_xlat
+.du_after_shift:
+	cmp	al, 0x91
+	jb	.du_after_xchg_acc
+	cmp	al, 0x97
+	jbe	.du_xchg_acc
+.du_after_xchg_acc:
 	cmp	al, 0x74
 	je	.du_jz_short
 	cmp	al, 0x75
@@ -3275,6 +3583,32 @@ disasm_current:
 	jbe	.du_dec
 
 .du_after_inc:
+	cmp	al, 0x40
+	jae	.du_after_alu_reg
+	mov	dl, al
+	and	dl, 7
+	cmp	dl, 3
+	jbe	.du_alu_rm
+	cmp	dl, 4
+	je	.du_alu_acc_imm8
+	cmp	dl, 5
+	je	.du_alu_acc_imm16
+.du_after_alu_reg:
+	cmp	al, 0x80
+	je	.du_alu_imm8
+	cmp	al, 0x81
+	je	.du_alu_imm16
+	cmp	al, 0x83
+	je	.du_alu_imm8
+	cmp	al, 0x88
+	jb	.du_after_mov_rm
+	cmp	al, 0x8B
+	jbe	.du_mov_rm_reg
+.du_after_mov_rm:
+	cmp	al, 0xFE
+	je	.du_incdec_rm8
+	cmp	al, 0xFF
+	je	.du_incdec_rm16
 	cmp	al, 0x04
 	je	.du_add_al
 	cmp	al, 0x05
@@ -3387,6 +3721,290 @@ disasm_current:
 	call	print_hex16
 	mov	ax, bx
 	add	ax, 5
+	jmp	.du_done
+.du_jcc_short:
+	mov	al, [opcode_byte]
+	call	print_jcc_mnemonic
+	mov	al, [es:bx + 1]
+	cbw
+	mov	dx, bx
+	add	dx, 2
+	add	dx, ax
+	mov	ax, dx
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_loop_short:
+	mov	al, [opcode_byte]
+	call	print_loop_mnemonic
+	mov	al, [es:bx + 1]
+	cbw
+	mov	dx, bx
+	add	dx, 2
+	add	dx, ax
+	mov	ax, dx
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_push_seg:
+	mov	si, str_push
+	call	print_str
+	mov	al, [opcode_byte]
+	shr	al, 1
+	shr	al, 1
+	shr	al, 1
+	and	al, 3
+	call	print_seg_reg_name
+	mov	ax, bx
+	inc	ax
+	jmp	.du_done
+.du_pop_seg:
+	mov	si, str_pop
+	call	print_str
+	mov	al, [opcode_byte]
+	shr	al, 1
+	shr	al, 1
+	shr	al, 1
+	and	al, 3
+	call	print_seg_reg_name
+	mov	ax, bx
+	inc	ax
+	jmp	.du_done
+.du_ret_imm:
+	mov	si, str_ret_sp
+	call	print_str
+	mov	ax, [es:bx + 1]
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 3
+	jmp	.du_done
+.du_retf_imm:
+	mov	si, str_retf_sp
+	call	print_str
+	mov	ax, [es:bx + 1]
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 3
+	jmp	.du_done
+.du_aam:
+	mov	si, str_aam
+	call	print_str
+	mov	al, [es:bx + 1]
+	call	print_hex8
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_aad:
+	mov	si, str_aad
+	call	print_str
+	mov	al, [es:bx + 1]
+	call	print_hex8
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_inout_imm:
+	mov	al, [opcode_byte]
+	and	al, 2
+	jz	.du_in_imm
+	mov	si, str_out
+	call	print_str
+	mov	al, [es:bx + 1]
+	call	print_hex8
+	mov	al, ','
+	call	putc
+	mov	al, [opcode_byte]
+	and	al, 1
+	jnz	.du_out_imm_ax
+	mov	si, str_al
+	call	print_str
+	jmp	.du_inout_imm_done
+.du_out_imm_ax:
+	mov	si, str_ax
+	call	print_str
+	jmp	.du_inout_imm_done
+.du_in_imm:
+	mov	si, str_in
+	call	print_str
+	mov	al, [opcode_byte]
+	and	al, 1
+	jnz	.du_in_imm_ax
+	mov	si, str_al
+	call	print_str
+	jmp	.du_in_imm_port
+.du_in_imm_ax:
+	mov	si, str_ax
+	call	print_str
+.du_in_imm_port:
+	mov	al, ','
+	call	putc
+	mov	al, [es:bx + 1]
+	call	print_hex8
+.du_inout_imm_done:
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_inout_dx:
+	mov	al, [opcode_byte]
+	and	al, 2
+	jz	.du_in_dx
+	mov	si, str_out
+	call	print_str
+	mov	si, str_dx
+	call	print_str
+	mov	al, ','
+	call	putc
+	mov	al, [opcode_byte]
+	and	al, 1
+	jnz	.du_out_dx_ax
+	mov	si, str_al
+	call	print_str
+	jmp	.du_inout_dx_done
+.du_out_dx_ax:
+	mov	si, str_ax
+	call	print_str
+	jmp	.du_inout_dx_done
+.du_in_dx:
+	mov	si, str_in
+	call	print_str
+	mov	al, [opcode_byte]
+	and	al, 1
+	jnz	.du_in_dx_ax
+	mov	si, str_al
+	call	print_str
+	jmp	.du_in_dx_port
+.du_in_dx_ax:
+	mov	si, str_ax
+	call	print_str
+.du_in_dx_port:
+	mov	al, ','
+	call	putc
+	mov	si, str_dx
+	call	print_str
+.du_inout_dx_done:
+	mov	ax, bx
+	inc	ax
+	jmp	.du_done
+.du_daa:
+	mov	si, str_daa
+	jmp	.du_one_byte
+.du_das:
+	mov	si, str_das
+	jmp	.du_one_byte
+.du_aaa:
+	mov	si, str_aaa
+	jmp	.du_one_byte
+.du_aas:
+	mov	si, str_aas
+	jmp	.du_one_byte
+.du_cbw:
+	mov	si, str_cbw
+	jmp	.du_one_byte
+.du_cwd:
+	mov	si, str_cwd
+	jmp	.du_one_byte
+.du_wait:
+	mov	si, str_wait
+	jmp	.du_one_byte
+.du_pushf:
+	mov	si, str_pushf
+	jmp	.du_one_byte
+.du_popf:
+	mov	si, str_popf
+	jmp	.du_one_byte
+.du_sahf:
+	mov	si, str_sahf
+	jmp	.du_one_byte
+.du_lahf:
+	mov	si, str_lahf
+	jmp	.du_one_byte
+.du_into:
+	mov	si, str_into
+	jmp	.du_one_byte
+.du_lock:
+	mov	si, str_lock
+	jmp	.du_one_byte
+.du_repne:
+	mov	si, str_repne
+	jmp	.du_one_byte
+.du_rep:
+	mov	si, str_rep
+	jmp	.du_one_byte
+.du_hlt:
+	mov	si, str_hlt
+	jmp	.du_one_byte
+.du_cmc:
+	mov	si, str_cmc
+	jmp	.du_one_byte
+.du_clc:
+	mov	si, str_clc
+	jmp	.du_one_byte
+.du_stc:
+	mov	si, str_stc
+	jmp	.du_one_byte
+.du_cli:
+	mov	si, str_cli
+	jmp	.du_one_byte
+.du_sti:
+	mov	si, str_sti
+	jmp	.du_one_byte
+.du_cld:
+	mov	si, str_cld
+	jmp	.du_one_byte
+.du_std:
+	mov	si, str_std
+	jmp	.du_one_byte
+.du_xlat:
+	mov	si, str_xlat
+	jmp	.du_one_byte
+.du_xchg_acc:
+	mov	si, str_xchg_ax
+	call	print_str
+	mov	al, [opcode_byte]
+	sub	al, 0x90
+	call	print_reg16_name
+	mov	ax, bx
+	inc	ax
+	jmp	.du_done
+.du_string_op:
+	; Emit segment override BEFORE the mnemonic so output is re-assemblable
+	; via the leading-prefix syntax in the assembler ("ES: MOVSB").
+	mov	al, [disasm_seg_override]
+	or	al, al
+	jz	.du_so_no_pfx
+	cmp	al, 0x26
+	je	.du_so_es
+	cmp	al, 0x2E
+	je	.du_so_cs
+	cmp	al, 0x36
+	je	.du_so_ss
+	mov	si, str_ds
+	jmp	.du_so_emit
+.du_so_es:
+	mov	si, str_es
+	jmp	.du_so_emit
+.du_so_cs:
+	mov	si, str_cs
+	jmp	.du_so_emit
+.du_so_ss:
+	mov	si, str_ss
+.du_so_emit:
+	call	print_str
+	mov	al, ':'
+	call	putc
+	mov	al, ' '
+	call	putc
+.du_so_no_pfx:
+	mov	al, [opcode_byte]
+	call	print_string_mnemonic
+	mov	ax, bx
+	inc	ax
+	jmp	.du_done
+.du_one_byte:
+	call	print_str
+	mov	ax, bx
+	inc	ax
 	jmp	.du_done
 .du_jz_short:
 	mov	si, str_jz
@@ -3524,6 +4142,534 @@ disasm_current:
 	mov	ax, bx
 	add	ax, 3
 	jmp	.du_done
+.du_alu_acc_imm8:
+	mov	al, [opcode_byte]
+	shr	al, 1
+	shr	al, 1
+	shr	al, 1
+	and	al, 7
+	call	print_alu_mnemonic
+	mov	si, str_al
+	call	print_str
+	mov	al, ','
+	call	putc
+	mov	al, [es:bx + 1]
+	call	print_hex8
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_alu_acc_imm16:
+	mov	al, [opcode_byte]
+	shr	al, 1
+	shr	al, 1
+	shr	al, 1
+	and	al, 7
+	call	print_alu_mnemonic
+	mov	si, str_ax
+	call	print_str
+	mov	al, ','
+	call	putc
+	mov	ax, [es:bx + 1]
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 3
+	jmp	.du_done
+.du_alu_rm:
+	call	du_decode_modrm
+	mov	al, [opcode_byte]
+	and	al, 1
+	jz	.du_alu_rr_width8
+	mov	byte [asm_reg_width], 16
+	jmp	.du_alu_rr_have_width
+.du_alu_rr_width8:
+	mov	byte [asm_reg_width], 8
+.du_alu_rr_have_width:
+	mov	al, [opcode_byte]
+	shr	al, 1
+	shr	al, 1
+	shr	al, 1
+	and	al, 7
+	call	print_alu_mnemonic
+	mov	al, [opcode_byte]
+	and	al, 2
+	jnz	.du_alu_reg_dest
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	jmp	.du_alu_rm_done
+.du_alu_reg_dest:
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	mov	al, ','
+	call	putc
+	call	print_disasm_rm_operand
+.du_alu_rm_done:
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_alu_imm8:
+	call	du_decode_modrm
+	mov	al, [asm_src_code]
+	call	print_alu_mnemonic
+	mov	byte [asm_reg_width], 8
+	cmp	byte [opcode_byte], 0x83
+	jne	.du_alu_imm8_print
+	mov	byte [asm_reg_width], 16
+.du_alu_imm8_print:
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	push	bx
+	add	bx, cx
+	mov	al, [es:bx]
+	pop	bx
+	call	print_hex8
+	mov	ax, bx
+	inc	cx
+	add	ax, cx
+	jmp	.du_done
+.du_alu_imm16:
+	call	du_decode_modrm
+	mov	al, [asm_src_code]
+	call	print_alu_mnemonic
+	mov	byte [asm_reg_width], 16
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	push	bx
+	add	bx, cx
+	mov	ax, [es:bx]
+	pop	bx
+	call	print_hex16
+	mov	ax, bx
+	add	cx, 2
+	add	ax, cx
+	jmp	.du_done
+.du_mov_rm_reg:
+	call	du_decode_modrm
+	mov	al, [opcode_byte]
+	and	al, 1
+	jz	.du_mov_width8
+	mov	byte [asm_reg_width], 16
+	jmp	.du_mov_have_width
+.du_mov_width8:
+	mov	byte [asm_reg_width], 8
+.du_mov_have_width:
+	mov	si, str_mov
+	call	print_str
+	mov	al, [opcode_byte]
+	and	al, 2
+	jnz	.du_mov_reg_dest
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	jmp	.du_mov_rm_done
+.du_mov_reg_dest:
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	mov	al, ','
+	call	putc
+	call	print_disasm_rm_operand
+.du_mov_rm_done:
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_incdec_rm8:
+	mov	byte [asm_reg_width], 8
+	jmp	.du_incdec_rm
+.du_incdec_rm16:
+	mov	byte [asm_reg_width], 16
+.du_incdec_rm:
+	call	du_decode_modrm
+	mov	dl, [asm_src_code]
+	cmp	byte [opcode_byte], 0xFF
+	jne	.du_incdec_only
+	cmp	dl, 2
+	je	.du_call_rm
+	cmp	dl, 3
+	je	.du_call_far_rm
+	cmp	dl, 4
+	je	.du_jmp_rm
+	cmp	dl, 5
+	je	.du_jmp_far_rm
+	cmp	dl, 6
+	je	.du_push_rm
+.du_incdec_only:
+	cmp	dl, 0
+	je	.du_incdec_is_inc
+	cmp	dl, 1
+	jne	.du_db
+	mov	si, str_dec
+	jmp	.du_incdec_print
+.du_incdec_is_inc:
+	mov	si, str_inc
+.du_incdec_print:
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_call_rm:
+	mov	si, str_call
+	jmp	.du_ff_print
+.du_call_far_rm:
+	mov	si, str_call_far
+	jmp	.du_ff_print
+.du_jmp_rm:
+	mov	si, str_jmp
+	jmp	.du_ff_print
+.du_jmp_far_rm:
+	mov	si, str_jmp_far
+	jmp	.du_ff_print
+.du_push_rm:
+	mov	si, str_push
+.du_ff_print:
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_pop_rm:
+	mov	byte [asm_reg_width], 16
+	call	du_decode_modrm
+	mov	si, str_pop
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+
+.du_mov_al_mem:
+	mov	byte [asm_reg_width], 8
+	mov	al, 0
+	mov	dl, 0				; src=AL, layout: reg, [imm16]
+	jmp	.du_mov_acc_mem_print
+.du_mov_ax_mem:
+	mov	byte [asm_reg_width], 16
+	mov	al, 0
+	mov	dl, 0				; reg=AX, layout: reg, [imm16]
+	jmp	.du_mov_acc_mem_print
+.du_mov_mem_al:
+	mov	byte [asm_reg_width], 8
+	mov	al, 0
+	mov	dl, 1				; layout: [imm16], reg
+	jmp	.du_mov_acc_mem_print
+.du_mov_mem_ax:
+	mov	byte [asm_reg_width], 16
+	mov	al, 0
+	mov	dl, 1
+.du_mov_acc_mem_print:
+	mov	[asm_reg_code], al		; AL/AX = code 0
+	mov	byte [asm_mem_mod], 0
+	mov	byte [asm_mem_rm], 6		; direct
+	mov	byte [asm_mem_disp_size], 2
+	mov	ax, [es:bx + 1]
+	mov	[asm_mem_disp], ax
+	push	dx
+	mov	si, str_mov
+	call	print_str
+	pop	dx
+	cmp	dl, 0
+	jne	.du_mov_acc_mem_dst
+	; layout: reg, [imm16]
+	call	print_disasm_dst_reg
+	mov	al, ','
+	call	putc
+	call	print_disasm_rm_operand
+	jmp	.du_mov_acc_mem_done
+.du_mov_acc_mem_dst:
+	; layout: [imm16], reg
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	call	print_disasm_dst_reg
+.du_mov_acc_mem_done:
+	mov	ax, bx
+	add	ax, 3
+	jmp	.du_done
+
+.du_xchg_rm:
+	call	du_decode_modrm
+	mov	al, [opcode_byte]
+	and	al, 1
+	jz	.du_xchg_width8
+	mov	byte [asm_reg_width], 16
+	jmp	.du_xchg_have_width
+.du_xchg_width8:
+	mov	byte [asm_reg_width], 8
+.du_xchg_have_width:
+	mov	si, str_xchg
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_test_rm:
+	call	du_decode_modrm
+	mov	al, [opcode_byte]
+	and	al, 1
+	jz	.du_test_width8
+	mov	byte [asm_reg_width], 16
+	jmp	.du_test_have_width
+.du_test_width8:
+	mov	byte [asm_reg_width], 8
+.du_test_have_width:
+	mov	si, str_test
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_test_al:
+	mov	si, str_test
+	call	print_str
+	mov	si, str_al
+	call	print_str
+	mov	al, ','
+	call	putc
+	mov	al, [es:bx + 1]
+	call	print_hex8
+	mov	ax, bx
+	add	ax, 2
+	jmp	.du_done
+.du_test_ax:
+	mov	si, str_test
+	call	print_str
+	mov	si, str_ax
+	call	print_str
+	mov	al, ','
+	call	putc
+	mov	ax, [es:bx + 1]
+	call	print_hex16
+	mov	ax, bx
+	add	ax, 3
+	jmp	.du_done
+.du_mov_seg_rm:
+	call	du_decode_modrm
+	cmp	byte [asm_src_code], 3
+	ja	.du_db
+	mov	byte [asm_reg_width], 16
+	mov	si, str_mov
+	call	print_str
+	cmp	byte [opcode_byte], 0x8E
+	je	.du_mov_seg_dest
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [asm_src_code]
+	call	print_seg_reg_name
+	jmp	.du_mov_seg_done
+.du_mov_seg_dest:
+	mov	al, [asm_src_code]
+	call	print_seg_reg_name
+	mov	al, ','
+	call	putc
+	call	print_disasm_rm_operand
+.du_mov_seg_done:
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_mov_rm_imm8:
+	mov	byte [asm_reg_width], 8
+	jmp	.du_mov_rm_imm
+.du_mov_rm_imm16:
+	mov	byte [asm_reg_width], 16
+.du_mov_rm_imm:
+	call	du_decode_modrm
+	cmp	byte [asm_src_code], 0
+	jne	.du_db
+	mov	si, str_mov
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	cmp	byte [asm_reg_width], 8
+	jne	.du_mov_rm_imm_word
+	push	bx
+	add	bx, cx
+	mov	al, [es:bx]
+	pop	bx
+	call	print_hex8
+	inc	cx
+	jmp	.du_mov_rm_imm_done
+.du_mov_rm_imm_word:
+	push	bx
+	add	bx, cx
+	mov	ax, [es:bx]
+	pop	bx
+	call	print_hex16
+	add	cx, 2
+.du_mov_rm_imm_done:
+	mov	ax, bx
+	add	ax, cx
+	jmp	.du_done
+.du_f6f7:
+	call	du_decode_modrm
+	cmp	byte [opcode_byte], 0xF6
+	jne	.du_f7_width
+	mov	byte [asm_reg_width], 8
+	jmp	.du_f6f7_group
+.du_f7_width:
+	mov	byte [asm_reg_width], 16
+.du_f6f7_group:
+	mov	al, [asm_src_code]
+	cmp	al, 0
+	je	.du_grp_test
+	cmp	al, 2
+	je	.du_grp_not
+	cmp	al, 3
+	je	.du_grp_neg
+	cmp	al, 4
+	je	.du_grp_mul
+	cmp	al, 5
+	je	.du_grp_imul
+	cmp	al, 6
+	je	.du_grp_div
+	cmp	al, 7
+	je	.du_grp_idiv
+	jmp	.du_db
+.du_grp_test:
+	mov	si, str_test
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	cmp	byte [asm_reg_width], 8
+	jne	.du_grp_test16
+	push	bx
+	add	bx, cx
+	mov	al, [es:bx]
+	pop	bx
+	call	print_hex8
+	inc	cx
+	jmp	.du_grp_test_done
+.du_grp_test16:
+	push	bx
+	add	bx, cx
+	mov	ax, [es:bx]
+	pop	bx
+	call	print_hex16
+	add	cx, 2
+.du_grp_test_done:
+	mov	ax, bx
+	add	ax, cx
+	jmp	.du_done
+.du_grp_not:
+	mov	si, str_not
+	jmp	.du_grp_unary_print
+.du_grp_neg:
+	mov	si, str_neg
+	jmp	.du_grp_unary_print
+.du_grp_mul:
+	mov	si, str_mul
+	jmp	.du_grp_unary_print
+.du_grp_imul:
+	mov	si, str_imul
+	jmp	.du_grp_unary_print
+.du_grp_div:
+	mov	si, str_div
+	jmp	.du_grp_unary_print
+.du_grp_idiv:
+	mov	si, str_idiv
+.du_grp_unary_print:
+	call	print_str
+	call	print_disasm_rm_operand
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_shift_rm:
+	call	du_decode_modrm
+	mov	al, [opcode_byte]
+	and	al, 1
+	jz	.du_shift_width8
+	mov	byte [asm_reg_width], 16
+	jmp	.du_shift_group
+.du_shift_width8:
+	mov	byte [asm_reg_width], 8
+.du_shift_group:
+	mov	al, [asm_src_code]
+	call	print_shift_mnemonic
+	jc	.du_db
+	call	print_disasm_rm_operand
+	mov	al, ','
+	call	putc
+	mov	al, [opcode_byte]
+	and	al, 2
+	jnz	.du_shift_cl
+	mov	al, '1'
+	call	putc
+	jmp	.du_shift_done
+.du_shift_cl:
+	mov	si, str_cl
+	call	print_str
+.du_shift_done:
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
+.du_lea:
+	mov	si, str_lea
+	jmp	.du_load_ptr
+.du_lds:
+	mov	si, str_lds
+	jmp	.du_load_ptr
+.du_les:
+	mov	si, str_les
+.du_load_ptr:
+	call	du_decode_modrm
+	cmp	byte [asm_mem_mod], 3
+	je	.du_db
+	mov	byte [asm_reg_width], 16
+	call	print_str
+	mov	al, [asm_src_code]
+	call	print_disasm_reg
+	mov	al, ','
+	call	putc
+	call	print_disasm_rm_operand
+	mov	ax, bx
+	xor	ch, ch
+	mov	cl, [asm_instr_len]
+	add	ax, cx
+	jmp	.du_done
 .du_db:
 	mov	si, str_db
 	call	print_str
@@ -3544,20 +4690,514 @@ disasm_current:
 	pop	bx
 	ret
 
+print_alu_mnemonic:
+	cmp	al, 0
+	je	.pam_add
+	cmp	al, 1
+	je	.pam_or
+	cmp	al, 2
+	je	.pam_adc
+	cmp	al, 3
+	je	.pam_sbb
+	cmp	al, 4
+	je	.pam_and
+	cmp	al, 5
+	je	.pam_sub
+	cmp	al, 6
+	je	.pam_xor
+	mov	si, str_cmp
+	jmp	print_str
+.pam_add:
+	mov	si, str_add
+	jmp	print_str
+.pam_or:
+	mov	si, str_or
+	jmp	print_str
+.pam_adc:
+	mov	si, str_adc
+	jmp	print_str
+.pam_sbb:
+	mov	si, str_sbb
+	jmp	print_str
+.pam_and:
+	mov	si, str_and
+	jmp	print_str
+.pam_sub:
+	mov	si, str_sub
+	jmp	print_str
+.pam_xor:
+	mov	si, str_xor
+	jmp	print_str
+
+print_disasm_dst_reg:
+	mov	al, [asm_reg_code]
+	; fall through
+print_disasm_reg:
+	cmp	byte [asm_reg_width], 8
+	je	.pdr8
+	call	print_reg16_name
+	ret
+.pdr8:
+	call	print_reg8_name
+	ret
+
+du_decode_modrm:
+	push	ax
+	push	cx
+	push	dx
+	mov	al, [es:bx + 1]
+	mov	[asm_modrm], al
+	mov	dl, al
+	and	dl, 7
+	mov	[asm_mem_rm], dl
+	mov	dl, al
+	shr	dl, 1
+	shr	dl, 1
+	shr	dl, 1
+	and	dl, 7
+	mov	[asm_src_code], dl
+	mov	dl, al
+	shr	dl, 1
+	shr	dl, 1
+	shr	dl, 1
+	shr	dl, 1
+	shr	dl, 1
+	shr	dl, 1
+	and	dl, 3
+	mov	[asm_mem_mod], dl
+	mov	byte [asm_mem_disp_size], 0
+	mov	word [asm_mem_disp], 0
+	mov	byte [asm_instr_len], 2
+	cmp	dl, 3
+	je	.ddm_done
+	cmp	dl, 0
+	jne	.ddm_not_mod0
+	cmp	byte [asm_mem_rm], 6
+	jne	.ddm_done
+	mov	ax, [es:bx + 2]
+	mov	[asm_mem_disp], ax
+	mov	byte [asm_mem_disp_size], 2
+	mov	byte [asm_instr_len], 4
+	jmp	.ddm_done
+.ddm_not_mod0:
+	cmp	dl, 1
+	jne	.ddm_mod2
+	mov	al, [es:bx + 2]
+	cbw
+	mov	[asm_mem_disp], ax
+	mov	byte [asm_mem_disp_size], 1
+	mov	byte [asm_instr_len], 3
+	jmp	.ddm_done
+.ddm_mod2:
+	mov	ax, [es:bx + 2]
+	mov	[asm_mem_disp], ax
+	mov	byte [asm_mem_disp_size], 2
+	mov	byte [asm_instr_len], 4
+.ddm_done:
+	pop	dx
+	pop	cx
+	pop	ax
+	ret
+
+print_shift_mnemonic:
+	cmp	al, 0
+	je	.psm_rol
+	cmp	al, 1
+	je	.psm_ror
+	cmp	al, 2
+	je	.psm_rcl
+	cmp	al, 3
+	je	.psm_rcr
+	cmp	al, 4
+	je	.psm_shl
+	cmp	al, 5
+	je	.psm_shr
+	cmp	al, 7
+	je	.psm_sar
+	stc
+	ret
+.psm_rol:
+	mov	si, str_rol
+	jmp	.psm_print
+.psm_ror:
+	mov	si, str_ror
+	jmp	.psm_print
+.psm_rcl:
+	mov	si, str_rcl
+	jmp	.psm_print
+.psm_rcr:
+	mov	si, str_rcr
+	jmp	.psm_print
+.psm_shl:
+	mov	si, str_shl
+	jmp	.psm_print
+.psm_shr:
+	mov	si, str_shr
+	jmp	.psm_print
+.psm_sar:
+	mov	si, str_sar
+.psm_print:
+	call	print_str
+	clc
+	ret
+
+print_jcc_mnemonic:
+	and	al, 0x0F
+	cmp	al, 0
+	je	.pjm_jo
+	cmp	al, 1
+	je	.pjm_jno
+	cmp	al, 2
+	je	.pjm_jb
+	cmp	al, 3
+	je	.pjm_jae
+	cmp	al, 4
+	je	.pjm_jz
+	cmp	al, 5
+	je	.pjm_jnz
+	cmp	al, 6
+	je	.pjm_jbe
+	cmp	al, 7
+	je	.pjm_ja
+	cmp	al, 8
+	je	.pjm_js
+	cmp	al, 9
+	je	.pjm_jns
+	cmp	al, 10
+	je	.pjm_jp
+	cmp	al, 11
+	je	.pjm_jnp
+	cmp	al, 12
+	je	.pjm_jl
+	cmp	al, 13
+	je	.pjm_jge
+	cmp	al, 14
+	je	.pjm_jle
+	mov	si, str_jg
+	jmp	print_str
+.pjm_jo:
+	mov	si, str_jo
+	jmp	print_str
+.pjm_jno:
+	mov	si, str_jno
+	jmp	print_str
+.pjm_jb:
+	mov	si, str_jb
+	jmp	print_str
+.pjm_jae:
+	mov	si, str_jae
+	jmp	print_str
+.pjm_jz:
+	mov	si, str_jz
+	jmp	print_str
+.pjm_jnz:
+	mov	si, str_jnz
+	jmp	print_str
+.pjm_jbe:
+	mov	si, str_jbe
+	jmp	print_str
+.pjm_ja:
+	mov	si, str_ja
+	jmp	print_str
+.pjm_js:
+	mov	si, str_js
+	jmp	print_str
+.pjm_jns:
+	mov	si, str_jns
+	jmp	print_str
+.pjm_jp:
+	mov	si, str_jp
+	jmp	print_str
+.pjm_jnp:
+	mov	si, str_jnp
+	jmp	print_str
+.pjm_jl:
+	mov	si, str_jl
+	jmp	print_str
+.pjm_jge:
+	mov	si, str_jge
+	jmp	print_str
+.pjm_jle:
+	mov	si, str_jle
+	jmp	print_str
+
+print_loop_mnemonic:
+	cmp	al, 0xE0
+	je	.plm_loopne
+	cmp	al, 0xE1
+	je	.plm_loope
+	cmp	al, 0xE2
+	je	.plm_loop
+	mov	si, str_jcxz
+	jmp	print_str
+.plm_loopne:
+	mov	si, str_loopne
+	jmp	print_str
+.plm_loope:
+	mov	si, str_loope
+	jmp	print_str
+.plm_loop:
+	mov	si, str_loop
+	jmp	print_str
+
+print_string_mnemonic:
+	cmp	al, 0xA4
+	je	.psm_movsb
+	cmp	al, 0xA5
+	je	.psm_movsw
+	cmp	al, 0xA6
+	je	.psm_cmpsb
+	cmp	al, 0xA7
+	je	.psm_cmpsw
+	cmp	al, 0xAA
+	je	.psm_stosb
+	cmp	al, 0xAB
+	je	.psm_stosw
+	cmp	al, 0xAC
+	je	.psm_lodsb
+	cmp	al, 0xAD
+	je	.psm_lodsw
+	cmp	al, 0xAE
+	je	.psm_scasb
+	cmp	al, 0xAF
+	je	.psm_scasw
+	mov	si, str_db
+	jmp	print_str
+.psm_movsb:
+	mov	si, str_movsb
+	jmp	print_str
+.psm_movsw:
+	mov	si, str_movsw
+	jmp	print_str
+.psm_cmpsb:
+	mov	si, str_cmpsb
+	jmp	print_str
+.psm_cmpsw:
+	mov	si, str_cmpsw
+	jmp	print_str
+.psm_stosb:
+	mov	si, str_stosb
+	jmp	print_str
+.psm_stosw:
+	mov	si, str_stosw
+	jmp	print_str
+.psm_lodsb:
+	mov	si, str_lodsb
+	jmp	print_str
+.psm_lodsw:
+	mov	si, str_lodsw
+	jmp	print_str
+.psm_scasb:
+	mov	si, str_scasb
+	jmp	print_str
+.psm_scasw:
+	mov	si, str_scasw
+	jmp	print_str
+
+print_disasm_rm_operand:
+	cmp	byte [asm_mem_mod], 3
+	jne	.pdro_mem
+	mov	al, [asm_mem_rm]
+	call	print_disasm_reg
+	ret
+.pdro_mem:
+	cmp	byte [asm_reg_width], 8
+	jne	.pdro_maybe_word
+	mov	si, str_byte
+	call	print_str
+	jmp	.pdro_open
+.pdro_maybe_word:
+	cmp	byte [asm_reg_width], 16
+	jne	.pdro_open
+	mov	si, str_word
+	call	print_str
+.pdro_open:
+	; Print segment-override prefix if present
+	mov	al, [disasm_seg_override]
+	or	al, al
+	jz	.pdro_no_seg_ovr
+	cmp	al, 0x26
+	je	.pdro_seg_es
+	cmp	al, 0x2E
+	je	.pdro_seg_cs
+	cmp	al, 0x36
+	je	.pdro_seg_ss
+	mov	si, str_ds
+	jmp	.pdro_seg_emit
+.pdro_seg_es:
+	mov	si, str_es
+	jmp	.pdro_seg_emit
+.pdro_seg_cs:
+	mov	si, str_cs
+	jmp	.pdro_seg_emit
+.pdro_seg_ss:
+	mov	si, str_ss
+.pdro_seg_emit:
+	call	print_str
+	mov	al, ':'
+	call	putc
+.pdro_no_seg_ovr:
+	mov	al, '['
+	call	putc
+	cmp	byte [asm_mem_mod], 0
+	jne	.pdro_not_direct
+	cmp	byte [asm_mem_rm], 6
+	jne	.pdro_not_direct
+	mov	ax, [asm_mem_disp]
+	call	print_hex16
+	jmp	.pdro_close
+.pdro_not_direct:
+	mov	al, [asm_mem_rm]
+	cmp	al, 0
+	je	.pdro_bx_si
+	cmp	al, 1
+	je	.pdro_bx_di
+	cmp	al, 2
+	je	.pdro_bp_si
+	cmp	al, 3
+	je	.pdro_bp_di
+	cmp	al, 4
+	je	.pdro_si
+	cmp	al, 5
+	je	.pdro_di
+	cmp	al, 6
+	je	.pdro_bp
+	mov	si, str_bx
+	call	print_str
+	jmp	.pdro_disp
+.pdro_bx_si:
+	mov	si, str_bx
+	call	print_str
+	mov	al, '+'
+	call	putc
+	mov	si, str_si
+	call	print_str
+	jmp	.pdro_disp
+.pdro_bx_di:
+	mov	si, str_bx
+	call	print_str
+	mov	al, '+'
+	call	putc
+	mov	si, str_di
+	call	print_str
+	jmp	.pdro_disp
+.pdro_bp_si:
+	mov	si, str_bp
+	call	print_str
+	mov	al, '+'
+	call	putc
+	mov	si, str_si
+	call	print_str
+	jmp	.pdro_disp
+.pdro_bp_di:
+	mov	si, str_bp
+	call	print_str
+	mov	al, '+'
+	call	putc
+	mov	si, str_di
+	call	print_str
+	jmp	.pdro_disp
+.pdro_si:
+	mov	si, str_si
+	call	print_str
+	jmp	.pdro_disp
+.pdro_di:
+	mov	si, str_di
+	call	print_str
+	jmp	.pdro_disp
+.pdro_bp:
+	mov	si, str_bp
+	call	print_str
+.pdro_disp:
+	cmp	byte [asm_mem_disp_size], 0
+	je	.pdro_close
+	mov	ax, [asm_mem_disp]
+	or	ax, ax
+	jz	.pdro_close
+	test	ah, 0x80
+	jnz	.pdro_disp_neg
+	mov	al, '+'
+	call	putc
+	mov	ax, [asm_mem_disp]
+	jmp	.pdro_disp_abs
+.pdro_disp_neg:
+	mov	al, '-'
+	call	putc
+	mov	ax, [asm_mem_disp]
+	neg	ax
+.pdro_disp_abs:
+	cmp	byte [asm_mem_disp_size], 1
+	jne	.pdro_disp16
+	call	print_hex8
+	jmp	.pdro_close
+.pdro_disp16:
+	call	print_hex16
+.pdro_close:
+	mov	al, ']'
+	call	putc
+	ret
+
 assemble_line:
 	push	es
 	mov	ax, [work_seg]
 	mov	es, ax
 	mov	di, [work_start]
 
+.al_dispatch:
+	; Detect leading segment-override prefix ("ES:" / "CS:" / "SS:" / "DS:"),
+	; emit prefix byte, advance past it, then re-dispatch on the next
+	; mnemonic. Mirrors the REP/LOCK redispatch path. This allows
+	; round-tripping prefixed string ops like "ES: MOVSB".
+	cmp	byte [si + 2], ':'
+	jne	.al_no_seg_pfx
+	mov	al, [si]
+	call	to_upper
+	mov	dl, al
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_no_seg_pfx
+	cmp	dl, 'E'
+	je	.al_seg_pfx_es
+	cmp	dl, 'C'
+	je	.al_seg_pfx_cs
+	cmp	dl, 'S'
+	je	.al_seg_pfx_ss
+	cmp	dl, 'D'
+	je	.al_seg_pfx_ds
+	jmp	.al_no_seg_pfx
+.al_seg_pfx_es:
+	mov	al, 0x26
+	jmp	.al_seg_pfx_emit
+.al_seg_pfx_cs:
+	mov	al, 0x2E
+	jmp	.al_seg_pfx_emit
+.al_seg_pfx_ss:
+	mov	al, 0x36
+	jmp	.al_seg_pfx_emit
+.al_seg_pfx_ds:
+	mov	al, 0x3E
+.al_seg_pfx_emit:
+	mov	[es:di], al
+	inc	di
+	add	si, 3
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.al_success
+	jmp	.al_dispatch
+.al_no_seg_pfx:
 	mov	al, [si]
 	call	to_upper
 	cmp	al, 'D'
 	je	.al_db
+	cmp	al, 'H'
+	je	.al_h_group
 	cmp	al, 'N'
 	je	.al_nop
 	cmp	al, 'I'
 	je	.al_i_group
+	cmp	al, 'L'
+	je	.al_l_group
 	cmp	al, 'R'
 	je	.al_r_group
 	cmp	al, 'J'
@@ -3572,13 +5212,21 @@ assemble_line:
 	je	.al_add
 	cmp	al, 'S'
 	je	.al_s_group
+	cmp	al, 'O'
+	je	.al_or
+	cmp	al, 'X'
+	je	.al_xor
+	cmp	al, 'T'
+	je	.al_t_group
+	cmp	al, 'W'
+	je	.al_wait
 	jmp	.al_fail
 
 .al_db:
 	mov	al, [si + 1]
 	call	to_upper
 	cmp	al, 'B'
-	jne	.al_fail
+	jne	.al_dec
 	add	si, 2
 	call	skip_delims
 	cmp	byte [si], 0
@@ -3593,35 +5241,138 @@ assemble_line:
 	jne	.al_db_loop
 	jmp	.al_success
 
-.al_nop:
+.al_dec:
 	mov	al, [si + 1]
 	call	to_upper
-	cmp	al, 'O'
+	cmp	al, 'A'
+	je	.al_daa_das
+	cmp	al, 'I'
+	je	.al_div
+	cmp	al, 'E'
 	jne	.al_fail
 	mov	al, [si + 2]
 	call	to_upper
-	cmp	al, 'P'
+	cmp	al, 'C'
 	jne	.al_fail
 	add	si, 3
 	call	skip_delims
-	cmp	byte [si], 0
+	mov	byte [asm_alu_group], 1
+	jmp	.al_inc_dec_common
+
+.al_daa_das:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'A'
+	je	.al_daa
+	cmp	al, 'S'
 	jne	.al_fail
-	mov	byte [es:di], 0x90
-	inc	di
-	jmp	.al_success
+	add	si, 3
+	mov	byte [asm_opcode], 0x2F
+	jmp	.al_one_byte
+.al_daa:
+	add	si, 3
+	mov	byte [asm_opcode], 0x27
+	jmp	.al_one_byte
+
+.al_div:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'V'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_alu_group], 6
+	jmp	.emit_unary_reg
+
+.al_nop:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_neg
+	cmp	al, 'O'
+	je	.al_nop_or_not
+	jmp	.al_fail
+.al_nop_or_not:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'P'
+	je	.al_nop_emit
+	cmp	al, 'T'
+	je	.al_not
+	jmp	.al_fail
+.al_nop_emit:
+	add	si, 3
+	mov	byte [asm_opcode], 0x90
+	jmp	.al_one_byte
+.al_neg:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'G'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_alu_group], 3
+	jmp	.emit_unary_reg
+.al_not:
+	add	si, 3
+	mov	byte [asm_alu_group], 2
+	jmp	.emit_unary_reg
 
 .al_i_group:
 	mov	al, [si + 1]
 	call	to_upper
+	cmp	al, 'D'
+	je	.al_idiv
+	cmp	al, 'M'
+	je	.al_imul
 	cmp	al, 'N'
-	jne	.al_fail
+	je	.al_i_n
+	cmp	al, 'R'
+	je	.al_iret
+	jmp	.al_fail
+.al_i_n:
 	mov	al, [si + 2]
 	call	to_upper
+	cmp	al, 'C'
+	je	.al_inc
 	cmp	al, 'T'
-	jne	.al_iret
+	je	.al_int_or_into
+	mov	al, [si + 2]
+	cmp	al, 0
+	je	.al_in
+	cmp	al, ' '
+	je	.al_in
+	cmp	al, 9
+	je	.al_in
+	cmp	al, ','
+	je	.al_in
+	jmp	.al_fail
+.al_int_or_into:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'O'
+	je	.al_into
+.al_int:
 	add	si, 3
 	call	skip_delims
 	cmp	byte [si], '3'
+	je	.al_maybe_int3
+	call	parse_hex_byte
+	jc	.al_fail
+	mov	byte [es:di], 0xCD
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_maybe_int3:
+	mov	al, [si + 1]
+	cmp	al, 0
+	je	.al_int3
+	cmp	al, ' '
+	je	.al_int3
+	cmp	al, 9
+	je	.al_int3
+	cmp	al, ','
 	je	.al_int3
 	call	parse_hex_byte
 	jc	.al_fail
@@ -3640,6 +5391,72 @@ assemble_line:
 	mov	byte [es:di], 0xCC
 	inc	di
 	jmp	.al_success
+.al_into:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'O'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0xCE
+	jmp	.al_one_byte
+.al_in:
+	add	si, 2
+	call	skip_delims
+	call	parse_accumulator
+	jc	.al_fail
+	mov	[asm_accum_kind], al
+	call	skip_delims
+	call	parse_reg16_code
+	jnc	.al_in_dx
+	call	parse_hex_byte
+	jc	.al_fail
+	cmp	byte [asm_accum_kind], 0
+	je	.al_in_imm_al
+	mov	byte [es:di], 0xE5
+	jmp	.al_in_imm_store
+.al_in_imm_al:
+	mov	byte [es:di], 0xE4
+.al_in_imm_store:
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_in_dx:
+	cmp	al, 2
+	jne	.al_fail
+	cmp	byte [asm_accum_kind], 0
+	je	.al_in_dx_al
+	mov	byte [asm_opcode], 0xED
+	jmp	.al_one_byte
+.al_in_dx_al:
+	mov	byte [asm_opcode], 0xEC
+	jmp	.al_one_byte
+.al_idiv:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'I'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'V'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_alu_group], 7
+	jmp	.emit_unary_reg
+.al_imul:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'U'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_alu_group], 5
+	jmp	.emit_unary_reg
 .al_iret:
 	mov	al, [si + 1]
 	call	to_upper
@@ -3661,13 +5478,27 @@ assemble_line:
 	inc	di
 	jmp	.al_success
 
+.al_inc:
+	add	si, 3
+	call	skip_delims
+	mov	byte [asm_alu_group], 0
+	jmp	.al_inc_dec_common
+
 .al_r_group:
 	mov	al, [si + 1]
 	call	to_upper
 	cmp	al, 'E'
-	jne	.al_fail
+	je	.al_re_group
+	cmp	al, 'O'
+	je	.al_ro_group
+	cmp	al, 'C'
+	je	.al_rc_group
+	jmp	.al_fail
+.al_re_group:
 	mov	al, [si + 2]
 	call	to_upper
+	cmp	al, 'P'
+	je	.al_rep_group
 	cmp	al, 'T'
 	jne	.al_fail
 	mov	al, [si + 3]
@@ -3677,22 +5508,151 @@ assemble_line:
 	add	si, 3
 	call	skip_delims
 	cmp	byte [si], 0
+	je	.al_ret_plain
+	call	parse_hex_word
+	jc	.al_fail
+	mov	byte [es:di], 0xC2
+	mov	[es:di + 1], ax
+	add	di, 3
+	call	skip_delims
+	cmp	byte [si], 0
 	jne	.al_fail
-	mov	byte [es:di], 0xC3
-	inc	di
 	jmp	.al_success
+.al_ret_plain:
+	mov	byte [asm_opcode], 0xC3
+	jmp	.al_one_byte
 .al_retf:
 	add	si, 4
 	call	skip_delims
 	cmp	byte [si], 0
+	je	.al_retf_plain
+	call	parse_hex_word
+	jc	.al_fail
+	mov	byte [es:di], 0xCA
+	mov	[es:di + 1], ax
+	add	di, 3
+	call	skip_delims
+	cmp	byte [si], 0
 	jne	.al_fail
-	mov	byte [es:di], 0xCB
-	inc	di
 	jmp	.al_success
+.al_retf_plain:
+	mov	byte [asm_opcode], 0xCB
+	jmp	.al_one_byte
+.al_rep_group:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 0
+	je	.al_rep
+	cmp	al, ' '
+	je	.al_rep
+	cmp	al, 9
+	je	.al_rep
+	cmp	al, ','
+	je	.al_rep
+	cmp	al, 'E'
+	je	.al_rep
+	cmp	al, 'Z'
+	je	.al_rep
+	cmp	al, 'N'
+	je	.al_repne
+	jmp	.al_fail
+.al_rep:
+	add	si, 3
+	cmp	al, 'E'
+	je	.al_rep_extra
+	cmp	al, 'Z'
+	je	.al_rep_extra
+	mov	byte [asm_opcode], 0xF3
+	jmp	.al_emit_prefix_then_redispatch
+.al_rep_extra:
+	inc	si
+	mov	byte [asm_opcode], 0xF3
+	jmp	.al_emit_prefix_then_redispatch
+.al_repne:
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_repne_e
+	cmp	al, 'Z'
+	je	.al_repne_z
+	jmp	.al_fail
+.al_repne_e:
+	add	si, 5
+	mov	byte [asm_opcode], 0xF2
+	jmp	.al_emit_prefix_then_redispatch
+.al_repne_z:
+	add	si, 5
+	mov	byte [asm_opcode], 0xF2
+	jmp	.al_emit_prefix_then_redispatch
+.al_emit_prefix_then_redispatch:
+	; Emit prefix byte, then either finish (standalone) or re-dispatch
+	; on the following mnemonic so REP/REPE/REPNE/LOCK can combine with
+	; a following string-op or memory instruction.
+	mov	al, [asm_opcode]
+	mov	[es:di], al
+	inc	di
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.al_success
+	jmp	.al_dispatch
+.al_ro_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'L'
+	je	.al_rol
+	cmp	al, 'R'
+	je	.al_ror
+	jmp	.al_fail
+.al_rol:
+	add	si, 3
+	mov	byte [asm_alu_group], 0
+	jmp	.al_shift_common
+.al_ror:
+	add	si, 3
+	mov	byte [asm_alu_group], 1
+	jmp	.al_shift_common
+.al_rc_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'L'
+	je	.al_rcl
+	cmp	al, 'R'
+	je	.al_rcr
+	jmp	.al_fail
+.al_rcl:
+	add	si, 3
+	mov	byte [asm_alu_group], 2
+	jmp	.al_shift_common
+.al_rcr:
+	add	si, 3
+	mov	byte [asm_alu_group], 3
+	jmp	.al_shift_common
 
 .al_jmp:
 	mov	al, [si + 1]
 	call	to_upper
+	cmp	al, 'C'
+	je	.al_j_c
+	cmp	al, 'O'
+	je	.al_jo
+	cmp	al, 'N'
+	je	.al_j_n
+	cmp	al, 'B'
+	je	.al_jb
+	cmp	al, 'A'
+	je	.al_j_a
+	cmp	al, 'E'
+	je	.al_je
+	cmp	al, 'Z'
+	je	.al_jz
+	cmp	al, 'S'
+	je	.al_js
+	cmp	al, 'P'
+	je	.al_jp
+	cmp	al, 'L'
+	je	.al_j_l
+	cmp	al, 'G'
+	je	.al_j_g
 	cmp	al, 'M'
 	jne	.al_fail
 	mov	al, [si + 2]
@@ -3701,6 +5661,48 @@ assemble_line:
 	jne	.al_fail
 	add	si, 3
 	call	skip_delims
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'F'
+	jne	.al_jmp_near_parse
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'A'
+	jne	.al_jmp_near_parse
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'R'
+	jne	.al_jmp_near_parse
+	add	si, 3
+	call	skip_delims
+	call	parse_mem_operand
+	jnc	.al_jmp_far_mem
+	call	parse_addr
+	jc	.al_fail
+	mov	byte [es:di], 0xEA
+	mov	[es:di + 1], ax
+	mov	[es:di + 3], dx
+	add	di, 5
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_jmp_far_mem:
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0xFF
+	inc	di
+	mov	dl, 5
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_jmp_near_parse:
+	call	parse_reg16_code
+	jnc	.al_jmp_reg16
+	call	parse_mem_operand
+	jnc	.al_jmp_mem16
 	call	parse_addr
 	jc	.al_fail
 	cmp	dx, [work_seg]
@@ -3709,13 +5711,34 @@ assemble_line:
 	mov	ax, bx
 	sub	ax, di
 	sub	ax, 2
-	cmp	ax, 127
-	ja	.al_jmp_near
-	cmp	ax, -128
+	cmp	ax, 0x0080
+	jb	.al_jmp_short
+	cmp	ax, 0xFF80
 	jb	.al_jmp_near
+.al_jmp_short:
 	mov	byte [es:di], 0xEB
 	mov	[es:di + 1], al
 	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_jmp_reg16:
+	mov	byte [es:di], 0xFF
+	or	al, 0xE0			; mod=11, group /4, r/m=reg
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_jmp_mem16:
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0xFF
+	inc	di
+	mov	dl, 4
+	call	.emit_mem_modrm
 	call	skip_delims
 	cmp	byte [si], 0
 	jne	.al_fail
@@ -3732,11 +5755,220 @@ assemble_line:
 	jne	.al_fail
 	jmp	.al_success
 
+.al_j_c:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'X'
+	je	.al_jcxz
+	add	si, 2
+	mov	byte [asm_opcode], 0x72
+	jmp	.al_emit_rel8
+.al_jcxz:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'Z'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0xE3
+	jmp	.al_emit_rel8
+.al_jo:
+	add	si, 2
+	mov	byte [asm_opcode], 0x70
+	jmp	.al_emit_rel8
+.al_jb:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jbe
+	add	si, 2
+	mov	byte [asm_opcode], 0x72
+	jmp	.al_emit_rel8
+.al_jbe:
+	add	si, 3
+	mov	byte [asm_opcode], 0x76
+	jmp	.al_emit_rel8
+.al_je:
+	add	si, 2
+	mov	byte [asm_opcode], 0x74
+	jmp	.al_emit_rel8
+.al_jz:
+	add	si, 2
+	mov	byte [asm_opcode], 0x74
+	jmp	.al_emit_rel8
+.al_js:
+	add	si, 2
+	mov	byte [asm_opcode], 0x78
+	jmp	.al_emit_rel8
+.al_jp:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jpe
+	cmp	al, 'O'
+	je	.al_jpo_direct
+	add	si, 2
+	mov	byte [asm_opcode], 0x7A
+	jmp	.al_emit_rel8
+.al_jpe:
+	add	si, 3
+	mov	byte [asm_opcode], 0x7A
+	jmp	.al_emit_rel8
+.al_jpo_direct:
+	add	si, 3
+	mov	byte [asm_opcode], 0x7B
+	jmp	.al_emit_rel8
+.al_j_a:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jae
+	add	si, 2
+	mov	byte [asm_opcode], 0x77
+	jmp	.al_emit_rel8
+.al_jae:
+	add	si, 3
+	mov	byte [asm_opcode], 0x73
+	jmp	.al_emit_rel8
+.al_j_l:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jle
+	add	si, 2
+	mov	byte [asm_opcode], 0x7C
+	jmp	.al_emit_rel8
+.al_jle:
+	add	si, 3
+	mov	byte [asm_opcode], 0x7E
+	jmp	.al_emit_rel8
+.al_j_g:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jge
+	add	si, 2
+	mov	byte [asm_opcode], 0x7F
+	jmp	.al_emit_rel8
+.al_jge:
+	add	si, 3
+	mov	byte [asm_opcode], 0x7D
+	jmp	.al_emit_rel8
+.al_j_n:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'O'
+	je	.al_jno
+	cmp	al, 'B'
+	je	.al_jnb
+	cmp	al, 'C'
+	je	.al_jnc
+	cmp	al, 'E'
+	je	.al_jne
+	cmp	al, 'Z'
+	je	.al_jnz
+	cmp	al, 'S'
+	je	.al_jns
+	cmp	al, 'P'
+	je	.al_jnp
+	cmp	al, 'L'
+	je	.al_jnl
+	cmp	al, 'G'
+	je	.al_jng
+	cmp	al, 'A'
+	je	.al_jna
+	jmp	.al_fail
+.al_jno:
+	add	si, 3
+	mov	byte [asm_opcode], 0x71
+	jmp	.al_emit_rel8
+.al_jnb:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jnbe
+	jmp	.al_jnc_common
+.al_jnc:
+.al_jnc_common:
+	add	si, 3
+	mov	byte [asm_opcode], 0x73
+	jmp	.al_emit_rel8
+.al_jnbe:
+	add	si, 4
+	mov	byte [asm_opcode], 0x77
+	jmp	.al_emit_rel8
+.al_jne:
+.al_jnz:
+	add	si, 3
+	mov	byte [asm_opcode], 0x75
+	jmp	.al_emit_rel8
+.al_jns:
+	add	si, 3
+	mov	byte [asm_opcode], 0x79
+	jmp	.al_emit_rel8
+.al_jnp:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'O'
+	je	.al_jpo
+	add	si, 3
+	mov	byte [asm_opcode], 0x7B
+	jmp	.al_emit_rel8
+.al_jpo:
+	add	si, 4
+	mov	byte [asm_opcode], 0x7B
+	jmp	.al_emit_rel8
+.al_jnl:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jnle
+	add	si, 3
+	mov	byte [asm_opcode], 0x7D
+	jmp	.al_emit_rel8
+.al_jnle:
+	add	si, 4
+	mov	byte [asm_opcode], 0x7F
+	jmp	.al_emit_rel8
+.al_jng:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jnge
+	add	si, 3
+	mov	byte [asm_opcode], 0x7E
+	jmp	.al_emit_rel8
+.al_jnge:
+	add	si, 4
+	mov	byte [asm_opcode], 0x7C
+	jmp	.al_emit_rel8
+.al_jna:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_jnae
+	add	si, 3
+	mov	byte [asm_opcode], 0x76
+	jmp	.al_emit_rel8
+.al_jnae:
+	add	si, 4
+	mov	byte [asm_opcode], 0x72
+	jmp	.al_emit_rel8
+
 .al_c_group:
 	mov	al, [si + 1]
 	call	to_upper
 	cmp	al, 'A'
-	jne	.al_cmp
+	je	.al_call
+	cmp	al, 'B'
+	je	.al_cbw
+	cmp	al, 'L'
+	je	.al_cl_group
+	cmp	al, 'M'
+	je	.al_cm_group
+	cmp	al, 'W'
+	je	.al_cwd
+	jmp	.al_fail
+.al_call:
 	mov	al, [si + 2]
 	call	to_upper
 	cmp	al, 'L'
@@ -3747,6 +5979,48 @@ assemble_line:
 	jne	.al_fail
 	add	si, 4
 	call	skip_delims
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'F'
+	jne	.al_call_near
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'A'
+	jne	.al_call_near
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'R'
+	jne	.al_call_near
+	add	si, 3
+	call	skip_delims
+	call	parse_mem_operand
+	jnc	.al_call_far_mem
+	call	parse_addr
+	jc	.al_fail
+	mov	byte [es:di], 0x9A
+	mov	[es:di + 1], ax
+	mov	[es:di + 3], dx
+	add	di, 5
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_call_far_mem:
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0xFF
+	inc	di
+	mov	dl, 3
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_call_near:
+	call	parse_reg16_code
+	jnc	.al_call_reg16
+	call	parse_mem_operand
+	jnc	.al_call_mem16
 	call	parse_addr
 	jc	.al_fail
 	cmp	dx, [work_seg]
@@ -3760,57 +6034,183 @@ assemble_line:
 	cmp	byte [si], 0
 	jne	.al_fail
 	jmp	.al_success
-.al_cmp:
+.al_call_mem16:
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0xFF
+	inc	di
+	mov	dl, 2
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_call_reg16:
+	mov	byte [es:di], 0xFF
+	or	al, 0xD0			; mod=11, group /2, r/m=reg
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_cbw:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'W'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_opcode], 0x98
+	jmp	.al_one_byte
+.al_cwd:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'D'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_opcode], 0x99
+	jmp	.al_one_byte
+.al_cl_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'C'
+	je	.al_clc
+	cmp	al, 'D'
+	je	.al_cld
+	cmp	al, 'I'
+	je	.al_cli
+	jmp	.al_fail
+.al_clc:
+	add	si, 3
+	mov	byte [asm_opcode], 0xF8
+	jmp	.al_one_byte
+.al_cld:
+	add	si, 3
+	mov	byte [asm_opcode], 0xFC
+	jmp	.al_one_byte
+.al_cli:
+	add	si, 3
+	mov	byte [asm_opcode], 0xFA
+	jmp	.al_one_byte
+.al_cm_group:
 	mov	al, [si + 1]
 	call	to_upper
 	cmp	al, 'M'
 	jne	.al_fail
 	mov	al, [si + 2]
 	call	to_upper
+	cmp	al, 'C'
+	je	.al_cmc
 	cmp	al, 'P'
 	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'S'
+	je	.al_cmps
 	add	si, 3
-	call	skip_delims
-	call	parse_accumulator
-	jc	.al_fail
-	mov	[asm_accum_kind], al
-	call	skip_delims
-	call	parse_hex_word
-	jc	.al_fail
-	cmp	byte [asm_accum_kind], 0
-	je	.al_cmp_al
-	mov	byte [es:di], 0x3D
-	mov	[es:di + 1], ax
-	add	di, 3
-	jmp	.al_accum_done
-.al_cmp_al:
-	cmp	ah, 0
+	mov	byte [asm_alu_group], 7
+	mov	byte [asm_alu_reg_op], 0x38
+	mov	byte [asm_alu_acc_op], 0x3C
+	jmp	.al_alu_common
+.al_cmc:
+	add	si, 3
+	mov	byte [asm_opcode], 0xF5
+	jmp	.al_one_byte
+.al_cmps:
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'B'
+	je	.al_cmpsb
+	cmp	al, 'W'
 	jne	.al_fail
-	mov	byte [es:di], 0x3C
-	mov	[es:di + 1], al
-	add	di, 2
-.al_accum_done:
-	call	skip_delims
-	cmp	byte [si], 0
-	jne	.al_fail
-	jmp	.al_success
+	add	si, 5
+	mov	byte [asm_opcode], 0xA7
+	jmp	.al_one_byte
+.al_cmpsb:
+	add	si, 5
+	mov	byte [asm_opcode], 0xA6
+	jmp	.al_one_byte
 
 .al_mov:
 	mov	al, [si + 1]
 	call	to_upper
+	cmp	al, 'U'
+	je	.al_mul
 	cmp	al, 'O'
 	jne	.al_fail
 	mov	al, [si + 2]
 	call	to_upper
 	cmp	al, 'V'
 	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'S'
+	je	.al_movs
 	add	si, 3
 	call	skip_delims
 	call	parse_gp_reg
+	jnc	.al_mov_dest_gp
+	call	parse_seg_reg_code
+	jnc	.al_mov_dest_seg
+	call	parse_mem_operand
 	jc	.al_fail
+	jmp	.al_mov_dest_mem
+.al_mov_dest_seg:
+	cmp	al, 1
+	je	.al_fail
+	mov	[asm_seg_code], al
+	call	skip_delims
+	call	parse_reg16_code
+	jnc	.al_mov_seg_reg
+	call	parse_mem_operand
+	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0x8E
+	inc	di
+	mov	dl, [asm_seg_code]
+	call	.emit_mem_modrm
+	jmp	.al_mov_done
+.al_mov_seg_reg:
+	mov	byte [es:di], 0x8E
+	mov	dl, [asm_seg_code]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, 0xC0
+	or	dl, al
+	mov	[es:di + 1], dl
+	add	di, 2
+	jmp	.al_mov_done
+.al_mov_dest_gp:
 	mov	[asm_reg_code], al
 	mov	[asm_reg_width], ah
 	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_mov_imm
+	cmp	ah, [asm_reg_width]
+	jne	.al_fail
+	mov	[asm_src_code], al
+	call	.emit_mov_reg_reg
+	jmp	.al_mov_done
+.al_mov_imm:
+	call	parse_mem_operand
+	jnc	.al_mov_gp_mem
+	cmp	byte [asm_reg_width], 16
+	jne	.al_mov_imm_parse
+	call	parse_seg_reg_code
+	jc	.al_mov_imm_parse
+	mov	byte [es:di], 0x8C
+	mov	dl, al
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, 0xC0
+	or	dl, [asm_reg_code]
+	mov	[es:di + 1], dl
+	add	di, 2
+	jmp	.al_mov_done
+.al_mov_imm_parse:
 	call	parse_hex_word
 	jc	.al_fail
 	cmp	byte [asm_reg_width], 8
@@ -3829,11 +6229,112 @@ assemble_line:
 	mov	[es:di], dl
 	mov	[es:di + 1], ax
 	add	di, 3
+	jmp	.al_mov_done
+.al_mov_gp_mem:
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_mov_gp_mem_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_mov_gp_mem_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_mov_gp_mem8
+	mov	byte [es:di], 0x8B
+	jmp	.al_mov_gp_mem_emit
+.al_mov_gp_mem8:
+	mov	byte [es:di], 0x8A
+.al_mov_gp_mem_emit:
+	inc	di
+	mov	dl, [asm_reg_code]
+	call	.emit_mem_modrm
+	jmp	.al_mov_done
+.al_mov_dest_mem:
+	call	skip_delims
+	call	parse_gp_reg
+	jnc	.al_mov_mem_reg
+	call	parse_seg_reg_code
+	jnc	.al_mov_mem_seg
+	call	parse_hex_word
+	jc	.al_fail
+	mov	[asm_imm_word], ax
+	cmp	byte [asm_mem_width], 8
+	je	.al_mov_mem_imm8
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+	mov	byte [es:di], 0xC7
+	inc	di
+	xor	dl, dl
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], ax
+	add	di, 2
+	jmp	.al_mov_done
+.al_mov_mem_imm8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0xC6
+	inc	di
+	xor	dl, dl
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], al
+	inc	di
+	jmp	.al_mov_done
+.al_mov_mem_reg:
+	mov	[asm_src_code], al
+	mov	[asm_reg_width], ah
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_mov_mem_reg_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_mov_mem_reg_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_mov_mem_reg8
+	mov	byte [es:di], 0x89
+	jmp	.al_mov_mem_reg_emit
+.al_mov_mem_reg8:
+	mov	byte [es:di], 0x88
+.al_mov_mem_reg_emit:
+	inc	di
+	mov	dl, [asm_src_code]
+	call	.emit_mem_modrm
+	jmp	.al_mov_done
+.al_mov_mem_seg:
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	[asm_seg_code], al
+	mov	byte [es:di], 0x8C
+	inc	di
+	mov	dl, [asm_seg_code]
+	call	.emit_mem_modrm
 .al_mov_done:
 	call	skip_delims
 	cmp	byte [si], 0
 	jne	.al_fail
 	jmp	.al_success
+.al_movs:
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'B'
+	je	.al_movsb
+	cmp	al, 'W'
+	jne	.al_fail
+	add	si, 5
+	mov	byte [asm_opcode], 0xA5
+	jmp	.al_one_byte
+.al_movsb:
+	add	si, 5
+	mov	byte [asm_opcode], 0xA4
+	jmp	.al_one_byte
+.al_mul:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_alu_group], 4
+	jmp	.emit_unary_reg
 
 .al_push_pop:
 	mov	al, [si + 1]
@@ -3852,10 +6353,41 @@ assemble_line:
 	call	to_upper
 	cmp	al, 'H'
 	jne	.al_fail
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'F'
+	je	.al_pushf
 	add	si, 4
 	call	skip_delims
 	call	parse_reg16_code
+	jnc	.al_push_reg16
+	call	parse_seg_reg_code
+	jnc	.al_push_seg
+	call	parse_mem_operand
 	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0xFF
+	inc	di
+	mov	dl, 6
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_push_seg:
+	mov	dl, al
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	add	dl, 0x06
+	mov	[es:di], dl
+	inc	di
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_push_reg16:
 	add	al, 0x50
 	mov	[es:di], al
 	inc	di
@@ -3863,15 +6395,52 @@ assemble_line:
 	cmp	byte [si], 0
 	jne	.al_fail
 	jmp	.al_success
+.al_pushf:
+	add	si, 5
+	mov	byte [asm_opcode], 0x9C
+	jmp	.al_one_byte
 .al_pop:
 	mov	al, [si + 2]
 	call	to_upper
 	cmp	al, 'P'
 	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'F'
+	je	.al_popf
 	add	si, 3
 	call	skip_delims
 	call	parse_reg16_code
+	jnc	.al_pop_reg16
+	call	parse_seg_reg_code
+	jnc	.al_pop_seg
+	call	parse_mem_operand
 	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.al_fail
+	mov	byte [es:di], 0x8F
+	inc	di
+	xor	dl, dl
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_pop_seg:
+	cmp	al, 1
+	je	.al_fail
+	mov	dl, al
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	add	dl, 0x07
+	mov	[es:di], dl
+	inc	di
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_pop_reg16:
 	add	al, 0x58
 	mov	[es:di], al
 	inc	di
@@ -3879,78 +6448,1160 @@ assemble_line:
 	cmp	byte [si], 0
 	jne	.al_fail
 	jmp	.al_success
+.al_popf:
+	add	si, 4
+	mov	byte [asm_opcode], 0x9D
+	jmp	.al_one_byte
 
 .al_add:
 	mov	al, [si + 1]
 	call	to_upper
+	cmp	al, 'A'
+	je	.al_aaa_aas
 	cmp	al, 'D'
+	je	.al_add_or_adc
+	cmp	al, 'N'
+	je	.al_and
+	jmp	.al_fail
+.al_aaa_aas:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'A'
+	je	.al_aaa
+	cmp	al, 'D'
+	je	.al_aad
+	cmp	al, 'M'
+	je	.al_aam
+	cmp	al, 'S'
 	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_opcode], 0x3F
+	jmp	.al_one_byte
+.al_aaa:
+	add	si, 3
+	mov	byte [asm_opcode], 0x37
+	jmp	.al_one_byte
+.al_aad:
+	add	si, 3
+	mov	byte [es:di], 0xD5
+	mov	al, 0x0A			; default base 10
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.al_aad_emit
+	call	parse_hex_byte
+	jc	.al_fail
+.al_aad_emit:
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_aam:
+	add	si, 3
+	mov	byte [es:di], 0xD4
+	mov	al, 0x0A			; default base 10
+	call	skip_delims
+	cmp	byte [si], 0
+	je	.al_aam_emit
+	call	parse_hex_byte
+	jc	.al_fail
+.al_aam_emit:
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_add_or_adc:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'D'
+	je	.al_add_emit
+	cmp	al, 'C'
+	je	.al_adc_emit
+	jmp	.al_fail
+.al_add_emit:
+	add	si, 3
+	mov	byte [asm_alu_group], 0
+	mov	byte [asm_alu_reg_op], 0x00
+	mov	byte [asm_alu_acc_op], 0x04
+	jmp	.al_alu_common
+.al_adc_emit:
+	add	si, 3
+	mov	byte [asm_alu_group], 2
+	mov	byte [asm_alu_reg_op], 0x10
+	mov	byte [asm_alu_acc_op], 0x14
+	jmp	.al_alu_common
+.al_and:
 	mov	al, [si + 2]
 	call	to_upper
 	cmp	al, 'D'
 	jne	.al_fail
 	add	si, 3
-	call	skip_delims
-	call	parse_accumulator
-	jc	.al_fail
-	mov	[asm_accum_kind], al
-	call	skip_delims
-	call	parse_hex_word
-	jc	.al_fail
-	cmp	byte [asm_accum_kind], 0
-	je	.al_add_al
-	mov	byte [es:di], 0x05
-	mov	[es:di + 1], ax
-	add	di, 3
-	jmp	.al_add_done
-.al_add_al:
-	cmp	ah, 0
-	jne	.al_fail
-	mov	byte [es:di], 0x04
-	mov	[es:di + 1], al
-	add	di, 2
-.al_add_done:
-	call	skip_delims
-	cmp	byte [si], 0
-	jne	.al_fail
-	jmp	.al_success
+	mov	byte [asm_alu_group], 4
+	mov	byte [asm_alu_reg_op], 0x20
+	mov	byte [asm_alu_acc_op], 0x24
+	jmp	.al_alu_common
 
 .al_s_group:
 	mov	al, [si + 1]
 	call	to_upper
+	cmp	al, 'A'
+	je	.al_sa_group
+	cmp	al, 'C'
+	je	.al_sc_group
+	cmp	al, 'H'
+	je	.al_sh_group
+	cmp	al, 'T'
+	je	.al_st_group
 	cmp	al, 'U'
 	je	.al_sub
+	cmp	al, 'B'
+	je	.al_sbb
 	jmp	.al_fail
+.al_sa_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'H'
+	je	.al_sahf
+	cmp	al, 'L'
+	je	.al_sal
+	cmp	al, 'R'
+	je	.al_sar
+	jmp	.al_fail
+.al_sahf:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'F'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0x9E
+	jmp	.al_one_byte
+.al_sal:
+	add	si, 3
+	mov	byte [asm_alu_group], 4
+	jmp	.al_shift_common
+.al_sar:
+	add	si, 3
+	mov	byte [asm_alu_group], 7
+	jmp	.al_shift_common
+.al_sc_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'A'
+	je	.al_scas
+	jmp	.al_fail
+.al_scas:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_fail
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'B'
+	je	.al_scasb
+	cmp	al, 'W'
+	jne	.al_fail
+	add	si, 5
+	mov	byte [asm_opcode], 0xAF
+	jmp	.al_one_byte
+.al_scasb:
+	add	si, 5
+	mov	byte [asm_opcode], 0xAE
+	jmp	.al_one_byte
+.al_sh_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'L'
+	je	.al_shl
+	cmp	al, 'R'
+	je	.al_shr
+	jmp	.al_fail
+.al_shl:
+	add	si, 3
+	mov	byte [asm_alu_group], 4
+	jmp	.al_shift_common
+.al_shr:
+	add	si, 3
+	mov	byte [asm_alu_group], 5
+	jmp	.al_shift_common
+.al_st_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'C'
+	je	.al_stc
+	cmp	al, 'D'
+	je	.al_std
+	cmp	al, 'I'
+	je	.al_sti
+	cmp	al, 'O'
+	je	.al_stos
+	jmp	.al_fail
+.al_stc:
+	add	si, 3
+	mov	byte [asm_opcode], 0xF9
+	jmp	.al_one_byte
+.al_std:
+	add	si, 3
+	mov	byte [asm_opcode], 0xFD
+	jmp	.al_one_byte
+.al_sti:
+	add	si, 3
+	mov	byte [asm_opcode], 0xFB
+	jmp	.al_one_byte
+.al_stos:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_fail
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'B'
+	je	.al_stosb
+	cmp	al, 'W'
+	jne	.al_fail
+	add	si, 5
+	mov	byte [asm_opcode], 0xAB
+	jmp	.al_one_byte
+.al_stosb:
+	add	si, 5
+	mov	byte [asm_opcode], 0xAA
+	jmp	.al_one_byte
 .al_sub:
 	mov	al, [si + 2]
 	call	to_upper
 	cmp	al, 'B'
 	jne	.al_fail
 	add	si, 3
+	mov	byte [asm_alu_group], 5
+	mov	byte [asm_alu_reg_op], 0x28
+	mov	byte [asm_alu_acc_op], 0x2C
+	jmp	.al_alu_common
+.al_sbb:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'B'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_alu_group], 3
+	mov	byte [asm_alu_reg_op], 0x18
+	mov	byte [asm_alu_acc_op], 0x1C
+	jmp	.al_alu_common
+
+.al_or:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'R'
+	je	.al_or_emit
+	cmp	al, 'U'
+	je	.al_out
+	jmp	.al_fail
+.al_or_emit:
+	add	si, 2
+	mov	byte [asm_alu_group], 1
+	mov	byte [asm_alu_reg_op], 0x08
+	mov	byte [asm_alu_acc_op], 0x0C
+	jmp	.al_alu_common
+.al_out:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.al_fail
+	add	si, 3
+	call	skip_delims
+	call	parse_reg16_code
+	jnc	.al_out_dx
+	call	parse_hex_byte
+	jc	.al_fail
+	mov	[asm_opcode], al
 	call	skip_delims
 	call	parse_accumulator
 	jc	.al_fail
-	mov	[asm_accum_kind], al
-	call	skip_delims
-	call	parse_hex_word
-	jc	.al_fail
-	cmp	byte [asm_accum_kind], 0
-	je	.al_sub_al
-	mov	byte [es:di], 0x2D
-	mov	[es:di + 1], ax
-	add	di, 3
-	jmp	.al_sub_done
-.al_sub_al:
-	cmp	ah, 0
-	jne	.al_fail
-	mov	byte [es:di], 0x2C
+	cmp	al, 0
+	je	.al_out_imm_al
+	mov	byte [es:di], 0xE7
+	jmp	.al_out_imm_store
+.al_out_imm_al:
+	mov	byte [es:di], 0xE6
+.al_out_imm_store:
+	mov	al, [asm_opcode]
 	mov	[es:di + 1], al
 	add	di, 2
-.al_sub_done:
 	call	skip_delims
 	cmp	byte [si], 0
 	jne	.al_fail
 	jmp	.al_success
+.al_out_dx:
+	cmp	al, 2
+	jne	.al_fail
+	call	skip_delims
+	call	parse_accumulator
+	jc	.al_fail
+	cmp	al, 0
+	je	.al_out_dx_al
+	mov	byte [asm_opcode], 0xEF
+	jmp	.al_one_byte
+.al_out_dx_al:
+	mov	byte [asm_opcode], 0xEE
+	jmp	.al_one_byte
+
+.al_xor:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'C'
+	je	.al_xchg
+	cmp	al, 'L'
+	je	.al_xlat
+	cmp	al, 'O'
+	jne	.al_fail
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'R'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_alu_group], 6
+	mov	byte [asm_alu_reg_op], 0x30
+	mov	byte [asm_alu_acc_op], 0x34
+	jmp	.al_alu_common
+.al_xchg:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'H'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'G'
+	jne	.al_fail
+	add	si, 4
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_xchg_mem_dest
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	call	skip_delims
+	call	parse_gp_reg
+	jnc	.al_xchg_reg_reg
+	call	parse_mem_operand
+	jc	.al_fail
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_xchg_reg_mem_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_xchg_reg_mem_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_xchg_reg_mem8
+	mov	byte [es:di], 0x87
+	jmp	.al_xchg_reg_mem_emit
+.al_xchg_reg_mem8:
+	mov	byte [es:di], 0x86
+.al_xchg_reg_mem_emit:
+	inc	di
+	mov	dl, [asm_reg_code]
+	call	.emit_mem_modrm
+	jmp	.al_xchg_done
+.al_xchg_reg_reg:
+	cmp	ah, [asm_reg_width]
+	jne	.al_fail
+	mov	[asm_src_code], al
+	cmp	byte [asm_reg_width], 8
+	je	.al_xchg8
+	mov	byte [es:di], 0x87
+	jmp	.al_xchg_modrm
+.al_xchg8:
+	mov	byte [es:di], 0x86
+.al_xchg_modrm:
+	mov	dl, [asm_src_code]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	add	di, 2
+.al_xchg_done:
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_xchg_mem_dest:
+	call	parse_mem_operand
+	jc	.al_fail
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_fail
+	mov	[asm_src_code], al
+	mov	[asm_reg_width], ah
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_xchg_mem_reg_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_xchg_mem_reg_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_xchg_mem_reg8
+	mov	byte [es:di], 0x87
+	jmp	.al_xchg_mem_reg_emit
+.al_xchg_mem_reg8:
+	mov	byte [es:di], 0x86
+.al_xchg_mem_reg_emit:
+	inc	di
+	mov	dl, [asm_src_code]
+	call	.emit_mem_modrm
+	jmp	.al_xchg_done
+.al_xlat:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'A'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0xD7
+	jmp	.al_one_byte
+
+.al_h_group:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.al_fail
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_opcode], 0xF4
+	jmp	.al_one_byte
+
+.al_l_group:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'A'
+	je	.al_lahf
+	cmp	al, 'D'
+	je	.al_lds
+	cmp	al, 'E'
+	je	.al_le_group
+	cmp	al, 'O'
+	je	.al_lo_group
+	jmp	.al_fail
+.al_lahf:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'H'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'F'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0x9F
+	jmp	.al_one_byte
+.al_le_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'A'
+	je	.al_lea
+	cmp	al, 'S'
+	je	.al_les
+	jmp	.al_fail
+.al_lea:
+	add	si, 3
+	mov	byte [asm_opcode], 0x8D
+	jmp	.al_load_ptr_common
+.al_lds:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_fail
+	add	si, 3
+	mov	byte [asm_opcode], 0xC5
+	jmp	.al_load_ptr_common
+.al_les:
+	add	si, 3
+	mov	byte [asm_opcode], 0xC4
+.al_load_ptr_common:
+	call	skip_delims
+	call	parse_reg16_code
+	jc	.al_fail
+	mov	[asm_reg_code], al
+	call	skip_delims
+	call	parse_mem_operand
+	jc	.al_fail
+	mov	al, [asm_opcode]
+	mov	[es:di], al
+	inc	di
+	mov	dl, [asm_reg_code]
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_lo_group:
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'C'
+	je	.al_lock
+	cmp	al, 'D'
+	je	.al_lods
+	cmp	al, 'O'
+	je	.al_loop_group
+	jmp	.al_fail
+.al_lock:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'K'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0xF0
+	jmp	.al_emit_prefix_then_redispatch
+.al_lods:
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_fail
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'B'
+	je	.al_lodsb
+	cmp	al, 'W'
+	jne	.al_fail
+	add	si, 5
+	mov	byte [asm_opcode], 0xAD
+	jmp	.al_one_byte
+.al_lodsb:
+	add	si, 5
+	mov	byte [asm_opcode], 0xAC
+	jmp	.al_one_byte
+.al_loop_group:
+	mov	al, [si + 4]
+	call	to_upper
+	cmp	al, 'N'
+	je	.al_loopne
+	cmp	al, 'E'
+	je	.al_loope
+	cmp	al, 'Z'
+	je	.al_loopz
+	add	si, 4
+	mov	byte [asm_opcode], 0xE2
+	jmp	.al_emit_rel8
+.al_loopne:
+	mov	al, [si + 5]
+	call	to_upper
+	cmp	al, 'E'
+	je	.al_loopne6
+	cmp	al, 'Z'
+	je	.al_loopne6
+	jmp	.al_fail
+.al_loopne6:
+	add	si, 6
+	mov	byte [asm_opcode], 0xE0
+	jmp	.al_emit_rel8
+.al_loope:
+	add	si, 5
+	mov	byte [asm_opcode], 0xE1
+	jmp	.al_emit_rel8
+.al_loopz:
+	add	si, 5
+	mov	byte [asm_opcode], 0xE1
+	jmp	.al_emit_rel8
+
+.al_t_group:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'E'
+	jne	.al_fail
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.al_fail
+	add	si, 4
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_test_mem_dest
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_test_try_mem
+	cmp	ah, [asm_reg_width]
+	jne	.al_fail
+	mov	[asm_src_code], al
+	call	.emit_test_reg_reg
+	jmp	.al_test_done
+.al_test_try_mem:
+	call	parse_mem_operand
+	jnc	.al_test_reg_mem
+.al_test_imm:
+	call	parse_hex_word
+	jc	.al_fail
+	call	.emit_test_reg_imm
+	jmp	.al_test_done
+.al_test_reg_mem:
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_test_reg_mem_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_test_reg_mem_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_test_reg_mem8
+	mov	byte [es:di], 0x85
+	jmp	.al_test_reg_mem_emit
+.al_test_reg_mem8:
+	mov	byte [es:di], 0x84
+.al_test_reg_mem_emit:
+	inc	di
+	mov	dl, [asm_reg_code]
+	call	.emit_mem_modrm
+	jmp	.al_test_done
+.al_test_mem_dest:
+	call	parse_mem_operand
+	jc	.al_fail
+	call	skip_delims
+	call	parse_gp_reg
+	jnc	.al_test_mem_reg
+	call	parse_hex_word
+	jc	.al_fail
+	mov	[asm_imm_word], ax
+	cmp	byte [asm_mem_width], 8
+	je	.al_test_mem_imm8
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+	mov	byte [es:di], 0xF7
+	inc	di
+	xor	dl, dl
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], ax
+	add	di, 2
+	jmp	.al_test_done
+.al_test_mem_imm8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0xF6
+	inc	di
+	xor	dl, dl
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], al
+	inc	di
+	jmp	.al_test_done
+.al_test_mem_reg:
+	mov	[asm_src_code], al
+	mov	[asm_reg_width], ah
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_test_mem_reg_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_test_mem_reg_width_ok:
+	cmp	byte [asm_reg_width], 8
+	je	.al_test_mem_reg8
+	mov	byte [es:di], 0x85
+	jmp	.al_test_mem_reg_emit
+.al_test_mem_reg8:
+	mov	byte [es:di], 0x84
+.al_test_mem_reg_emit:
+	inc	di
+	mov	dl, [asm_src_code]
+	call	.emit_mem_modrm
+.al_test_done:
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.al_wait:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'A'
+	jne	.al_fail
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'I'
+	jne	.al_fail
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.al_fail
+	add	si, 4
+	mov	byte [asm_opcode], 0x9B
+	jmp	.al_one_byte
+
+.al_alu_common:
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.al_alu_dest_mem
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	call	skip_delims
+	call	parse_gp_reg
+	jnc	.al_alu_reg_reg
+	call	parse_mem_operand
+	jnc	.al_alu_reg_mem
+	call	parse_hex_word
+	jc	.al_fail
+	call	.emit_alu_reg_imm
+	jmp	.al_alu_done
+.al_alu_reg_reg:
+	cmp	ah, [asm_reg_width]
+	jne	.al_fail
+	mov	[asm_src_code], al
+	call	.emit_alu_reg_reg
+	jmp	.al_alu_done
+.al_alu_reg_mem:
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_alu_reg_mem_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_alu_reg_mem_width_ok:
+	mov	dl, [asm_alu_reg_op]
+	add	dl, 2
+	cmp	byte [asm_reg_width], 8
+	je	.al_alu_reg_mem_opcode
+	inc	dl
+.al_alu_reg_mem_opcode:
+	mov	[es:di], dl
+	inc	di
+	mov	dl, [asm_reg_code]
+	call	.emit_mem_modrm
+	jmp	.al_alu_done
+
+.al_alu_dest_mem:
+	call	parse_mem_operand
+	jc	.al_fail
+	call	skip_delims
+	call	parse_gp_reg
+	jnc	.al_alu_mem_reg
+	call	parse_hex_word
+	jc	.al_fail
+	mov	[asm_imm_word], ax
+	cmp	byte [asm_mem_width], 8
+	je	.al_alu_mem_imm8
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+	mov	byte [es:di], 0x81
+	inc	di
+	mov	dl, [asm_alu_group]
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], ax
+	add	di, 2
+	jmp	.al_alu_done
+.al_alu_mem_imm8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0x80
+	inc	di
+	mov	dl, [asm_alu_group]
+	call	.emit_mem_modrm
+	mov	ax, [asm_imm_word]
+	mov	[es:di], al
+	inc	di
+	jmp	.al_alu_done
+.al_alu_mem_reg:
+	mov	[asm_src_code], al
+	mov	[asm_reg_width], ah
+	mov	al, [asm_mem_width]
+	or	al, al
+	jz	.al_alu_mem_reg_width_ok
+	cmp	al, [asm_reg_width]
+	jne	.al_fail
+.al_alu_mem_reg_width_ok:
+	mov	dl, [asm_alu_reg_op]
+	cmp	byte [asm_reg_width], 8
+	je	.al_alu_mem_reg_opcode
+	inc	dl
+.al_alu_mem_reg_opcode:
+	mov	[es:di], dl
+	inc	di
+	mov	dl, [asm_src_code]
+	call	.emit_mem_modrm
+.al_alu_done:
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.al_inc_dec_common:
+	call	parse_gp_reg
+	jc	.al_inc_dec_mem
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	cmp	ah, 8
+	je	.al_inc_dec8
+	mov	dl, [asm_reg_code]
+	cmp	byte [asm_alu_group], 0
+	je	.al_inc16
+	add	dl, 0x48
+	jmp	.al_incdec16_emit
+.al_inc16:
+	add	dl, 0x40
+.al_incdec16_emit:
+	mov	[es:di], dl
+	inc	di
+	jmp	.al_inc_dec_done
+.al_inc_dec8:
+	mov	byte [es:di], 0xFE
+	mov	dl, [asm_reg_code]
+	or	dl, 0xC0
+	cmp	byte [asm_alu_group], 0
+	je	.al_incdec8_emit
+	or	dl, 0x08
+.al_incdec8_emit:
+	mov	[es:di + 1], dl
+	add	di, 2
+.al_inc_dec_done:
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.al_inc_dec_mem:
+	call	parse_mem_operand
+	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.al_inc_dec_mem8
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+	mov	byte [es:di], 0xFF
+	jmp	.al_inc_dec_mem_group
+.al_inc_dec_mem8:
+	mov	byte [es:di], 0xFE
+.al_inc_dec_mem_group:
+	inc	di
+	mov	dl, [asm_alu_group]
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.emit_mov_reg_reg:
+	mov	dl, 0x88
+	cmp	byte [asm_reg_width], 8
+	je	.emrr_opcode
+	inc	dl
+.emrr_opcode:
+	mov	[es:di], dl
+	mov	dl, [asm_src_code]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	add	di, 2
+	ret
+
+.emit_alu_reg_reg:
+	mov	dl, [asm_alu_reg_op]
+	cmp	byte [asm_reg_width], 8
+	je	.earr_opcode
+	inc	dl
+.earr_opcode:
+	mov	[es:di], dl
+	mov	dl, [asm_src_code]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	add	di, 2
+	ret
+
+.emit_alu_reg_imm:
+	cmp	byte [asm_reg_code], 0
+	jne	.eari_general
+	cmp	byte [asm_reg_width], 8
+	je	.eari_acc8
+	mov	dl, [asm_alu_acc_op]
+	inc	dl
+	mov	[es:di], dl
+	mov	[es:di + 1], ax
+	add	di, 3
+	ret
+.eari_acc8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	dl, [asm_alu_acc_op]
+	mov	[es:di], dl
+	mov	[es:di + 1], al
+	add	di, 2
+	ret
+.eari_general:
+	cmp	byte [asm_reg_width], 8
+	je	.eari_general8
+	mov	byte [es:di], 0x81
+	mov	dl, [asm_alu_group]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	mov	[es:di + 2], ax
+	add	di, 4
+	ret
+.eari_general8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0x80
+	mov	dl, [asm_alu_group]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	mov	[es:di + 2], al
+	add	di, 3
+	ret
+
+.al_one_byte:
+	mov	al, [asm_opcode]
+	mov	[es:di], al
+	inc	di
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.al_emit_rel8:
+	call	skip_delims
+	call	parse_addr
+	jc	.al_fail
+	cmp	dx, [work_seg]
+	jne	.al_fail
+	sub	ax, di
+	sub	ax, 2
+	cmp	ax, 0x0080
+	jb	.aer_ok
+	cmp	ax, 0xFF80
+	jb	.al_fail
+.aer_ok:
+	mov	dl, [asm_opcode]
+	mov	[es:di], dl
+	mov	[es:di + 1], al
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.emit_unary_reg:
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.eur_mem
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	cmp	ah, 8
+	je	.eur8
+	mov	byte [es:di], 0xF7
+	jmp	.eur_modrm
+.eur8:
+	mov	byte [es:di], 0xF6
+.eur_modrm:
+	mov	dl, [asm_alu_group]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, 0xC0
+	or	dl, [asm_reg_code]
+	mov	[es:di + 1], dl
+	add	di, 2
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+.eur_mem:
+	call	parse_mem_operand
+	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.eur_mem8
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+	mov	byte [es:di], 0xF7
+	jmp	.eur_mem_modrm
+.eur_mem8:
+	mov	byte [es:di], 0xF6
+.eur_mem_modrm:
+	inc	di
+	mov	dl, [asm_alu_group]
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.al_shift_common:
+	call	skip_delims
+	call	parse_gp_reg
+	jc	.asc_mem
+	mov	[asm_reg_code], al
+	mov	[asm_reg_width], ah
+	mov	byte [asm_mem_width], ah
+	mov	byte [asm_mem_mod], 3
+	mov	byte [asm_mem_disp_size], 0
+	mov	al, [asm_reg_code]
+	mov	[asm_mem_rm], al
+	jmp	.asc_have_operand
+.asc_mem:
+	call	parse_mem_operand
+	jc	.al_fail
+	cmp	byte [asm_mem_width], 8
+	je	.asc_have_operand
+	cmp	byte [asm_mem_width], 16
+	jne	.al_fail
+.asc_have_operand:
+	call	skip_delims
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'C'
+	jne	.asc_imm
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'L'
+	jne	.asc_imm
+	add	si, 2
+	cmp	byte [asm_reg_width], 8
+	je	.asc_cl8
+	mov	byte [es:di], 0xD3
+	jmp	.asc_emit
+.asc_cl8:
+	mov	byte [es:di], 0xD2
+	jmp	.asc_emit
+.asc_imm:
+	call	parse_hex_byte
+	jc	.al_fail
+	cmp	al, 1
+	jne	.al_fail
+	cmp	byte [asm_reg_width], 8
+	je	.asc_one8
+	mov	byte [es:di], 0xD1
+	jmp	.asc_emit
+.asc_one8:
+	mov	byte [es:di], 0xD0
+.asc_emit:
+	mov	dl, [asm_alu_group]
+	inc	di
+	call	.emit_mem_modrm
+	call	skip_delims
+	cmp	byte [si], 0
+	jne	.al_fail
+	jmp	.al_success
+
+.emit_test_reg_reg:
+	cmp	byte [asm_reg_width], 8
+	je	.etrr8
+	mov	byte [es:di], 0x85
+	jmp	.etrr_modrm
+.etrr8:
+	mov	byte [es:di], 0x84
+.etrr_modrm:
+	mov	dl, [asm_src_code]
+	shl	dl, 1
+	shl	dl, 1
+	shl	dl, 1
+	or	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	add	di, 2
+	ret
+
+.emit_test_reg_imm:
+	cmp	byte [asm_reg_code], 0
+	jne	.etri_general
+	cmp	byte [asm_reg_width], 8
+	je	.etri_al
+	mov	byte [es:di], 0xA9
+	mov	[es:di + 1], ax
+	add	di, 3
+	ret
+.etri_al:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0xA8
+	mov	[es:di + 1], al
+	add	di, 2
+	ret
+.etri_general:
+	cmp	byte [asm_reg_width], 8
+	je	.etri_general8
+	mov	byte [es:di], 0xF7
+	mov	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	mov	[es:di + 2], ax
+	add	di, 4
+	ret
+.etri_general8:
+	cmp	ah, 0
+	jne	.al_fail
+	mov	byte [es:di], 0xF6
+	mov	dl, [asm_reg_code]
+	or	dl, 0xC0
+	mov	[es:di + 1], dl
+	mov	[es:di + 2], al
+	add	di, 3
+	ret
+
+.emit_mem_modrm:
+	cmp	byte [asm_seg_override], 0
+	je	.emm_no_prefix
+	; Insert segment-override prefix before the just-emitted opcode at di-1.
+	; All 8086 opcodes that take a memory operand are single-byte, so we
+	; shift one byte forward to make room for the prefix.
+	push	ax
+	dec	di
+	mov	al, [es:di]
+	push	ax			; save opcode
+	mov	al, [asm_seg_override]
+	mov	[es:di], al		; write prefix at original opcode position
+	inc	di
+	pop	ax
+	mov	[es:di], al		; rewrite opcode after prefix
+	inc	di
+	mov	byte [asm_seg_override], 0
+	pop	ax
+.emm_no_prefix:
+	mov	al, [asm_mem_mod]
+	shl	al, 1
+	shl	al, 1
+	shl	al, 1
+	shl	al, 1
+	shl	al, 1
+	shl	al, 1
+	mov	ah, dl
+	shl	ah, 1
+	shl	ah, 1
+	shl	ah, 1
+	or	al, ah
+	or	al, [asm_mem_rm]
+	mov	[es:di], al
+	inc	di
+	cmp	byte [asm_mem_disp_size], 0
+	je	.emm_done
+	mov	ax, [asm_mem_disp]
+	cmp	byte [asm_mem_disp_size], 1
+	jne	.emm_disp16
+	mov	[es:di], al
+	inc	di
+	ret
+.emm_disp16:
+	mov	[es:di], ax
+	add	di, 2
+.emm_done:
+	ret
 
 .al_success:
 	mov	[work_start], di
@@ -3999,6 +7650,280 @@ parse_gp_reg:
 	clc
 	ret
 .pgr_fail:
+	stc
+	ret
+
+parse_mem_operand:
+	push	bx
+	push	cx
+	push	dx
+	push	di
+	push	si
+	mov	byte [asm_mem_width], 0
+	mov	byte [asm_ea_mask], 0
+	mov	byte [asm_ea_seen], 0
+	mov	word [asm_mem_disp], 0
+	mov	byte [asm_seg_override], 0
+
+	call	skip_spaces
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'B'
+	je	.pmo_maybe_byte
+	cmp	al, 'W'
+	je	.pmo_maybe_word
+	jmp	.pmo_after_size
+.pmo_maybe_byte:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'Y'
+	jne	.pmo_after_size
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.pmo_after_size
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'E'
+	jne	.pmo_after_size
+	add	si, 4
+	mov	byte [asm_mem_width], 8
+	jmp	.pmo_after_size_word
+.pmo_maybe_word:
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'O'
+	jne	.pmo_after_size
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'R'
+	jne	.pmo_after_size
+	mov	al, [si + 3]
+	call	to_upper
+	cmp	al, 'D'
+	jne	.pmo_after_size
+	add	si, 4
+	mov	byte [asm_mem_width], 16
+.pmo_after_size_word:
+	call	skip_spaces
+	mov	al, [si]
+	call	to_upper
+	cmp	al, 'P'
+	jne	.pmo_after_size
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'T'
+	jne	.pmo_after_size
+	mov	al, [si + 2]
+	call	to_upper
+	cmp	al, 'R'
+	jne	.pmo_after_size
+	add	si, 3
+
+.pmo_after_size:
+	call	skip_spaces
+	; Check for optional segment-override prefix: ES:/CS:/SS:/DS:
+	mov	al, [si + 2]
+	cmp	al, ':'
+	jne	.pmo_no_seg_ovr
+	mov	al, [si]
+	call	to_upper
+	mov	dl, al
+	mov	al, [si + 1]
+	call	to_upper
+	cmp	al, 'S'
+	jne	.pmo_no_seg_ovr
+	cmp	dl, 'E'
+	je	.pmo_seg_es
+	cmp	dl, 'C'
+	je	.pmo_seg_cs
+	cmp	dl, 'S'
+	je	.pmo_seg_ss
+	cmp	dl, 'D'
+	je	.pmo_seg_ds
+	jmp	.pmo_no_seg_ovr
+.pmo_seg_es:
+	mov	byte [asm_seg_override], 0x26
+	jmp	.pmo_seg_consume
+.pmo_seg_cs:
+	mov	byte [asm_seg_override], 0x2E
+	jmp	.pmo_seg_consume
+.pmo_seg_ss:
+	mov	byte [asm_seg_override], 0x36
+	jmp	.pmo_seg_consume
+.pmo_seg_ds:
+	mov	byte [asm_seg_override], 0x3E
+.pmo_seg_consume:
+	add	si, 3
+	call	skip_spaces
+.pmo_no_seg_ovr:
+	cmp	byte [si], '['
+	jne	.pmo_fail
+	inc	si
+
+.pmo_loop:
+	call	skip_spaces
+	mov	byte [asm_ea_sign], 0
+	cmp	byte [si], '+'
+	je	.pmo_plus
+	cmp	byte [si], '-'
+	je	.pmo_minus
+	jmp	.pmo_term
+.pmo_plus:
+	inc	si
+	jmp	.pmo_term
+.pmo_minus:
+	inc	si
+	mov	byte [asm_ea_sign], 1
+.pmo_term:
+	call	skip_spaces
+	call	parse_reg16_code
+	jnc	.pmo_reg
+	call	parse_hex_word
+	jc	.pmo_fail
+	cmp	byte [asm_ea_sign], 0
+	je	.pmo_disp_add
+	neg	ax
+.pmo_disp_add:
+	add	[asm_mem_disp], ax
+	mov	byte [asm_ea_seen], 1
+	jmp	.pmo_after_term
+
+.pmo_reg:
+	cmp	byte [asm_ea_sign], 0
+	jne	.pmo_fail
+	cmp	al, 3			; BX
+	je	.pmo_reg_bx
+	cmp	al, 5			; BP
+	je	.pmo_reg_bp
+	cmp	al, 6			; SI
+	je	.pmo_reg_si
+	cmp	al, 7			; DI
+	je	.pmo_reg_di
+	jmp	.pmo_fail
+.pmo_reg_bx:
+	mov	dl, 1
+	jmp	.pmo_or_mask
+.pmo_reg_bp:
+	mov	dl, 2
+	jmp	.pmo_or_mask
+.pmo_reg_si:
+	mov	dl, 4
+	jmp	.pmo_or_mask
+.pmo_reg_di:
+	mov	dl, 8
+.pmo_or_mask:
+	mov	al, [asm_ea_mask]
+	test	al, dl
+	jnz	.pmo_fail
+	or	al, dl
+	mov	[asm_ea_mask], al
+	mov	byte [asm_ea_seen], 1
+
+.pmo_after_term:
+	call	skip_spaces
+	cmp	byte [si], ']'
+	je	.pmo_done_terms
+	cmp	byte [si], '+'
+	je	.pmo_loop
+	cmp	byte [si], '-'
+	je	.pmo_loop
+	jmp	.pmo_fail
+
+.pmo_done_terms:
+	inc	si
+	cmp	byte [asm_ea_seen], 0
+	je	.pmo_fail
+	mov	al, [asm_ea_mask]
+	or	al, al
+	jz	.pmo_direct
+	cmp	al, 5			; BX+SI
+	je	.pmo_rm0
+	cmp	al, 9			; BX+DI
+	je	.pmo_rm1
+	cmp	al, 6			; BP+SI
+	je	.pmo_rm2
+	cmp	al, 10			; BP+DI
+	je	.pmo_rm3
+	cmp	al, 4			; SI
+	je	.pmo_rm4
+	cmp	al, 8			; DI
+	je	.pmo_rm5
+	cmp	al, 2			; BP
+	je	.pmo_rm6_bp
+	cmp	al, 1			; BX
+	je	.pmo_rm7
+	jmp	.pmo_fail
+.pmo_rm0:
+	mov	byte [asm_mem_rm], 0
+	jmp	.pmo_choose_mod
+.pmo_rm1:
+	mov	byte [asm_mem_rm], 1
+	jmp	.pmo_choose_mod
+.pmo_rm2:
+	mov	byte [asm_mem_rm], 2
+	jmp	.pmo_choose_mod
+.pmo_rm3:
+	mov	byte [asm_mem_rm], 3
+	jmp	.pmo_choose_mod
+.pmo_rm4:
+	mov	byte [asm_mem_rm], 4
+	jmp	.pmo_choose_mod
+.pmo_rm5:
+	mov	byte [asm_mem_rm], 5
+	jmp	.pmo_choose_mod
+.pmo_rm6_bp:
+	mov	byte [asm_mem_rm], 6
+	jmp	.pmo_choose_mod
+.pmo_rm7:
+	mov	byte [asm_mem_rm], 7
+
+.pmo_choose_mod:
+	mov	ax, [asm_mem_disp]
+	or	ax, ax
+	jne	.pmo_has_disp
+	cmp	byte [asm_mem_rm], 6
+	je	.pmo_bp_zero_disp
+	mov	byte [asm_mem_mod], 0
+	mov	byte [asm_mem_disp_size], 0
+	jmp	.pmo_success
+.pmo_bp_zero_disp:
+	mov	byte [asm_mem_mod], 1
+	mov	byte [asm_mem_disp_size], 1
+	jmp	.pmo_success
+.pmo_has_disp:
+	cmp	ax, 0x0080
+	jb	.pmo_disp8
+	cmp	ax, 0xFF80
+	jae	.pmo_disp8
+	mov	byte [asm_mem_mod], 2
+	mov	byte [asm_mem_disp_size], 2
+	jmp	.pmo_success
+.pmo_disp8:
+	mov	byte [asm_mem_mod], 1
+	mov	byte [asm_mem_disp_size], 1
+	jmp	.pmo_success
+
+.pmo_direct:
+	mov	byte [asm_mem_rm], 6
+	mov	byte [asm_mem_mod], 0
+	mov	byte [asm_mem_disp_size], 2
+	jmp	.pmo_success
+
+.pmo_success:
+	pop	ax
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
+	clc
+	ret
+.pmo_fail:
+	pop	si
+	pop	di
+	pop	dx
+	pop	cx
+	pop	bx
 	stc
 	ret
 
@@ -4164,6 +8089,57 @@ parse_reg8_code:
 	stc
 	ret
 
+parse_seg_reg_code:
+	; Reject if 3rd char is ':' — that's a segment-override prefix, not a
+	; segment register operand (e.g., "ES:[BX]" must fall through to
+	; parse_mem_operand).
+	cmp	byte [si + 2], ':'
+	je	.psr_fail
+	mov	al, [si]
+	call	to_upper
+	mov	dl, al
+	mov	al, [si + 1]
+	call	to_upper
+	mov	dh, al
+	cmp	dl, 'E'
+	jne	.psr_c
+	cmp	dh, 'S'
+	jne	.psr_fail
+	add	si, 2
+	xor	al, al
+	clc
+	ret
+.psr_c:
+	cmp	dl, 'C'
+	jne	.psr_s
+	cmp	dh, 'S'
+	jne	.psr_fail
+	add	si, 2
+	mov	al, 1
+	clc
+	ret
+.psr_s:
+	cmp	dl, 'S'
+	jne	.psr_d
+	cmp	dh, 'S'
+	jne	.psr_fail
+	add	si, 2
+	mov	al, 2
+	clc
+	ret
+.psr_d:
+	cmp	dl, 'D'
+	jne	.psr_fail
+	cmp	dh, 'S'
+	jne	.psr_fail
+	add	si, 2
+	mov	al, 3
+	clc
+	ret
+.psr_fail:
+	stc
+	ret
+
 print_reg16_name:
 	and	al, 7
 	cmp	al, 0
@@ -4244,6 +8220,26 @@ print_reg8_name:
 	mov	si, str_dh
 	jmp	print_str
 
+print_seg_reg_name:
+	and	al, 3
+	cmp	al, 0
+	je	.psrn_es
+	cmp	al, 1
+	je	.psrn_cs
+	cmp	al, 2
+	je	.psrn_ss
+	mov	si, str_ds
+	jmp	print_str
+.psrn_es:
+	mov	si, str_es
+	jmp	print_str
+.psrn_cs:
+	mov	si, str_cs
+	jmp	print_str
+.psrn_ss:
+	mov	si, str_ss
+	jmp	print_str
+
 ; ============================================================================
 ; Messages
 ; ============================================================================
@@ -4252,27 +8248,27 @@ msg_banner	db	0x0D, 0x0A
 		db	'Type ? for help.', 0x0D, 0x0A, 0
 
 msg_help	db	0x0D, 0x0A
-		db	'A addr ...           Assemble (limited set)', 0x0D, 0x0A
+		db	'A addr ...           Assemble', 0x0D, 0x0A
 		db	'BP addr             Set breakpoint', 0x0D, 0x0A
 		db	'BL                  List breakpoints', 0x0D, 0x0A
 		db	'BC n | *            Clear breakpoint n (or all)', 0x0D, 0x0A
-		db	'C start end dest    Compare memory', 0x0D, 0x0A
-		db	'D [addr] [end]      Dump memory', 0x0D, 0x0A
+		db	'C start end|L n dst Compare memory', 0x0D, 0x0A
+		db	'D [addr [end|L n]]  Dump memory', 0x0D, 0x0A
 		db	'E addr bytes...     Enter hex bytes', 0x0D, 0x0A
-		db	'F start end byte    Fill range', 0x0D, 0x0A
+		db	'F start end|L n byt Fill range', 0x0D, 0x0A
 		db	'G [addr]            Go', 0x0D, 0x0A
 		db	'H value1 value2     Hex add/subtract', 0x0D, 0x0A
 		db	'I port              Read byte from port', 0x0D, 0x0A
 		db	'L [file [args]]     Load file (EXE aware)', 0x0D, 0x0A
-		db	'M start end dest    Move range', 0x0D, 0x0A
+		db	'M start end|L n dst Move range', 0x0D, 0x0A
 		db	'N file [args]       Set file name and target args', 0x0D, 0x0A
 		db	'O port byte         Write byte to port', 0x0D, 0x0A
 		db	'P [addr]            Proceed', 0x0D, 0x0A
-		db	'S start end bytes   Search byte pattern', 0x0D, 0x0A
+		db	'S start end|L n byt Search byte pattern', 0x0D, 0x0A
 		db	'R [reg [value]]     Show/edit target registers', 0x0D, 0x0A
 		db	'R F                 Edit flags (OV/NV DN/UP ...)', 0x0D, 0x0A
 		db	'T [addr]            Trace', 0x0D, 0x0A
-		db	'U [addr] [count]    Unassemble', 0x0D, 0x0A
+		db	'U [addr [end|L n]]  Unassemble', 0x0D, 0x0A
 		db	'W [addr [len]]      Write bytes to current file', 0x0D, 0x0A
 		db	'Q                   Quit', 0x0D, 0x0A
 		db	'Hex only. Use SEG:OFF for explicit segments.', 0x0D, 0x0A, 0
@@ -4328,11 +8324,98 @@ str_call	db	'CALL ', 0
 str_call_far	db	'CALL FAR ', 0
 str_jz		db	'JZ ', 0
 str_jnz		db	'JNZ ', 0
+str_jo		db	'JO ', 0
+str_jno		db	'JNO ', 0
+str_jb		db	'JB ', 0
+str_jae		db	'JAE ', 0
+str_jbe		db	'JBE ', 0
+str_ja		db	'JA ', 0
+str_js		db	'JS ', 0
+str_jns		db	'JNS ', 0
+str_jp		db	'JP ', 0
+str_jnp		db	'JNP ', 0
+str_jl		db	'JL ', 0
+str_jge		db	'JGE ', 0
+str_jle		db	'JLE ', 0
+str_jg		db	'JG ', 0
+str_jcxz	db	'JCXZ ', 0
+str_loop	db	'LOOP ', 0
+str_loope	db	'LOOPE ', 0
+str_loopne	db	'LOOPNE ', 0
 str_mov		db	'MOV ', 0
 str_push	db	'PUSH ', 0
 str_pop		db	'POP ', 0
 str_inc		db	'INC ', 0
 str_dec		db	'DEC ', 0
+str_add		db	'ADD ', 0
+str_or		db	'OR ', 0
+str_adc		db	'ADC ', 0
+str_sbb		db	'SBB ', 0
+str_and		db	'AND ', 0
+str_sub		db	'SUB ', 0
+str_xor		db	'XOR ', 0
+str_cmp		db	'CMP ', 0
+str_test	db	'TEST ', 0
+str_xchg	db	'XCHG ', 0
+str_not		db	'NOT ', 0
+str_neg		db	'NEG ', 0
+str_mul		db	'MUL ', 0
+str_imul	db	'IMUL ', 0
+str_div		db	'DIV ', 0
+str_idiv	db	'IDIV ', 0
+str_lea		db	'LEA ', 0
+str_lds		db	'LDS ', 0
+str_les		db	'LES ', 0
+str_rol		db	'ROL ', 0
+str_ror		db	'ROR ', 0
+str_rcl		db	'RCL ', 0
+str_rcr		db	'RCR ', 0
+str_shl		db	'SHL ', 0
+str_shr		db	'SHR ', 0
+str_sar		db	'SAR ', 0
+str_byte	db	'BYTE ', 0
+str_word	db	'WORD ', 0
+str_in		db	'IN ', 0
+str_out		db	'OUT ', 0
+str_ret_sp	db	'RET ', 0
+str_retf_sp	db	'RETF ', 0
+str_aaa		db	'AAA', 0
+str_aas		db	'AAS', 0
+str_aad		db	'AAD ', 0
+str_aam		db	'AAM ', 0
+str_cbw		db	'CBW', 0
+str_cwd		db	'CWD', 0
+str_daa		db	'DAA', 0
+str_das		db	'DAS', 0
+str_wait	db	'WAIT', 0
+str_pushf	db	'PUSHF', 0
+str_popf	db	'POPF', 0
+str_sahf	db	'SAHF', 0
+str_lahf	db	'LAHF', 0
+str_into	db	'INTO', 0
+str_lock	db	'LOCK', 0
+str_rep		db	'REP', 0
+str_repne	db	'REPNE', 0
+str_hlt		db	'HLT', 0
+str_cmc		db	'CMC', 0
+str_clc		db	'CLC', 0
+str_stc		db	'STC', 0
+str_cli		db	'CLI', 0
+str_sti		db	'STI', 0
+str_cld		db	'CLD', 0
+str_std		db	'STD', 0
+str_xlat	db	'XLAT', 0
+str_xchg_ax	db	'XCHG AX,', 0
+str_movsb	db	'MOVSB', 0
+str_movsw	db	'MOVSW', 0
+str_cmpsb	db	'CMPSB', 0
+str_cmpsw	db	'CMPSW', 0
+str_stosb	db	'STOSB', 0
+str_stosw	db	'STOSW', 0
+str_lodsb	db	'LODSB', 0
+str_lodsw	db	'LODSW', 0
+str_scasb	db	'SCASB', 0
+str_scasw	db	'SCASW', 0
 str_add_ax	db	'ADD AX,', 0
 str_add_al	db	'ADD AL,', 0
 str_sub_ax	db	'SUB AX,', 0
@@ -4356,6 +8439,10 @@ str_ah		db	'AH', 0
 str_bh		db	'BH', 0
 str_ch		db	'CH', 0
 str_dh		db	'DH', 0
+str_es		db	'ES', 0
+str_cs		db	'CS', 0
+str_ss		db	'SS', 0
+str_ds		db	'DS', 0
 
 ; ============================================================================
 ; Data
@@ -4409,6 +8496,7 @@ compare_dst_byte	db	0
 math_left	dw	0
 math_right	dw	0
 reg_ptr		dw	0
+reg_name_ptr	dw	0
 reg_size	db	0		; 1 = byte register, 2 = word register
 
 file_name_set	db	0
@@ -4439,6 +8527,26 @@ opcode_byte	db	0
 asm_accum_kind	db	0
 asm_reg_code	db	0
 asm_reg_width	db	0
+asm_src_code	db	0
+asm_alu_group	db	0
+asm_alu_reg_op	db	0
+asm_alu_acc_op	db	0
+asm_opcode	db	0
+asm_seg_code	db	0
+asm_modrm	db	0
+asm_instr_len	db	0
+asm_mem_width	db	0
+asm_mem_mod	db	0
+asm_mem_rm	db	0
+asm_mem_disp_size	db	0
+asm_mem_disp	dw	0
+asm_ea_mask	db	0
+asm_ea_seen	db	0
+asm_ea_sign	db	0
+asm_imm_word	dw	0
+asm_seg_override db	0		; 0 or 0x26/0x2E/0x36/0x3E (segment override prefix byte)
+disasm_seg_override db	0	; 0 or 0x26/0x2E/0x36/0x3E (active prefix during U)
+disasm_rep_prefix db	0	; 0 or 0xF0/0xF2/0xF3 (active LOCK/REPNE/REP during U)
 
 ; Temp breakpoint state for P (proceed/step-over)
 temp_break_active	db	0
