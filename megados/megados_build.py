@@ -78,6 +78,13 @@ if shell_data is None:
 # Optional utilities
 nasm_assemble('test.asm', 'TEST.COM')
 nasm_assemble('fread.asm', 'FREAD.COM')
+nasm_assemble('a1test.asm', 'A1TEST.COM')
+nasm_assemble('trc21.asm', 'TRC21.COM')
+nasm_assemble('trc.asm', 'TRC.COM')
+nasm_assemble('trcdump.asm', 'TRCDUMP.COM')
+nasm_assemble('trc10.asm', 'TRC10.COM')
+nasm_assemble('trc10d.asm', 'TRC10D.COM')
+nasm_assemble('ansitest.asm', 'ANSITEST.COM')
 nasm_assemble('fwrite.asm', 'FWRITE.COM')
 nasm_assemble('sysinfo.asm', 'SYSINFO.COM')
 nasm_assemble('dirtest.asm', 'DIRTEST.COM')
@@ -105,6 +112,7 @@ nasm_assemble('tree.asm', 'TREE.COM')
 nasm_assemble('mem.asm', 'MEM.COM')
 nasm_assemble('debug.asm', 'DEBUG.COM')
 nasm_assemble('doskey.asm', 'DOSKEY.COM')
+nasm_assemble('ansi.asm', 'ANSI.SYS')
 nasm_assemble('testdrv.asm', 'TESTDRV.SYS')
 nasm_assemble('beep.asm', 'BEEP.COM')
 nasm_assemble('more.asm', 'MORE.COM')
@@ -145,6 +153,19 @@ for fname in ['GWBASIC.EXE', 'AUTOEXEC.BAT', 'TESTBAT.BAT', 'TESTBAT2.BAT', 'REA
     dst = os.path.join(TARGET_DIR, fname)
     if os.path.exists(src):
         shutil.copy2(src, dst)
+
+# Auto-copy any .BAS files from src/ to target/ (for ad-hoc test programs).
+# Normalize to DOS line endings (\r\n) and append Ctrl-Z EOF marker so
+# GW-BASIC's ASCII LOAD parses them correctly.
+for fname in os.listdir(SRC_DIR):
+    if fname.upper().endswith('.BAS'):
+        with open(os.path.join(SRC_DIR, fname), 'rb') as f:
+            data = f.read()
+        data = data.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+        if not data.endswith(b'\x1a'):
+            data += b'\x1a'
+        with open(os.path.join(TARGET_DIR, fname.upper()), 'wb') as f:
+            f.write(data)
 
 # --- Build disk image ---
 print("\nBuilding disk image...")
@@ -467,8 +488,15 @@ root_files = ['EDIT.COM', 'EDLIN.COM', 'MORE.COM', 'DOSKEY.COM',
               'FORMAT.COM', 'CHKDSK.COM', 'SYS.COM', 'LABEL.COM',
               'ATTRIB.COM', 'FIND.COM', 'FC.COM', 'TREE.COM', 'MEM.COM',
               'DEBUG.COM',
-              'TESTDRV.SYS', 'CONFIG.SYS',
-              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT']
+              'ANSI.SYS', 'TESTDRV.SYS', 'CONFIG.SYS',
+              'GWBASIC.EXE', 'AUTOEXEC.BAT', 'README.TXT',
+              'A1TEST.COM', 'TRC21.COM', 'TRC.COM', 'TRCDUMP.COM',
+              'TRC10.COM', 'TRC10D.COM', 'ANSITEST.COM']
+
+# Auto-discover .BAS files in target/ and add to root
+for fname in sorted(os.listdir(TARGET_DIR)):
+    if fname.upper().endswith('.BAS') and fname not in root_files:
+        root_files.append(fname)
 
 # --- Files in TEST subdirectory ---
 test_files = ['TEST.COM', 'FREAD.COM', 'FWRITE.COM', 'SYSINFO.COM',
