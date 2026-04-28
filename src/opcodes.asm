@@ -1229,11 +1229,6 @@ op_nop_unimpl:
         bcc _nop_done           ; FPU: modrm already consumed by decode
         ; 60-6F range (PUSHA/POPA/BOUND/etc) — 1 byte, no extra
         jmp opcode_done
-_nop_skip3:
-        ; Skip 3 operand bytes (ENTER: imm16 + imm8)
-        jsr fetch_byte
-        jsr fetch_byte
-        jsr fetch_byte
 _nop_done:
         jmp opcode_done
 

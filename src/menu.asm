@@ -958,9 +958,6 @@ menu_header:
         .text $93, $05, $0e, $9a, "MegaPC - 8086 PC XT Emulator - 640KB", 13
         .text $9F, "By Scott Hutter - xlar54", 13, 0
 
-hex_tbl:
-        .text "0123456789ABCDEF"
-
 menu_emu_hdr:
         .text 13
         .text $9e,"Emulation Options:", 13
