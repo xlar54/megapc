@@ -762,6 +762,28 @@ cmd_loop:
 	mov	ds, ax
 	mov	es, ax
 
+	; If a disk change happened (drive swap, image replaced) clear the
+	; stored CWD on both drives. Cluster numbers from the old filesystem
+	; would index into different (possibly invalid) directories on the
+	; new one — DIR would show garbage, CD into "the same" subdir would
+	; land somewhere random. Reset to root and clear the path string.
+	cmp	byte [cwd_stale], 0
+	je	.cl_cwd_ok
+	mov	byte [cwd_stale], 0
+	; Active CWD
+	mov	word [cur_dir_cluster], 0
+	mov	byte [cur_dir_pathlen], 0
+	mov	byte [cur_dir_path], 0
+	; Per-drive A
+	mov	word [drv_a_cluster], 0
+	mov	byte [drv_a_pathlen], 0
+	mov	byte [drv_a_path], 0
+	; Per-drive B
+	mov	word [drv_b_cluster], 0
+	mov	byte [drv_b_pathlen], 0
+	mov	byte [drv_b_path], 0
+.cl_cwd_ok:
+
 	; Restore redirected handles if active
 	call	redir_restore
 
@@ -5032,6 +5054,12 @@ ensure_geo:
 	je	.eg_no_invalidate
 	mov	byte [es:0x3E], 0	; Clear flag
 	mov	byte [cs:geo_active_drv], 0xFF ; Force re-read
+	; Either drive may have been swapped or replaced — cluster numbers in
+	; cur_dir_cluster, drv_a_*, drv_b_*, and any open file handles now
+	; reference the OLD filesystem layout. Mark CWD stale so cmd_loop
+	; resets to root on the next prompt iteration. Open file handles
+	; still corrupt silently — that's a textbook user error.
+	mov	byte [cs:cwd_stale], 1
 .eg_no_invalidate:
 	pop	es
 	mov	al, [cs:resolved_drive]
@@ -5314,6 +5342,20 @@ load_drive_bpb:
 .ldb_def_done:
 	mov	al, [resolved_drive]
 	mov	[geo_active_drv], al
+	; Cache to per-drive storage so DPB refresh (AH=52) sees current geom
+	cmp	al, 0
+	je	.ldb_def_cache_a
+	mov	byte [geo_b_loaded], 1
+	mov	di, geo_b_spt
+	jmp	.ldb_def_cache
+.ldb_def_cache_a:
+	mov	byte [geo_a_loaded], 1
+	mov	di, geo_a_spt
+.ldb_def_cache:
+	mov	si, geo_spt
+	mov	cx, 11			; 11 words (spt through bpc)
+	rep	movsw
+	movsb				; 1 byte (media)
 	pop	ds
 	pop	es
 	pop	di
@@ -17373,6 +17415,8 @@ cur_dir_entries: dw	112
 cur_dir_path:	times 65 db 0
 cur_dir_pathlen: db	0
 cur_drive:	db	0		; Current drive (0=A, 1=B)
+cwd_stale:	db	0		; 1 = CWD invalid (disk-change detected),
+					;     cmd_loop will reset to root next iter
 resolved_dir_cluster: dw 0
 resolved_dir_entries: dw 112
 resolved_drive:	db	0		; Drive for resolved path
