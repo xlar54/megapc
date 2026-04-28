@@ -304,6 +304,86 @@ _i13v_dma_cross:
         rts
 
 ; ============================================================================
+; _i13_clamp_count — Clamp disk_sect_left so transfer stays on media
+; ============================================================================
+; Input:  scratch_c:scratch_b = starting LBA (16-bit, computed by caller)
+;         disk_sect_left      = requested sector count (1..255)
+;         i13_cur_spt/heads/cyls = active drive geometry
+; Output: disk_sect_left, i13_count_save = clamped count (may be 0)
+;         i13_partial = 1 if clamp was applied, 0 otherwise
+; Uses:   scratch_a, scratch_d (clobbered)
+;
+; Standard floppy max LBA = SPT × heads × cyls = at most 18×2×80 = 2880,
+; which fits in 16 bits — so a single 16-bit multiply is enough.
+;
+_i13_clamp_count:
+        lda #0
+        sta i13_partial
+
+        ; max_lba = SPT * heads (at most 18*2 = 36, fits in low byte)
+        lda i13_cur_spt
+        sta $D770
+        lda #0
+        sta $D771
+        lda i13_cur_heads
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778
+        sta scratch_d
+        lda $D779
+        sta scratch_a            ; scratch_a:scratch_d = SPT*heads
+
+        ; max_lba = (SPT*heads) * cyls (at most 36*80 = 2880, fits in 16 bits)
+        lda scratch_d
+        sta $D770
+        lda scratch_a
+        sta $D771
+        lda i13_cur_cyls
+        sta $D774
+        lda #0
+        sta $D775
+        lda $D778
+        sta scratch_d            ; max_lba low
+        lda $D779
+        sta scratch_a            ; max_lba high
+
+        ; remaining = max_lba - starting_LBA
+        sec
+        lda scratch_d
+        sbc scratch_b
+        sta scratch_d
+        lda scratch_a
+        sbc scratch_c
+        sta scratch_a            ; scratch_a:scratch_d = remaining sectors
+        bcs _icc_have_remaining
+        ; Borrow set means starting_LBA > max_lba — caller already validated
+        ; CHS in geometry so this shouldn't happen. Treat as 0 remaining.
+        lda #0
+        sta scratch_a
+        sta scratch_d
+_icc_have_remaining:
+
+        ; If high byte of remaining > 0, it's > 255 → no possible clamp
+        ; (disk_sect_left is a single byte, max 255).
+        lda scratch_a
+        bne _icc_no_clamp
+
+        ; remaining fits in low byte. Compare against disk_sect_left.
+        lda scratch_d
+        cmp disk_sect_left
+        bcs _icc_no_clamp        ; remaining >= count, request fits
+
+        ; Clamp count down to remaining
+        lda scratch_d
+        sta disk_sect_left
+        sta i13_count_save
+        lda #1
+        sta i13_partial
+_icc_no_clamp:
+        rts
+
+; ============================================================================
 ; _i13_read — Read sectors from floppy image
 ; ============================================================================
 ; Input:
@@ -419,6 +499,11 @@ _i13_read:
         sta floppy_ofs+1
         lda temp32+2
         sta floppy_ofs+2
+
+        ; Clamp sector count if start LBA + count would run past end-of-media.
+        ; Real BIOS partial-transfers and returns AH=04 + AL=actually-done.
+        ; LBA is in scratch_c:scratch_b from the math above.
+        jsr _i13_clamp_count
 
         ; For each sector:
 _i13_read_loop:
@@ -551,13 +636,26 @@ _i13_read_done:
         sta reg_bx
         lda i13_bx_save_hi
         sta reg_bx+1
-        ; Return success
+        ; If transfer was clamped past end-of-media, report partial:
+        ;   AH=04 (sector not found), CF=1, AL=sectors actually transferred.
+        lda i13_partial
+        bne _i13r_partial
+        ; Full success
         lda #$00
         sta reg_ah
         jsr _i13_set_status
         lda i13_count_save               ; restore original sector count
         sta reg_al              ; AL = sectors actually read
         lda #0
+        sta flag_cf
+        rts
+_i13r_partial:
+        lda #$04
+        sta reg_ah
+        jsr _i13_set_status
+        lda i13_count_save               ; clamped value = sectors actually read
+        sta reg_al
+        lda #1
         sta flag_cf
         rts
 
@@ -646,6 +744,9 @@ _i13_write:
         sta floppy_ofs+1
         lda temp32+2
         sta floppy_ofs+2
+
+        ; Clamp count if request runs past end-of-media (see _i13_read).
+        jsr _i13_clamp_count
 
 _i13_write_loop:
         lda disk_sect_left
@@ -813,12 +914,25 @@ _i13_write_done:
         sta dfg_silent
 _i13w_no_redetect:
 
+        ; Partial transfer (request ran past end of media)?
+        lda i13_partial
+        bne _i13w_partial
+        ; Full success
         lda #$00
         sta reg_ah
         jsr _i13_set_status
         lda i13_count_save
         sta reg_al
         lda #0
+        sta flag_cf
+        rts
+_i13w_partial:
+        lda #$04
+        sta reg_ah
+        jsr _i13_set_status
+        lda i13_count_save               ; clamped value = sectors actually written
+        sta reg_al
+        lda #1
         sta flag_cf
         rts
 

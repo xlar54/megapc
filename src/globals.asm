@@ -292,12 +292,13 @@ io_save_c       = $8FDC
 io_save_d       = $8FDD
 io_int10_char   = $8FDE         ; Scratch char for INT 10h AH=09/0A loops
 
-; --- Disk INT 13h active geometry ($8FE0-$8FE4) ---
+; --- Disk INT 13h active geometry ($8FE0-$8FE5) ---
 i13_cur_spt     = $8FE0
 i13_cur_heads   = $8FE1
 i13_cur_cyls    = $8FE2
 i13_cur_type    = $8FE3
 i13_cur_bank    = $8FE4         ; Attic bank offset ($10=A, $20=B)
+i13_partial     = $8FE5         ; 1 = read/write was clamped past end-of-media
 
 ; --- PC speaker / PIT ($8FE8-$8FEB) ---
 spk_pit_lobyte  = $8FE8         ; PIT divider low byte
