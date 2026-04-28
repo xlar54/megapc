@@ -2829,78 +2829,15 @@ _ii_continue:
 
 _ii_int21:
         ; All INT 21h functions go through DOS via IVT — including AH=06.
-        ;
         ; Real MS-DOS routes AH=06 (direct console I/O) through the CON
-        ; device chain just like AH=02/09/40, which means a loaded
-        ; ANSI.SYS sees AH=06 output and interprets ESC sequences in it.
-        ; Programs like Zork and BBS clients depend on this. The previous
-        ; "fast path" that called con_write_char directly bypassed
-        ; ANSI.SYS, breaking those programs.
+        ; device chain just like AH=02/09/40, so a loaded ANSI.SYS sees
+        ; the output and interprets ESC sequences. The previous fast
+        ; path that called con_write_char directly bypassed ANSI.SYS,
+        ; breaking programs like Zork and BBS clients.
         lda #$21
         jsr do_sw_interrupt
         jsr compute_cs_base
         jmp opcode_done
-
-_ii_int21_ah02:
-        lda reg_dl
-        jsr con_write_char
-        jmp opcode_done
-
-_ii_int21_ah06:
-        lda reg_dl
-        cmp #$FF
-        beq _i21_06_input
-        jsr con_write_char
-        jmp opcode_done
-_i21_06_input:
-        lda #$21
-        jsr do_sw_interrupt
-        jsr compute_cs_base
-        jmp opcode_done
-
-_ii_int21_ah09:
-        ; AH=09: Print $-terminated string at DS:DX
-        jsr cache_flush_all
-        lda reg_dx
-        sta temp32
-        lda reg_dx+1
-        sta temp32+1
-        lda #0
-        sta temp32+2
-        sta temp32+3
-        sta seg_override_en
-        ldx #SEG_DS_OFS
-        jsr seg_ofs_to_linear
-        lda temp32
-        sta str_ptr_lo
-        lda temp32+1
-        sta str_ptr_hi
-        lda temp32+2
-        sta str_ptr_bank
-_i21_09_loop:
-        lda str_ptr_lo
-        sta temp32
-        lda str_ptr_hi
-        sta temp32+1
-        lda str_ptr_bank
-        sta temp32+2
-        lda #0
-        sta temp32+3
-        jsr linear_to_chip
-        ldz #0
-        lda [temp_ptr],z
-        cmp #'$'
-        beq _i21_09_done
-        jsr con_write_char
-        inc str_ptr_lo
-        bne _i21_09_loop
-        inc str_ptr_hi
-        bne _i21_09_loop
-        inc str_ptr_bank
-        bra _i21_09_loop
-_i21_09_done:
-        jmp opcode_done
-
 
 _ii_int13:
         ; INT 13h — disk services (intercepted)
