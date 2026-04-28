@@ -807,19 +807,3 @@ opcode_jump_tbl:
         .word op_enter          ; $3C — ENTER imm16, imm8 (C8)
         .word op_leave          ; $3D — LEAVE (C9)
 
-debug_print_hex:
-        pha
-        lsr
-        lsr
-        lsr
-        lsr
-        jsr _dph_nib
-        pla
-        and #$0F
-_dph_nib:
-        cmp #$0A
-        bcc +
-        adc #$06               ; adjust for A-F (carry is set from cmp)
-+       adc #$30               ; '0'
-        jmp CHROUT
-
